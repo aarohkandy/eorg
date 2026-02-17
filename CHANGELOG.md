@@ -1,5 +1,110 @@
 # Changelog
 
+## v0.3.0 - 2026-02-17
+
+- Stabilized interaction model for production use (reduced jitter, improved observer behavior, reliable list rendering).
+- Added full app-shell UX improvements (left nav, settings control, thread view consistency).
+- Improved navigation flow reliability and removed default forced hard navigations to prevent leave-confirm popups.
+
+
+## v0.2.22 - 2026-02-17
+
+- Removed forced full-page navigations from normal sidebar/back flows to avoid browser `beforeunload` leave prompts.
+- Switched mailbox/back actions to SPA-safe Gmail navigation (`hash` + native mailbox click) with rerender retries.
+- Kept hard navigation as an opt-in emergency fallback (`allowHardNavigation = false` by default).
+
+
+## v0.2.21 - 2026-02-17
+
+- Centered left sidebar mailbox options vertically within the sidebar column.
+- Added bottom `Settings` button in the sidebar.
+- Wired settings button to trigger native Gmail settings control when available.
+
+
+## v0.2.20 - 2026-02-17
+
+- Fixed disappearing-list regression: moved list clear after signature dedupe guard in `renderList`.
+- Prevents blank panel when observer triggers unchanged list renders.
+
+
+## v0.2.19 - 2026-02-17
+
+- Fixed button jitter by locking UI updates briefly during clicks (sidebar, message open, back).
+- Mutation observer now ignores reskin-root self-mutations and pauses during interaction lock.
+- Added list signature dedupe to skip redundant DOM rebuilds when message set has not changed.
+
+
+## v0.2.18 - 2026-02-17
+
+- Fixed Back to inbox: action now always targets `#inbox` (not last mailbox hash).
+- Added robust Gmail route URL builder for account-aware navigation (`/mail/u/<n>/`).
+- Hard navigation now uses `location.replace` with `assign` fallback plus post-nav hash safety check.
+
+
+## v0.2.17 - 2026-02-17
+
+- Fixed Back to inbox by switching to deterministic hard-route navigation (same reliability path as sidebar folder switches).
+- Back action now sets pending mailbox state before navigation to keep overlay/list sync stable after reload.
+
+
+## v0.2.16 - 2026-02-17
+
+- Enforced strict mailbox content rendering (Sent/Drafts/etc. no longer falls back to inbox rows).
+- Sidebar folder switches now use deterministic full-route navigation for reliability.
+- Removed broad extraction fallback so empty folders correctly display empty state.
+- Shifted app shell fully left/fullscreen (no centered outer gap).
+
+
+## v0.2.15 - 2026-02-17
+
+- Added reliability-first mailbox navigation: target Gmail native sidebar links by folder label on click.
+- Added hard-route fallback navigation when Gmail does not switch mailbox after sidebar action.
+- Wired sidebar items with native label metadata for deterministic folder targeting.
+
+
+## v0.2.14 - 2026-02-17
+
+- Reliability refactor: removed strict mailbox-link filtering that caused intermittent empty lists.
+- Added pending-route loading gate so sidebar switches wait for Gmail to land before rendering.
+- Added multi-pass rerender retries and timeout guard to avoid permanent blank states.
+- Expanded row thread-id fallback link detection to include `th=` and generic anchors.
+
+
+## v0.2.13 - 2026-02-17
+
+- Hotfix: restored message visibility by adding Gmail `th=` link selectors to extraction paths.
+- Relaxed row-level mailbox filtering when rows lack mailbox-qualified hrefs.
+- Expanded row link detection to include generic and `th=` anchors.
+
+
+## v0.2.12 - 2026-02-17
+
+- Fixed mailbox matching for Gmail query-based thread links (`th=` + `search=`), not just hash links.
+- Added resilient extraction fallback when strict mailbox filtering returns zero messages.
+- Prevented blank list state on inbox/folder loads caused by route format differences.
+
+
+## v0.2.11 - 2026-02-17
+
+- Fixed mailbox switching data scope: message extraction is now filtered to the active sidebar mailbox route.
+- Strengthened route switching by attempting native mailbox link click plus hash fallback.
+- Added short loading state and delayed rerenders after sidebar navigation to avoid stale inbox rows.
+
+
+## v0.2.10 - 2026-02-17
+
+- Fixed sidebar switching by removing brittle hidden-DOM click-through logic.
+- Folder switches now use sanitized hash route navigation plus immediate list render refresh.
+- Removed forced list-lock on sidebar clicks to prevent state desync/breakage.
+
+
+## v0.2.9 - 2026-02-17
+
+- Added a custom left sidebar with mailbox navigation (Inbox, Starred, Snoozed, Sent, Drafts, All Mail, Spam, Trash).
+- Implemented active mailbox highlighting and route-synced navigation from the sidebar.
+- Upgraded layout to a polished shell with sidebar + main content panel across list and thread views.
+
+
 ## v0.2.8 - 2026-02-17
 
 - Thread reader now renders actual Gmail email HTML instead of flattened plain text.
