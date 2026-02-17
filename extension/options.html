@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Eorg Mail Settings</title>
+    <style>
+      :root {
+        --bg-app: #0f1115;
+        --bg-elev-1: #151922;
+        --bg-elev-2: #1b2130;
+        --text-primary: #f5f7fb;
+        --text-secondary: #b8c0d4;
+        --border-subtle: #2a3142;
+        --accent: #4da3ff;
+        --accent-hover: #73b8ff;
+        --focus: rgba(77, 163, 255, 0.5);
+        --danger: #ff6b6b;
+        --success: #39c27a;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: radial-gradient(1100px 700px at 80% -10%, #1b2944 0%, var(--bg-app) 55%);
+        color: var(--text-primary);
+      }
+
+      .wrap {
+        width: min(900px, 94vw);
+        margin: 28px auto;
+        padding: 22px;
+        border: 1px solid var(--border-subtle);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(21,25,34,0.95), rgba(16,20,29,0.95));
+        box-shadow: 0 18px 44px rgba(0,0,0,0.42);
+      }
+
+      h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
+      .sub { margin: 0 0 18px; color: var(--text-secondary); }
+      form { display: grid; gap: 16px; }
+
+      .card {
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        background: var(--bg-elev-1);
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+      @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+      label { display: grid; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+      input, select {
+        height: 38px;
+        border-radius: 10px;
+        border: 1px solid var(--border-subtle);
+        background: var(--bg-elev-2);
+        color: var(--text-primary);
+        padding: 0 12px;
+        font-size: 14px;
+      }
+      input:focus, select:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
+
+      .check { display: flex; gap: 10px; align-items: flex-start; color: var(--text-secondary); font-size: 13px; }
+      .check input { width: 16px; height: 16px; margin-top: 2px; }
+
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      button {
+        height: 36px;
+        padding: 0 14px;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #041423;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { background: var(--accent-hover); }
+      button.secondary {
+        background: transparent;
+        border-color: var(--border-subtle);
+        color: var(--text-primary);
+      }
+
+      .status { min-height: 20px; color: var(--success); font-size: 13px; }
+      .status.error { color: var(--danger); }
+      .foot { font-size: 12px; color: var(--text-secondary); }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Eorg Mail</h1>
+      <p class="sub">Private-by-default Gmail UI + AI settings. v1 has no ads.</p>
+
+      <form id="settings-form">
+        <section class="card">
+          <div class="grid">
+            <label>Provider
+              <select id="provider"></select>
+            </label>
+            <label>Model
+              <input id="model" type="text" placeholder="gpt-4o-mini" />
+            </label>
+          </div>
+
+          <label>Base URL
+            <input id="base-url" type="url" placeholder="https://api.openai.com/v1" />
+          </label>
+
+          <label>API key
+            <input id="api-key" type="password" placeholder="Paste key (leave blank to keep existing)" />
+          </label>
+
+          <div class="check">
+            <input id="preserve-key" type="checkbox" checked />
+            <label for="preserve-key">Keep stored key when API key field is blank</label>
+          </div>
+
+          <div class="actions">
+            <button id="test-connection" type="button" class="secondary">Test connection</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="check">
+            <input id="indexing-consent" type="checkbox" />
+            <label for="indexing-consent">I consent to local indexing of Gmail content for AI features.</label>
+          </div>
+          <div class="check">
+            <input id="indexing-enabled" type="checkbox" />
+            <label for="indexing-enabled">Enable indexing after consent (recommended)</label>
+          </div>
+          <div class="check">
+            <input id="safe-mode" type="checkbox" />
+            <label for="safe-mode">Safe mode (disable DOM mutations and keep only minimal skin)</label>
+          </div>
+        </section>
+
+        <div class="actions">
+          <button id="save" type="submit">Save settings</button>
+        </div>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+        <p class="foot">API keys are stored only in <code>chrome.storage.local</code>. No extension backend.</p>
+      </form>
+    </main>
+
+    <script src="settings.js"></script>
+  </body>
+</html>
