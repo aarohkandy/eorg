@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.7 - 2026-02-17
+
+- Fixed inbox regression from over-strict folder filtering in v0.3.6.
+- Inbox now uses lenient capture of visible rows/links; non-inbox folders remain strict.
+- Restored normal inbox rendering while keeping cross-folder bleed protection for Sent/Drafts/etc.
+
+
+## v0.3.6 - 2026-02-17
+
+- Enforced strict folder matching for list extraction based on active mailbox hash.
+- Sent/Drafts/etc. now only render messages whose thread links match that mailbox route.
+- Removed cross-folder row bleed that showed inbox-style items under other folders.
+
+
+## v0.3.5 - 2026-02-17
+
+- Rebuilt left sidebar navigation on top of v0.3.0 baseline (Inbox/Starred/Snoozed/Sent/Drafts/All Mail/Spam/Trash).
+- Added deterministic folder switching via hash + native Gmail nav click with loading state and rerender retries.
+- Restored stable button behavior using interaction lock, observer external-mutation filtering, and list signature dedupe.
+- Moved app shell to fullscreen left layout with sidebar + main panel.
+
+
 ## v0.3.0 - 2026-02-17
 
 - Stabilized interaction model for production use (reduced jitter, improved observer behavior, reliable list rendering).

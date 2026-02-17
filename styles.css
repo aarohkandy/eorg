@@ -19,26 +19,86 @@ body[data-reskin-mode="viewer"] {
   pointer-events: auto !important;
   position: fixed !important;
   inset: 0 !important;
-  display: grid !important;
-  place-items: center !important;
+  display: block !important;
   z-index: 2147483647 !important;
   color: #ffffff !important;
 }
 
 #reskin-root > * {
-  position: relative !important;
-  width: min(62vw, 760px) !important;
+  width: 100vw !important;
+  height: 100vh !important;
 }
 
-/* Hide top bar; keep only centered list cards. */
-#reskin-root .rv-header {
-  display: none !important;
+#reskin-root .rv-shell {
+  display: grid !important;
+  grid-template-columns: 230px 1fr !important;
+  height: 100% !important;
+  border-radius: 0 !important;
+  overflow: hidden !important;
+  background: #0a0a0a !important;
+}
+
+#reskin-root .rv-sidebar {
+  background: #0d0d0d !important;
+  border-right: 1px solid #1f1f1f !important;
+  padding: 18px 12px !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+#reskin-root .rv-brand {
+  font-size: 18px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+  color: #f3f3f3 !important;
+  padding: 6px 10px 14px !important;
+}
+
+#reskin-root .rv-nav-wrap {
+  flex: 1 !important;
+  display: flex !important;
+  align-items: center !important;
+}
+
+#reskin-root .rv-nav {
+  display: grid !important;
+  gap: 6px !important;
+  width: 100% !important;
+}
+
+#reskin-root .rv-nav-item {
+  width: 100% !important;
+  text-align: left !important;
+  border: none !important;
+  border-radius: 10px !important;
+  padding: 10px 12px !important;
+  background: transparent !important;
+  color: #b8b8b8 !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: background 120ms ease, color 120ms ease !important;
+}
+
+#reskin-root .rv-nav-item:hover {
+  background: #1a1a1a !important;
+  color: #f5f5f5 !important;
+}
+
+#reskin-root .rv-nav-item.is-active {
+  background: #f2f2f2 !important;
+  color: #0c0c0c !important;
+}
+
+#reskin-root .rv-main {
+  padding: 12px !important;
+  overflow: hidden !important;
 }
 
 /* Parsed email list rendering area with controlled internal scrolling. */
 #reskin-root .rv-list {
-  padding: 0 0 0 !important;
-  height: min(82vh, 840px) !important;
+  height: 100% !important;
   overflow-y: auto !important;
   overflow-x: hidden !important;
   overscroll-behavior: contain !important;
@@ -188,10 +248,41 @@ body[data-reskin-mode="viewer"] {
 
 @media (max-width: 1100px) {
   #reskin-root > * {
-    width: 92vw !important;
+    width: 100vw !important;
+    height: 100vh !important;
   }
 
-  #reskin-root .rv-list {
-    height: 88vh !important;
+  #reskin-root .rv-shell {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto 1fr !important;
+  }
+
+  #reskin-root .rv-sidebar {
+    border-right: none !important;
+    border-bottom: 1px solid #1f1f1f !important;
+    padding: 10px !important;
+  }
+
+  #reskin-root .rv-brand {
+    padding: 4px 6px 8px !important;
+    font-size: 14px !important;
+  }
+
+  #reskin-root .rv-nav-wrap {
+    flex: initial !important;
+    display: block !important;
+  }
+
+  #reskin-root .rv-nav {
+    display: flex !important;
+    gap: 6px !important;
+    overflow-x: auto !important;
+    padding-bottom: 4px !important;
+  }
+
+  #reskin-root .rv-nav-item {
+    white-space: nowrap !important;
+    padding: 8px 10px !important;
+    font-size: 12px !important;
   }
 }

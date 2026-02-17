@@ -37,6 +37,16 @@
     'a[href*="#label/"]',
     'a[href*="#sent/"]'
   ];
+  const NAV_ITEMS = [
+    { label: "Inbox", hash: "#inbox", nativeLabel: "Inbox" },
+    { label: "Starred", hash: "#starred", nativeLabel: "Starred" },
+    { label: "Snoozed", hash: "#snoozed", nativeLabel: "Snoozed" },
+    { label: "Sent", hash: "#sent", nativeLabel: "Sent" },
+    { label: "Drafts", hash: "#drafts", nativeLabel: "Drafts" },
+    { label: "All Mail", hash: "#all", nativeLabel: "All Mail" },
+    { label: "Spam", hash: "#spam", nativeLabel: "Spam" },
+    { label: "Trash", hash: "#trash", nativeLabel: "Trash" }
+  ];
 
   const NOISE_TEXT = new Set([
     "starred",
@@ -55,6 +65,8 @@
     observer: null,
     debounceTimer: null,
     isApplying: false,
+    interactionLockUntil: 0,
+    lastListSignature: "",
     currentView: "list",
     activeThreadId: "",
     lockListView: false,
@@ -85,6 +97,14 @@
     state.loggedOnce.add(key);
     if (level === "warn") logWarn(message, extra);
     else logInfo(message, extra);
+  }
+
+  function lockInteractions(ms = 900) {
+    state.interactionLockUntil = Date.now() + ms;
+  }
+
+  function interactionsLocked() {
+    return Date.now() < state.interactionLockUntil;
   }
 
   function normalize(text) {
@@ -172,15 +192,78 @@
     return "#inbox";
   }
 
-  function navigateToList(targetHash) {
+  function clickNativeMailboxLink(nativeLabel) {
+    const escaped = nativeLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^${escaped}(\\b|\\s|,)`, "i");
+    const candidates = [
+      ...Array.from(document.querySelectorAll(`a[aria-label^="${nativeLabel}"]`)),
+      ...Array.from(document.querySelectorAll(`a[title^="${nativeLabel}"]`)),
+      ...Array.from(document.querySelectorAll("a[role='link']")),
+      ...Array.from(document.querySelectorAll("a"))
+    ];
+    for (const node of candidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      const label = normalize(node.getAttribute("aria-label") || node.getAttribute("title") || node.textContent);
+      if (!label) continue;
+      if (!re.test(label) && label.toLowerCase() !== nativeLabel.toLowerCase()) continue;
+      node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
+  function navigateToList(targetHash, nativeLabel = "") {
     const nextHash = sanitizeListHash(targetHash);
     window.location.hash = nextHash;
-    const inboxNav =
-      document.querySelector('a[href="#inbox"]') ||
-      document.querySelector('a[href*="#inbox"]') ||
-      document.querySelector('a[title^="Inbox"]') ||
-      document.querySelector('[aria-label^="Inbox"]');
-    if (inboxNav instanceof HTMLElement) inboxNav.click();
+    if (nativeLabel) clickNativeMailboxLink(nativeLabel);
+  }
+
+  function getActiveNavHash() {
+    if (state.currentView === "thread") return sanitizeListHash(state.lastListHash || "#inbox");
+    return sanitizeListHash(window.location.hash || state.lastListHash || "#inbox");
+  }
+
+  function mailboxKeyFromHash(hash) {
+    const value = sanitizeListHash(hash);
+    const raw = value.replace(/^#/, "");
+    return raw || "inbox";
+  }
+
+  function hrefMatchesMailbox(href, mailboxKey) {
+    const value = normalize(href);
+    const box = normalize(mailboxKey).toLowerCase();
+    if (!value || !box) return false;
+
+    const hashIndex = value.indexOf("#");
+    if (hashIndex >= 0) {
+      const hash = value.slice(hashIndex + 1).toLowerCase();
+      if (box.startsWith("label/")) return hash.startsWith(box);
+      if (hash === box || hash.startsWith(`${box}/`)) return true;
+    }
+
+    try {
+      const url = new URL(value, window.location.origin);
+      const search = normalize(url.searchParams.get("search") || "").toLowerCase();
+      const hasThread = Boolean(normalize(url.searchParams.get("th") || ""));
+      if (!hasThread) return false;
+      if (!search) return box === "inbox";
+      if (box === "all") return search.includes("all");
+      return search.includes(box);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function renderSidebar(root) {
+    const nav = root.querySelector(".rv-nav");
+    if (!(nav instanceof HTMLElement)) return;
+    const activeHash = getActiveNavHash();
+    nav.innerHTML = NAV_ITEMS.map((item) => {
+      const isActive = item.hash === activeHash;
+      return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
+    }).join("");
   }
 
   function syncViewFromHash() {
@@ -208,11 +291,17 @@
     root.id = ROOT_ID;
     root.setAttribute("data-reskin", "true");
     root.innerHTML = `
-      <header class="rv-header" data-reskin="true">
-        <h1 data-reskin="true">Mail Viewer</h1>
-        <button class="rv-refresh" data-reskin="true" type="button">Refresh</button>
-      </header>
-      <div class="rv-list" data-reskin="true"></div>
+      <div class="rv-shell" data-reskin="true">
+        <aside class="rv-sidebar" data-reskin="true">
+          <div class="rv-brand" data-reskin="true">Mail Viewer</div>
+          <div class="rv-nav-wrap" data-reskin="true">
+            <nav class="rv-nav" data-reskin="true"></nav>
+          </div>
+        </aside>
+        <main class="rv-main" data-reskin="true">
+          <div class="rv-list" data-reskin="true"></div>
+        </main>
+      </div>
     `;
     document.body.appendChild(root);
     bindRootEvents(root);
@@ -221,12 +310,32 @@
 
   function bindRootEvents(root) {
     if (root.getAttribute("data-bound") === "true") return;
-    const refresh = root.querySelector(".rv-refresh");
-    if (refresh) {
-      refresh.addEventListener("click", () => {
-        renderCurrentView(root);
-      });
-    }
+    root.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const navItem = target.closest(".rv-nav-item");
+      if (!(navItem instanceof HTMLElement)) return;
+      lockInteractions(900);
+      const nextHash = navItem.getAttribute("data-target-hash") || "#inbox";
+      const nativeLabel = navItem.getAttribute("data-native-label") || "";
+      state.currentView = "list";
+      state.activeThreadId = "";
+      state.lockListView = false;
+      state.lastListHash = sanitizeListHash(nextHash);
+      navigateToList(nextHash, nativeLabel);
+      const list = root.querySelector(".rv-list");
+      if (list instanceof HTMLElement) {
+        list.innerHTML = `<div class="rv-empty" data-reskin="true">Loading ${escapeHtml(nextHash.replace("#", ""))}...</div>`;
+      }
+      setTimeout(() => {
+        const latestRoot = document.getElementById(ROOT_ID);
+        if (latestRoot instanceof HTMLElement) applyReskin();
+      }, 250);
+      setTimeout(() => {
+        const latestRoot = document.getElementById(ROOT_ID);
+        if (latestRoot instanceof HTMLElement) applyReskin();
+      }, 900);
+    });
     root.setAttribute("data-bound", "true");
   }
 
@@ -420,6 +529,8 @@
     const items = [];
     const seen = new Set();
     let source = "rows";
+    const mailboxKey = mailboxKeyFromHash(getActiveNavHash());
+    const strictMailbox = mailboxKey !== "inbox";
 
     for (const row of rows) {
       if (!(row instanceof HTMLElement)) continue;
@@ -431,8 +542,11 @@
       const date = extractDate(row);
       const subject = cleanSubject(extractSubject(row, sender), sender, date);
 
-      const rowLink = row.querySelector('a[href*="#"]');
+      const rowLink = row.querySelector('a[href*="#"], a[href*="th="], a[href]');
       const href = rowLink instanceof HTMLAnchorElement ? rowLink.getAttribute("href") || "" : "";
+      if (strictMailbox) {
+        if (!href || !hrefMatchesMailbox(href, mailboxKey)) continue;
+      }
       items.push({ threadId, sender, subject, date, href });
       if (items.length >= limit) break;
     }
@@ -448,6 +562,7 @@
           const href = link.getAttribute("href") || "";
           const threadId = threadIdFromHref(href);
           if (!threadId || seen.has(threadId)) continue;
+          if (strictMailbox && !hrefMatchesMailbox(href, mailboxKey)) continue;
 
           const row = link.closest('[role="row"], tr, div');
           const sender = row ? extractSender(row) : "Unknown sender";
@@ -590,6 +705,7 @@
   }
 
   function renderCurrentView(root) {
+    renderSidebar(root);
     if (state.currentView === "thread") {
       renderThread(root);
       return;
@@ -600,10 +716,13 @@
   function renderList(root) {
     const list = root.querySelector(".rv-list");
     if (!(list instanceof HTMLElement)) return;
-    list.innerHTML = "";
 
     const result = collectMessages();
     const messages = result.items;
+    const listSignature = `${getActiveNavHash()}|${messages.map((m) => m.threadId).join(",")}`;
+    if (state.lastListSignature === listSignature && !interactionsLocked()) return;
+    state.lastListSignature = listSignature;
+    list.innerHTML = "";
 
     if (state.lastSource !== result.source) {
       state.lastSource = result.source;
@@ -637,6 +756,7 @@
         <div class="rv-subject" data-reskin="true">${msg.subject}</div>
       `;
       item.addEventListener("click", () => {
+        lockInteractions(900);
         state.lockListView = false;
         state.currentView = "thread";
         state.activeThreadId = msg.threadId;
@@ -677,10 +797,22 @@
 
   function startObserver() {
     if (state.observer || !document.body) return;
-    state.observer = new MutationObserver(() => {
+    state.observer = new MutationObserver((mutations) => {
+      if (interactionsLocked()) return;
       if (state.isApplying) return;
+      let hasExternalMutation = false;
+      for (const mutation of mutations) {
+        const target = mutation.target;
+        if (!(target instanceof Node)) continue;
+        const root = document.getElementById(ROOT_ID);
+        if (root && root.contains(target)) continue;
+        hasExternalMutation = true;
+        break;
+      }
+      if (!hasExternalMutation) return;
       clearTimeout(state.debounceTimer);
       state.debounceTimer = setTimeout(() => {
+        if (interactionsLocked()) return;
         if (state.isApplying) return;
         const hasStyle = Boolean(document.getElementById(STYLE_ID));
         const hasRoot = Boolean(document.getElementById(ROOT_ID));
