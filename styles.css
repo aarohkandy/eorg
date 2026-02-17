@@ -1,0 +1,137 @@
+/* Keep Gmail DOM mounted but invisible, then show only the custom viewer root. */
+body[data-reskin-mode="viewer"] > *:not(#reskin-root) {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Viewer stage: centered canvas with strong visual separation from hidden Gmail chrome. */
+body[data-reskin-mode="viewer"] {
+  margin: 0 !important;
+  background:
+    radial-gradient(circle at 12% 10%, rgba(63, 94, 251, 0.3), transparent 36%),
+    radial-gradient(circle at 88% 18%, rgba(252, 70, 107, 0.18), transparent 42%),
+    linear-gradient(140deg, #070a12 0%, #111827 56%, #0b1020 100%) !important;
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", sans-serif !important;
+}
+
+/* Single root that replaces Gmail visuals with our own email viewer format. */
+#reskin-root {
+  visibility: visible !important;
+  pointer-events: auto !important;
+  position: fixed !important;
+  inset: 0 !important;
+  display: grid !important;
+  place-items: center !important;
+  z-index: 2147483647 !important;
+}
+
+/* Main custom panel in the center where parsed emails are rendered. */
+#reskin-root {
+  color: #e6ecff !important;
+}
+
+#reskin-root::before {
+  content: "" !important;
+  position: absolute !important;
+  width: min(68vw, 1020px) !important;
+  height: 80vh !important;
+  border-radius: 24px !important;
+  background: rgba(10, 16, 31, 0.86) !important;
+  border: 1px solid rgba(101, 146, 255, 0.34) !important;
+  box-shadow:
+    0 34px 80px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(116, 224, 255, 0.14) inset !important;
+}
+
+#reskin-root > * {
+  position: relative !important;
+  width: min(68vw, 1020px) !important;
+}
+
+/* Header for viewer controls and state. */
+#reskin-root .rv-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 22px 24px 12px !important;
+}
+
+#reskin-root .rv-header h1 {
+  margin: 0 !important;
+  font-size: 20px !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  color: #f2f6ff !important;
+}
+
+#reskin-root .rv-refresh {
+  border: 1px solid rgba(113, 214, 255, 0.44) !important;
+  background: rgba(19, 36, 69, 0.86) !important;
+  color: #d9f0ff !important;
+  border-radius: 10px !important;
+  padding: 8px 14px !important;
+  cursor: pointer !important;
+}
+
+/* Parsed email list rendering area. */
+#reskin-root .rv-list {
+  padding: 8px 20px 22px !important;
+  height: calc(80vh - 74px) !important;
+  overflow: auto !important;
+  display: grid !important;
+  gap: 10px !important;
+}
+
+/* Each item is our own format built from extracted metadata (not cloned Gmail rows). */
+#reskin-root .rv-item {
+  width: 100% !important;
+  text-align: left !important;
+  border: 1px solid rgba(106, 156, 255, 0.34) !important;
+  border-radius: 12px !important;
+  padding: 12px 14px !important;
+  background: linear-gradient(90deg, rgba(14, 27, 52, 0.92), rgba(16, 20, 42, 0.92)) !important;
+  color: #e8f0ff !important;
+  cursor: pointer !important;
+}
+
+#reskin-root .rv-item:hover {
+  border-color: rgba(124, 247, 230, 0.6) !important;
+  transform: translateY(-1px) !important;
+}
+
+#reskin-root .rv-item-top {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+}
+
+#reskin-root .rv-sender {
+  font-weight: 700 !important;
+  color: #ffffff !important;
+}
+
+#reskin-root .rv-date {
+  font-size: 12px !important;
+  color: #9db5df !important;
+}
+
+#reskin-root .rv-subject {
+  margin-top: 6px !important;
+  color: #d8e4ff !important;
+  line-height: 1.35 !important;
+}
+
+#reskin-root .rv-empty {
+  border: 1px dashed rgba(127, 169, 250, 0.4) !important;
+  border-radius: 12px !important;
+  padding: 16px !important;
+  color: #aec3ea !important;
+}
+
+@media (max-width: 1100px) {
+  #reskin-root::before,
+  #reskin-root > * {
+    width: 92vw !important;
+  }
+}
