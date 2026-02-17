@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Eorg Mail",
   "description": "Local-first Gmail reskin with keyboard workflow, local indexing, and BYOK AI.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://mail.google.com/*"],
   "background": {
@@ -11,17 +11,7 @@
   "content_scripts": [
     {
       "matches": ["https://mail.google.com/*"],
-      "js": [
-        "db.js",
-        "ai.js",
-        "indexer.js",
-        "ui/sidebar.js",
-        "ui/toolbar.js",
-        "ui/compose.js",
-        "commandbar.js",
-        "content.js"
-      ],
-      "css": ["skin.css"],
+      "js": ["content.js"],
       "run_at": "document_idle"
     }
   ],

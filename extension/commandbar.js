@@ -105,6 +105,10 @@
             id: 'summarize',
             label: 'summarize',
             run: async () => {
+              if (!ai || typeof ai.chat !== 'function') {
+                notify('AI is not configured. Open settings first.', 'error');
+                return;
+              }
               const threadText = Array.from(doc.querySelectorAll('.a3s, .ii.gt')).map((n) => n.innerText).join('\n').slice(0, 12000);
               if (!threadText.trim()) return;
               const summary = await ai.chat([
@@ -118,6 +122,10 @@
             id: 'draft-reply',
             label: 'draft reply',
             run: async () => {
+              if (!ai || typeof ai.chat !== 'function') {
+                notify('AI is not configured. Open settings first.', 'error');
+                return;
+              }
               const threadText = Array.from(doc.querySelectorAll('.a3s, .ii.gt')).map((n) => n.innerText).join('\n').slice(0, 12000);
               if (!threadText.trim()) return;
               const draft = await ai.chat([
@@ -138,6 +146,10 @@
             id: 'triage',
             label: 'triage',
             run: async () => {
+              if (!ai || typeof ai.chat !== 'function') {
+                notify('AI is not configured. Open settings first.', 'error');
+                return;
+              }
               const threadText = Array.from(doc.querySelectorAll('.a3s, .ii.gt')).map((n) => n.innerText).join('\n').slice(0, 8000);
               if (!threadText.trim()) return;
               const triage = await ai.chat([
@@ -151,6 +163,10 @@
             id: 'search',
             label: 'search ',
             run: async (query) => {
+              if (!ai || typeof ai.embed !== 'function' || !db) {
+                notify('Search index is not ready yet.', 'error');
+                return;
+              }
               if (!query.trim()) return;
               const qVec = (await ai.embed(query))[0];
               if (!qVec) return;
