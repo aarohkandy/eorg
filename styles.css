@@ -91,6 +91,31 @@ body[data-reskin-mode="viewer"] {
   color: #0c0c0c !important;
 }
 
+#reskin-root .rv-settings {
+  margin-top: 12px !important;
+  width: 100% !important;
+  border: 1px solid #303030 !important;
+  border-radius: 10px !important;
+  padding: 10px 12px !important;
+  background: #121212 !important;
+  color: #f2f2f2 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  text-align: left !important;
+  cursor: pointer !important;
+}
+
+#reskin-root .rv-settings:hover {
+  background: #1d1d1d !important;
+  border-color: #505050 !important;
+}
+
+#reskin-root .rv-settings.is-active {
+  background: #f2f2f2 !important;
+  color: #0c0c0c !important;
+  border-color: #f2f2f2 !important;
+}
+
 #reskin-root .rv-main {
   padding: 12px !important;
   overflow: hidden !important;
@@ -246,6 +271,66 @@ body[data-reskin-mode="viewer"] {
   font-family: inherit !important;
 }
 
+#reskin-root .rv-settings-view {
+  background: #111111 !important;
+  border-radius: 14px !important;
+  padding: 16px !important;
+}
+
+#reskin-root .rv-settings-title {
+  margin: 0 0 8px !important;
+  font-size: 22px !important;
+  color: #f7f7f7 !important;
+}
+
+#reskin-root .rv-settings-copy {
+  margin: 0 0 16px !important;
+  font-size: 13px !important;
+  color: #cfcfcf !important;
+}
+
+#reskin-root .rv-settings-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+  margin-bottom: 16px !important;
+}
+
+#reskin-root .rv-settings-card {
+  border: 1px solid #2f2f2f !important;
+  border-radius: 10px !important;
+  padding: 12px !important;
+  background: #141414 !important;
+}
+
+#reskin-root .rv-settings-label {
+  font-size: 11px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+  color: #979797 !important;
+  margin-bottom: 6px !important;
+}
+
+#reskin-root .rv-settings-value {
+  font-size: 14px !important;
+  color: #f1f1f1 !important;
+  font-weight: 600 !important;
+}
+
+#reskin-root .rv-settings-back {
+  border: 1px solid #303030 !important;
+  border-radius: 10px !important;
+  padding: 10px 12px !important;
+  background: #1b1b1b !important;
+  color: #f4f4f4 !important;
+  cursor: pointer !important;
+  font-weight: 600 !important;
+}
+
+#reskin-root .rv-settings-back:hover {
+  background: #262626 !important;
+}
+
 @media (max-width: 1100px) {
   #reskin-root > * {
     width: 100vw !important;
@@ -284,5 +369,14 @@ body[data-reskin-mode="viewer"] {
     white-space: nowrap !important;
     padding: 8px 10px !important;
     font-size: 12px !important;
+  }
+
+  #reskin-root .rv-settings {
+    margin-top: 8px !important;
+    text-align: center !important;
+  }
+
+  #reskin-root .rv-settings-grid {
+    grid-template-columns: 1fr !important;
   }
 }

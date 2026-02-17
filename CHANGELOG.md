@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.4.4 - 2026-02-17
+
+- Fixed Settings button no-op by adding persistent in-app settings route hash (`#app-settings`).
+- Updated hash sync logic to preserve settings view instead of immediately reverting to list view.
+- Back to Inbox from settings now restores mailbox hash and returns to list reliably.
+
+
+## v0.4.3 - 2026-02-17
+
+- Replaced native-settings navigation with a fully in-app Settings page (inside the overlay UI).
+- Settings button now opens custom settings view and supports `Back to Inbox` action.
+- Removed settings suspend/resume overlay behavior tied to Gmail native settings routes.
+- Added dedicated settings UI styling and active-state indicator for sidebar Settings button.
+
+
+## v0.4.2 - 2026-02-17
+
+- Fixed Settings button visibility issue by suspending overlay/reskin when opening Gmail settings.
+- Added reskin suspend/resume guards so native settings remains visible until user exits settings route.
+- Added explicit mode disable during settings navigation to prevent overlay immediately re-hiding Gmail UI.
+
+
+## v0.4.1 - 2026-02-17
+
+- Restored bottom-left sidebar `Settings` button.
+- Wired settings button to open native Gmail settings control when available, with direct route fallback.
+
+
+## v0.4.0 - 2026-02-17
+
+- Locked stable sidebar + inbox/folder behavior baseline for exact rollback point.
+- Includes inbox lenient capture with strict non-inbox folder filtering and stable interaction handling.
+
+
 ## v0.3.7 - 2026-02-17
 
 - Fixed inbox regression from over-strict folder filtering in v0.3.6.

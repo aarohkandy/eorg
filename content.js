@@ -182,6 +182,11 @@
     );
   }
 
+  function isAppSettingsHash() {
+    const hash = normalize(window.location.hash || "").toLowerCase();
+    return hash === "#app-settings";
+  }
+
   function sanitizeListHash(hash) {
     const value = normalize(hash || "");
     if (!value) return "#inbox";
@@ -264,9 +269,18 @@
       const isActive = item.hash === activeHash;
       return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
     }).join("");
+
+    const settings = root.querySelector(".rv-settings");
+    if (settings instanceof HTMLElement) {
+      settings.classList.toggle("is-active", state.currentView === "settings");
+    }
   }
 
   function syncViewFromHash() {
+    if (isAppSettingsHash()) {
+      state.currentView = "settings";
+      return;
+    }
     const threadHash = isThreadHash();
     if (state.lockListView) {
       if (!threadHash) {
@@ -297,6 +311,7 @@
           <div class="rv-nav-wrap" data-reskin="true">
             <nav class="rv-nav" data-reskin="true"></nav>
           </div>
+          <button type="button" class="rv-settings" data-reskin="true">Settings</button>
         </aside>
         <main class="rv-main" data-reskin="true">
           <div class="rv-list" data-reskin="true"></div>
@@ -313,6 +328,20 @@
     root.addEventListener("click", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      if (target.closest(".rv-settings")) {
+        lockInteractions(500);
+        state.currentView = "settings";
+        window.location.hash = "#app-settings";
+        renderCurrentView(root);
+        return;
+      }
+      if (target.closest(".rv-settings-back")) {
+        lockInteractions(500);
+        state.currentView = "list";
+        window.location.hash = sanitizeListHash(state.lastListHash || "#inbox");
+        renderCurrentView(root);
+        return;
+      }
       const navItem = target.closest(".rv-nav-item");
       if (!(navItem instanceof HTMLElement)) return;
       lockInteractions(900);
@@ -706,11 +735,41 @@
 
   function renderCurrentView(root) {
     renderSidebar(root);
+    if (state.currentView === "settings") {
+      renderSettings(root);
+      return;
+    }
     if (state.currentView === "thread") {
       renderThread(root);
       return;
     }
     renderList(root);
+  }
+
+  function renderSettings(root) {
+    const list = root.querySelector(".rv-list");
+    if (!(list instanceof HTMLElement)) return;
+    list.innerHTML = `
+      <section class="rv-settings-view" data-reskin="true">
+        <h2 class="rv-settings-title" data-reskin="true">Settings</h2>
+        <p class="rv-settings-copy" data-reskin="true">This settings page is fully inside your app UI.</p>
+        <div class="rv-settings-grid" data-reskin="true">
+          <div class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Folder Navigation</div>
+            <div class="rv-settings-value" data-reskin="true">Sidebar-enabled</div>
+          </div>
+          <div class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Thread Viewer</div>
+            <div class="rv-settings-value" data-reskin="true">Custom overlay</div>
+          </div>
+          <div class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Theme</div>
+            <div class="rv-settings-value" data-reskin="true">Monochrome</div>
+          </div>
+        </div>
+        <button type="button" class="rv-settings-back" data-reskin="true">Back to Inbox</button>
+      </section>
+    `;
   }
 
   function renderList(root) {
