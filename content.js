@@ -55,6 +55,10 @@
     observer: null,
     debounceTimer: null,
     isApplying: false,
+    currentView: "list",
+    activeThreadId: "",
+    lockListView: false,
+    lastListHash: "#inbox",
     lastRenderedCount: null,
     lastSource: "",
     loggedOnce: new Set()
@@ -87,11 +91,32 @@
     return (text || "").replace(/\s+/g, " ").trim();
   }
 
+  function escapeHtml(text) {
+    return String(text || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function isUseful(text) {
     const value = normalize(text);
     if (!value || value.length < 2) return false;
     if (NOISE_TEXT.has(value.toLowerCase())) return false;
     return true;
+  }
+
+  function looksLikeDateOrTime(text) {
+    const value = normalize(text);
+    if (!value) return false;
+    return (
+      /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{1,2}$/i.test(value) ||
+      /^\d{1,2}:\d{2}\s?(AM|PM)$/i.test(value) ||
+      /^\d+\s?(m|h|d|w)$/i.test(value) ||
+      /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s/i.test(value) ||
+      /\b\d{4},?\s+\d{1,2}:\d{2}\s?(AM|PM)\b/i.test(value)
+    );
   }
 
   function selectFirst(selectors) {
@@ -129,6 +154,51 @@
     if (document.body) document.body.setAttribute(MODE_ATTR, MODE_VALUE);
   }
 
+  function isThreadHash() {
+    const hash = normalize(window.location.hash || "");
+    if (!hash) return false;
+    return /#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/]+)\/[A-Za-z0-9_-]{6,}/i.test(
+      hash
+    );
+  }
+
+  function sanitizeListHash(hash) {
+    const value = normalize(hash || "");
+    if (!value) return "#inbox";
+    const withoutThreadId = value.replace(/\/[A-Za-z0-9_-]{6,}(?:\?.*)?$/i, "");
+    if (/^#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/]+)$/i.test(withoutThreadId)) {
+      return withoutThreadId;
+    }
+    return "#inbox";
+  }
+
+  function navigateToList(targetHash) {
+    const nextHash = sanitizeListHash(targetHash);
+    window.location.hash = nextHash;
+    const inboxNav =
+      document.querySelector('a[href="#inbox"]') ||
+      document.querySelector('a[href*="#inbox"]') ||
+      document.querySelector('a[title^="Inbox"]') ||
+      document.querySelector('[aria-label^="Inbox"]');
+    if (inboxNav instanceof HTMLElement) inboxNav.click();
+  }
+
+  function syncViewFromHash() {
+    const threadHash = isThreadHash();
+    if (state.lockListView) {
+      if (!threadHash) {
+        state.lockListView = false;
+      } else {
+        state.currentView = "list";
+        return;
+      }
+    }
+    state.currentView = threadHash ? "thread" : "list";
+    if (state.currentView === "list") {
+      state.lastListHash = sanitizeListHash(window.location.hash || "#inbox");
+    }
+  }
+
   function ensureRoot() {
     let root = document.getElementById(ROOT_ID);
     if (root) return root;
@@ -154,7 +224,7 @@
     const refresh = root.querySelector(".rv-refresh");
     if (refresh) {
       refresh.addEventListener("click", () => {
-        renderList(root);
+        renderCurrentView(root);
       });
     }
     root.setAttribute("data-bound", "true");
@@ -256,32 +326,93 @@
   }
 
   function extractSubject(row, sender) {
-    const titles = Array.from(row.querySelectorAll("[title]"))
-      .map((node) => normalize(node.getAttribute("title")))
-      .filter((value) => isUseful(value) && value.toLowerCase() !== sender.toLowerCase());
-    const filteredTitles = titles.filter((value) => !NOISE_TEXT.has(value.toLowerCase()));
-    if (filteredTitles.length > 0) {
-      filteredTitles.sort((a, b) => b.length - a.length);
-      return filteredTitles[0];
+    const candidateSelectors = [
+      '[role="link"][aria-label]',
+      '[role="link"][title]',
+      '[role="link"] span[title]',
+      '[role="link"] span',
+      "span[title]"
+    ];
+
+    const candidates = [];
+    for (const selector of candidateSelectors) {
+      for (const node of row.querySelectorAll(selector)) {
+        const text = normalize(node.textContent);
+        const title = normalize(node.getAttribute("title"));
+        if (isUseful(text)) candidates.push(text);
+        if (isUseful(title)) candidates.push(title);
+      }
+    }
+
+    const filtered = candidates.filter((value) => {
+      if (!isUseful(value)) return false;
+      if (value.toLowerCase() === sender.toLowerCase()) return false;
+      if (NOISE_TEXT.has(value.toLowerCase())) return false;
+      if (looksLikeDateOrTime(value)) return false;
+      return true;
+    });
+
+    if (filtered.length > 0) {
+      // Prefer concise subject-like text over long snippet-like strings.
+      filtered.sort((a, b) => a.length - b.length);
+      return filtered[0];
     }
 
     const aria = normalize(row.getAttribute("aria-label"));
     if (aria) {
-      const parts = aria.split(" - ").map((part) => normalize(part));
+      const parts = aria
+        .split(/[-,|]/)
+        .map((part) => normalize(part))
+        .filter(Boolean);
       for (const part of parts) {
         if (!isUseful(part)) continue;
         if (part.toLowerCase() === sender.toLowerCase()) continue;
+        if (looksLikeDateOrTime(part)) continue;
         return part;
       }
     }
 
     const rowText = normalize(row.textContent);
     if (isUseful(rowText)) {
-      const cleaned = rowText.replace(sender, "").trim();
+      const cleaned = rowText
+        .replace(sender, "")
+        .replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+[A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4},?\s+\d{1,2}:\d{2}\s?(AM|PM)\b/gi, "")
+        .replace(/\b\d{1,2}:\d{2}\s?(AM|PM)\b/gi, "")
+        .replace(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
       if (isUseful(cleaned)) return cleaned.slice(0, 120);
     }
 
     return "No subject captured";
+  }
+
+  function cleanSubject(subject, sender, date) {
+    let value = normalize(subject);
+    if (!value) return "No subject captured";
+
+    if (sender) {
+      const escapedSender = sender.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      value = value.replace(new RegExp(`^${escapedSender}\\s*[-,:]?\\s*`, "i"), "");
+    }
+
+    if (date) {
+      const escapedDate = date.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      value = value.replace(new RegExp(`\\s*[-,|]?\\s*${escapedDate}\\s*$`, "i"), "");
+    }
+
+    value = value
+      .replace(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+[A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4},?\s+\d{1,2}:\d{2}\s?(?:AM|PM)\b/gi, "")
+      .replace(/\b\d{1,2}:\d{2}\s?(?:AM|PM)\b/gi, "")
+      .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/gi, "")
+      .replace(/\s+[|-]\s+.*$/, "")
+      .replace(/\s+[–—]\s+.*$/, "")
+      .replace(/^\s*(re|fw|fwd)\s*:\s*/i, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s*[-,|:]\s*$/, "")
+      .trim();
+
+    return isUseful(value) ? value : "No subject captured";
   }
 
   function collectMessages(limit = 60) {
@@ -298,7 +429,7 @@
 
       const sender = extractSender(row);
       const date = extractDate(row);
-      const subject = extractSubject(row, sender);
+      const subject = cleanSubject(extractSubject(row, sender), sender, date);
 
       const rowLink = row.querySelector('a[href*="#"]');
       const href = rowLink instanceof HTMLAnchorElement ? rowLink.getAttribute("href") || "" : "";
@@ -324,9 +455,13 @@
           const linkTitle = normalize(link.getAttribute("title"));
           const linkText = normalize(link.textContent);
           const subject =
-            (isUseful(linkTitle) && linkTitle) ||
-            (isUseful(linkText) && linkText) ||
-            (row ? extractSubject(row, sender) : "No subject captured");
+            cleanSubject(
+              (isUseful(linkTitle) && linkTitle) ||
+                (isUseful(linkText) && linkText) ||
+                (row ? extractSubject(row, sender) : "No subject captured"),
+              sender,
+              date
+            );
 
           seen.add(threadId);
           items.push({ threadId, sender, subject, date, href });
@@ -373,6 +508,95 @@
     return false;
   }
 
+  function extractOpenThreadData() {
+    const main = document.querySelector('[role="main"]') || document.body;
+    if (!(main instanceof HTMLElement)) {
+      return { subject: "", sender: "", date: "", body: "" };
+    }
+
+    const subjectCandidates = Array.from(main.querySelectorAll("h1, h2, [role='heading']"))
+      .map((node) => normalize(node.textContent))
+      .filter((text) => isUseful(text) && !looksLikeDateOrTime(text));
+    const subject = subjectCandidates[0] || "No subject captured";
+
+    const senderNode = main.querySelector(
+      'h3 span[email], .gD[email], span[email], [email], [data-hovercard-id]'
+    );
+    const sender = senderNode instanceof HTMLElement ? normalize(senderNode.innerText || senderNode.textContent) : "";
+
+    const dateCandidates = Array.from(main.querySelectorAll("span.g3[title], time, span[title], div[title]"))
+      .map((node) => normalize(node.getAttribute("title") || node.innerText || node.textContent))
+      .filter((text) => looksLikeDateOrTime(text) || /\b\d{4}\b/.test(text));
+    const date = dateCandidates[0] || "";
+
+    const bodyNodes = Array.from(
+      main.querySelectorAll('.a3s.aiL, .a3s, [data-message-id] .ii.gt, [role="listitem"] div[dir="ltr"], [role="listitem"] div[dir="auto"]')
+    ).filter((node) => node instanceof HTMLElement);
+    bodyNodes.sort((a, b) => normalize((b).innerText || "").length - normalize((a).innerText || "").length);
+    const bodyNode = bodyNodes[0] || null;
+    const bodyHtml = bodyNode instanceof HTMLElement ? bodyNode.innerHTML : "";
+    const bodyText = bodyNode instanceof HTMLElement ? normalize(bodyNode.innerText || bodyNode.textContent) : "";
+
+    return {
+      subject: cleanSubject(subject, sender, date),
+      sender: isUseful(sender) ? sender : "Unknown sender",
+      date,
+      bodyHtml,
+      bodyText: bodyText || "Message body not captured yet."
+    };
+  }
+
+  function renderThread(root) {
+    const list = root.querySelector(".rv-list");
+    if (!(list instanceof HTMLElement)) return;
+    const thread = extractOpenThreadData();
+    const backLabel = "Back to inbox";
+
+    list.innerHTML = `
+      <section class="rv-thread" data-reskin="true">
+        <button type="button" class="rv-back" data-reskin="true">${backLabel}</button>
+        <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(thread.subject)}</h2>
+        <div class="rv-thread-meta" data-reskin="true">
+          <span class="rv-thread-sender" data-reskin="true">${escapeHtml(thread.sender)}</span>
+          <span class="rv-thread-date" data-reskin="true">${escapeHtml(thread.date)}</span>
+        </div>
+        <article class="rv-thread-body" data-reskin="true"></article>
+      </section>
+    `;
+
+    const body = list.querySelector(".rv-thread-body");
+    if (body instanceof HTMLElement) {
+      if (thread.bodyHtml) {
+        body.innerHTML = `<div class="rv-thread-html" data-reskin="true">${thread.bodyHtml}</div>`;
+      } else {
+        body.innerHTML = `<pre class="rv-thread-plain" data-reskin="true">${escapeHtml(thread.bodyText)}</pre>`;
+      }
+    }
+
+    const back = list.querySelector(".rv-back");
+    if (back instanceof HTMLElement) {
+      back.addEventListener("click", () => {
+        state.currentView = "list";
+        state.activeThreadId = "";
+        state.lockListView = true;
+        const targetHash = state.lastListHash || "#inbox";
+        navigateToList(targetHash);
+        setTimeout(() => {
+          const latestRoot = document.getElementById(ROOT_ID);
+          if (latestRoot instanceof HTMLElement) applyReskin();
+        }, 260);
+      });
+    }
+  }
+
+  function renderCurrentView(root) {
+    if (state.currentView === "thread") {
+      renderThread(root);
+      return;
+    }
+    renderList(root);
+  }
+
   function renderList(root) {
     const list = root.querySelector(".rv-list");
     if (!(list instanceof HTMLElement)) return;
@@ -413,10 +637,24 @@
         <div class="rv-subject" data-reskin="true">${msg.subject}</div>
       `;
       item.addEventListener("click", () => {
+        state.lockListView = false;
+        state.currentView = "thread";
+        state.activeThreadId = msg.threadId;
+        renderThread(root);
         const ok = openThread(msg.threadId, msg.href);
         if (!ok) {
           logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
+          state.currentView = "list";
+          state.activeThreadId = "";
+          renderList(root);
+          return;
         }
+        setTimeout(() => {
+          const latestRoot = document.getElementById(ROOT_ID);
+          if (!(latestRoot instanceof HTMLElement)) return;
+          if (state.currentView !== "thread") return;
+          renderThread(latestRoot);
+        }, 220);
       });
       list.appendChild(item);
     }
@@ -429,7 +667,8 @@
       ensureStylesheet();
       const root = ensureRoot();
       if (!root) return;
-      renderList(root);
+      syncViewFromHash();
+      renderCurrentView(root);
       ensureMode();
     } finally {
       state.isApplying = false;
@@ -450,7 +689,7 @@
           return;
         }
         const root = document.getElementById(ROOT_ID);
-        if (root instanceof HTMLElement) renderList(root);
+        if (root instanceof HTMLElement) renderCurrentView(root);
       }, 75);
     });
     state.observer.observe(document.body, { childList: true, subtree: true });
@@ -458,6 +697,11 @@
 
   function waitForReady() {
     removeLegacyNodes();
+    window.addEventListener("hashchange", () => {
+      syncViewFromHash();
+      const root = document.getElementById(ROOT_ID);
+      if (root instanceof HTMLElement) renderCurrentView(root);
+    });
     logInfo("Waiting for Gmail landmarks...");
     const poll = setInterval(() => {
       const ready = selectFirst(GMAIL_READY_SELECTORS);
