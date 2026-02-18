@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.6.4 - 2026-02-18
+
+- Replaced full-page `MutationObserver` rerender loop with a low-power UI poller (900ms) to reduce CPU pressure.
+- Preserved render dedupe and guardrails while cutting high-frequency Gmail DOM callback load.
+- Updated runtime startup logging to reflect low-power polling mode.
+
+## v0.6.3 - 2026-02-18
+
+- Added direct capture-phase binding for sidebar Settings button to prevent Gmail-level handlers from swallowing the click.
+- Centralized settings-open action into a single route-safe handler and reused it for delegated click fallback.
+- Kept in-app settings navigation pinned to `#app-settings` for consistent rendering.
+
+## v0.6.2 - 2026-02-18
+
+- Reduced observer-driven rerender pressure to mitigate Gmail lag/crash risk.
+- Added observer render throttling (debounce + minimum render gap) to avoid rapid redraw loops.
+- Added lightweight DOM signature checks so unchanged Gmail states do not trigger full overlay rerenders.
+
+## v0.6.1 - 2026-02-18
+
+- Fixed Settings button interaction reliability by consuming handled overlay clicks before Gmail can intercept them.
+- Settings button now explicitly routes to `#app-settings` so the settings view stays pinned and restorable.
+- Broadened settings-route detection to support `#app-settings` with query params.
+
+## v0.6.0 - 2026-02-17
+
+- Added Inbox-only AI triage with left-sidebar urgency filters (Critical/High/Medium/Low/FYI).
+- Added provider-backed AI settings in-app (OpenRouter free, Groq free allowlist, local Ollama).
+- Added triage status and refresh controls, plus inline urgency badges on message cards.
+- Added one-time triage consent + advanced runtime controls (batch size, timeout, retries, input cap).
+- Added Gmail label automation path for persistent triage labels (`Triage/*`) and no re-triage behavior.
+
+## v0.5.0 - 2026-02-17
+
+- Locked exact stable state with working in-app settings route (`#app-settings`).
+- Includes current sidebar navigation, folder behavior, thread view, and interaction stability fixes.
+
+
 ## v0.4.4 - 2026-02-17
 
 - Fixed Settings button no-op by adding persistent in-app settings route hash (`#app-settings`).

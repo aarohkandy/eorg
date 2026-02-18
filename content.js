@@ -5,6 +5,9 @@
   const ROOT_ID = "reskin-root";
   const MODE_ATTR = "data-reskin-mode";
   const MODE_VALUE = "viewer";
+  const OBSERVER_DEBOUNCE_MS = 180;
+  const OBSERVER_MIN_RENDER_GAP_MS = 320;
+  const UI_POLL_INTERVAL_MS = 900;
   const GMAIL_READY_SELECTORS = ['[role="main"]', '[aria-label="Main menu"]'];
   const ROW_SELECTORS = [
     '[role="main"] tr[role="row"][data-thread-id]',
@@ -48,6 +51,8 @@
     { label: "Trash", hash: "#trash", nativeLabel: "Trash" }
   ];
 
+  const TRIAGE_LEVELS = ["critical", "high", "medium", "low", "fyi"];
+
   const NOISE_TEXT = new Set([
     "starred",
     "not starred",
@@ -63,6 +68,7 @@
 
   const state = {
     observer: null,
+    pollTimer: null,
     debounceTimer: null,
     isApplying: false,
     interactionLockUntil: 0,
@@ -73,7 +79,19 @@
     lastListHash: "#inbox",
     lastRenderedCount: null,
     lastSource: "",
-    loggedOnce: new Set()
+    loggedOnce: new Set(),
+    triageFilter: "",
+    triageCounts: { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 },
+    triageStatus: "",
+    triageRunning: false,
+    triageQueueKey: "",
+    triageUntriagedCount: 0,
+    triageLocalMap: {},
+    settingsCache: null,
+    settingsPinned: false,
+    lastObserverRenderAt: 0,
+    pendingObserverTimer: null,
+    lastObserverSignature: ""
   };
 
   function logInfo(message, extra) {
@@ -109,6 +127,15 @@
 
   function normalize(text) {
     return (text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function consumeEvent(event) {
+    if (!event) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    }
   }
 
   function escapeHtml(text) {
@@ -174,66 +201,73 @@
     if (document.body) document.body.setAttribute(MODE_ATTR, MODE_VALUE);
   }
 
+  function parseListRoute(hashValue) {
+    const raw = normalize(hashValue || "");
+    if (!raw) return { hash: "#inbox", mailbox: "inbox", triage: "" };
+
+    const qIndex = raw.indexOf("?");
+    const withoutQuery = qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+    const query = qIndex >= 0 ? raw.slice(qIndex + 1) : "";
+
+    const withoutThreadId = withoutQuery.replace(/\/[A-Za-z0-9_-]{6,}$/i, "");
+    const validBase = /^#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/]+)$/i.test(
+      withoutThreadId
+    )
+      ? withoutThreadId
+      : "#inbox";
+
+    const mailbox = validBase.replace(/^#/, "").toLowerCase() || "inbox";
+    let triage = "";
+
+    if (mailbox === "inbox" && query) {
+      const params = new URLSearchParams(query);
+      const candidate = normalize(params.get("triage") || "").toLowerCase();
+      if (TRIAGE_LEVELS.includes(candidate)) triage = candidate;
+    }
+
+    const hash = mailbox === "inbox" && triage ? `#inbox?triage=${triage}` : validBase;
+    return { hash, mailbox, triage };
+  }
+
+  function sanitizeListHash(hashValue, options = {}) {
+    const parsed = parseListRoute(hashValue);
+    let mailbox = parsed.mailbox;
+    let triage = parsed.triage;
+
+    if (options.forceInbox) mailbox = "inbox";
+    if (options.clearTriage) triage = "";
+    if (mailbox !== "inbox") triage = "";
+
+    return mailbox === "inbox" && triage ? `#inbox?triage=${triage}` : `#${mailbox}`;
+  }
+
+  function activeMailbox() {
+    return parseListRoute(state.currentView === "thread" ? state.lastListHash : window.location.hash).mailbox;
+  }
+
+  function activeTriageFilter() {
+    return parseListRoute(state.currentView === "thread" ? state.lastListHash : window.location.hash).triage;
+  }
+
+  function getActiveNavHash() {
+    return `#${activeMailbox()}`;
+  }
+
   function isThreadHash() {
     const hash = normalize(window.location.hash || "");
     if (!hash) return false;
-    return /#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/]+)\/[A-Za-z0-9_-]{6,}/i.test(
+    return /#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/?]+)\/[A-Za-z0-9_-]{6,}/i.test(
       hash
     );
   }
 
   function isAppSettingsHash() {
     const hash = normalize(window.location.hash || "").toLowerCase();
-    return hash === "#app-settings";
-  }
-
-  function sanitizeListHash(hash) {
-    const value = normalize(hash || "");
-    if (!value) return "#inbox";
-    const withoutThreadId = value.replace(/\/[A-Za-z0-9_-]{6,}(?:\?.*)?$/i, "");
-    if (/^#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/]+)$/i.test(withoutThreadId)) {
-      return withoutThreadId;
-    }
-    return "#inbox";
-  }
-
-  function clickNativeMailboxLink(nativeLabel) {
-    const escaped = nativeLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`^${escaped}(\\b|\\s|,)`, "i");
-    const candidates = [
-      ...Array.from(document.querySelectorAll(`a[aria-label^="${nativeLabel}"]`)),
-      ...Array.from(document.querySelectorAll(`a[title^="${nativeLabel}"]`)),
-      ...Array.from(document.querySelectorAll("a[role='link']")),
-      ...Array.from(document.querySelectorAll("a"))
-    ];
-    for (const node of candidates) {
-      if (!(node instanceof HTMLElement)) continue;
-      const label = normalize(node.getAttribute("aria-label") || node.getAttribute("title") || node.textContent);
-      if (!label) continue;
-      if (!re.test(label) && label.toLowerCase() !== nativeLabel.toLowerCase()) continue;
-      node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      return true;
-    }
-    return false;
-  }
-
-  function navigateToList(targetHash, nativeLabel = "") {
-    const nextHash = sanitizeListHash(targetHash);
-    window.location.hash = nextHash;
-    if (nativeLabel) clickNativeMailboxLink(nativeLabel);
-  }
-
-  function getActiveNavHash() {
-    if (state.currentView === "thread") return sanitizeListHash(state.lastListHash || "#inbox");
-    return sanitizeListHash(window.location.hash || state.lastListHash || "#inbox");
+    return hash === "#app-settings" || hash.startsWith("#app-settings?");
   }
 
   function mailboxKeyFromHash(hash) {
-    const value = sanitizeListHash(hash);
-    const raw = value.replace(/^#/, "");
-    return raw || "inbox";
+    return parseListRoute(hash).mailbox;
   }
 
   function hrefMatchesMailbox(href, mailboxKey) {
@@ -261,9 +295,69 @@
     }
   }
 
+  function clickNativeMailboxLink(nativeLabel) {
+    const escaped = nativeLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^${escaped}(\\b|\\s|,)`, "i");
+    const candidates = [
+      ...Array.from(document.querySelectorAll(`a[aria-label^="${nativeLabel}"]`)),
+      ...Array.from(document.querySelectorAll(`a[title^="${nativeLabel}"]`)),
+      ...Array.from(document.querySelectorAll("a[role='link']")),
+      ...Array.from(document.querySelectorAll("a"))
+    ];
+
+    for (const node of candidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      const label = normalize(node.getAttribute("aria-label") || node.getAttribute("title") || node.textContent);
+      if (!label) continue;
+      if (!re.test(label) && label.toLowerCase() !== nativeLabel.toLowerCase()) continue;
+      node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
+  function navigateToList(targetHash, nativeLabel = "") {
+    const nextHash = sanitizeListHash(targetHash);
+    window.location.hash = nextHash;
+    if (nativeLabel) clickNativeMailboxLink(nativeLabel);
+  }
+
+  function openSettingsView(root) {
+    lockInteractions(500);
+    state.settingsPinned = true;
+    state.currentView = "settings";
+    window.location.hash = "#app-settings";
+    renderCurrentView(root);
+  }
+
+  function triageLabelText(level) {
+    const config = window.ReskinTriage && window.ReskinTriage.LEVEL_CONFIG
+      ? window.ReskinTriage.LEVEL_CONFIG[level]
+      : null;
+    return config ? config.label : level;
+  }
+
+  function getTriageLevelForMessage(msg) {
+    if (!msg || !msg.threadId) return "";
+    const local = state.triageLocalMap[msg.threadId];
+    if (local && TRIAGE_LEVELS.includes(local)) return local;
+
+    const fromRow = window.ReskinTriage && typeof window.ReskinTriage.detectLevelFromRow === "function"
+      ? window.ReskinTriage.detectLevelFromRow(msg.row)
+      : "";
+    if (fromRow) {
+      state.triageLocalMap[msg.threadId] = fromRow;
+      return fromRow;
+    }
+    return "";
+  }
+
   function renderSidebar(root) {
     const nav = root.querySelector(".rv-nav");
     if (!(nav instanceof HTMLElement)) return;
+
     const activeHash = getActiveNavHash();
     nav.innerHTML = NAV_ITEMS.map((item) => {
       const isActive = item.hash === activeHash;
@@ -276,11 +370,46 @@
     }
   }
 
+  function renderRightRail(root) {
+    const rail = root.querySelector(".rv-right");
+    if (!(rail instanceof HTMLElement)) return;
+
+    const isInbox = activeMailbox() === "inbox";
+    const currentFilter = activeTriageFilter();
+    const rows = TRIAGE_LEVELS.map((level) => {
+      const count = state.triageCounts[level] || 0;
+      const active = currentFilter === level;
+      return `<button type="button" class="rv-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`;
+    }).join("");
+
+    rail.innerHTML = `
+      <section class="rv-ai-panel" data-reskin="true">
+        <div class="rv-ai-head" data-reskin="true">AI Copilot</div>
+        <div class="rv-ai-copy" data-reskin="true">Inbox-only triage is active. Existing labels are never re-triaged.</div>
+      </section>
+      <section class="rv-triage rv-triage-right" data-reskin="true">
+        <div class="rv-triage-head" data-reskin="true">
+          <span data-reskin="true">Triage</span>
+          <button type="button" class="rv-triage-refresh" data-reskin="true">Refresh</button>
+        </div>
+        <div class="rv-triage-list${isInbox ? "" : " is-off-inbox"}" data-reskin="true">${rows}</div>
+        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || (state.triageRunning ? "Triage running..." : "Inbox-only triage"))}</div>
+      </section>
+    `;
+  }
+
   function syncViewFromHash() {
-    if (isAppSettingsHash()) {
+    if (state.settingsPinned) {
       state.currentView = "settings";
       return;
     }
+
+    if (isAppSettingsHash()) {
+      state.settingsPinned = true;
+      state.currentView = "settings";
+      return;
+    }
+
     const threadHash = isThreadHash();
     if (state.lockListView) {
       if (!threadHash) {
@@ -290,9 +419,11 @@
         return;
       }
     }
+
     state.currentView = threadHash ? "thread" : "list";
     if (state.currentView === "list") {
       state.lastListHash = sanitizeListHash(window.location.hash || "#inbox");
+      state.triageFilter = activeTriageFilter();
     }
   }
 
@@ -316,55 +447,198 @@
         <main class="rv-main" data-reskin="true">
           <div class="rv-list" data-reskin="true"></div>
         </main>
+        <aside class="rv-right" data-reskin="true"></aside>
       </div>
     `;
+
     document.body.appendChild(root);
     bindRootEvents(root);
+    const settingsButton = root.querySelector(".rv-settings");
+    if (settingsButton instanceof HTMLElement && settingsButton.getAttribute("data-bound-direct") !== "true") {
+      settingsButton.addEventListener(
+        "click",
+        (event) => {
+          consumeEvent(event);
+          openSettingsView(root);
+        },
+        true
+      );
+      settingsButton.setAttribute("data-bound-direct", "true");
+    }
     return root;
+  }
+
+  async function loadSettingsCached(force = false) {
+    if (!force && state.settingsCache) return state.settingsCache;
+    if (!window.ReskinAI || typeof window.ReskinAI.loadSettings !== "function") return null;
+    try {
+      state.settingsCache = await window.ReskinAI.loadSettings();
+      return state.settingsCache;
+    } catch (error) {
+      logWarn("Failed to load AI settings", error);
+      return null;
+    }
+  }
+
+  async function saveSettingsFromDom(root) {
+    if (!window.ReskinAI || typeof window.ReskinAI.saveSettings !== "function") return;
+    const view = root.querySelector(".rv-settings-view");
+    if (!(view instanceof HTMLElement)) return;
+
+    const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
+    const payload = {
+      provider,
+      apiKey: normalize(view.querySelector('[name="apiKey"]')?.value || ""),
+      model: normalize(view.querySelector('[name="model"]')?.value || ""),
+      batchSize: Number(view.querySelector('[name="batchSize"]')?.value || 25),
+      timeoutMs: Number(view.querySelector('[name="timeoutMs"]')?.value || 30000),
+      retryCount: Number(view.querySelector('[name="retryCount"]')?.value || 2),
+      retryBackoffMs: Number(view.querySelector('[name="retryBackoffMs"]')?.value || 1200),
+      maxInputChars: Number(view.querySelector('[name="maxInputChars"]')?.value || 2200),
+      enabled: Boolean(view.querySelector('[name="enabled"]')?.checked),
+      consentTriage: Boolean(view.querySelector('[name="consentTriage"]')?.checked)
+    };
+
+    try {
+      const saved = await window.ReskinAI.saveSettings(payload);
+      state.settingsCache = saved;
+      state.triageStatus = "Settings saved";
+      applyReskin();
+    } catch (error) {
+      state.triageStatus = "Settings save failed";
+      logWarn("Save settings failed", error);
+      applyReskin();
+    }
+  }
+
+  async function testSettingsFromDom(root) {
+    if (!window.ReskinAI || typeof window.ReskinAI.testConnection !== "function") return;
+    const view = root.querySelector(".rv-settings-view");
+    if (!(view instanceof HTMLElement)) return;
+
+    const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
+    const payload = {
+      provider,
+      apiKey: normalize(view.querySelector('[name="apiKey"]')?.value || ""),
+      model: normalize(view.querySelector('[name="model"]')?.value || ""),
+      enabled: true,
+      consentTriage: true,
+      batchSize: Number(view.querySelector('[name="batchSize"]')?.value || 25),
+      timeoutMs: Number(view.querySelector('[name="timeoutMs"]')?.value || 30000),
+      retryCount: Number(view.querySelector('[name="retryCount"]')?.value || 2),
+      retryBackoffMs: Number(view.querySelector('[name="retryBackoffMs"]')?.value || 1200),
+      maxInputChars: Number(view.querySelector('[name="maxInputChars"]')?.value || 2200)
+    };
+
+    try {
+      await window.ReskinAI.testConnection(payload);
+      state.triageStatus = "Connection successful";
+      applyReskin();
+    } catch (error) {
+      state.triageStatus = "Connection failed";
+      logWarn("Connection test failed", error);
+      applyReskin();
+    }
   }
 
   function bindRootEvents(root) {
     if (root.getAttribute("data-bound") === "true") return;
+
     root.addEventListener("click", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+
       if (target.closest(".rv-settings")) {
-        lockInteractions(500);
-        state.currentView = "settings";
-        window.location.hash = "#app-settings";
-        renderCurrentView(root);
+        consumeEvent(event);
+        openSettingsView(root);
         return;
       }
+
       if (target.closest(".rv-settings-back")) {
+        consumeEvent(event);
         lockInteractions(500);
+        state.settingsPinned = false;
         state.currentView = "list";
         window.location.hash = sanitizeListHash(state.lastListHash || "#inbox");
         renderCurrentView(root);
         return;
       }
+
+      if (target.closest(".rv-settings-save")) {
+        consumeEvent(event);
+        saveSettingsFromDom(root);
+        return;
+      }
+
+      if (target.closest(".rv-settings-test")) {
+        consumeEvent(event);
+        testSettingsFromDom(root);
+        return;
+      }
+
+      const triageRefresh = target.closest(".rv-triage-refresh");
+      if (triageRefresh instanceof HTMLElement) {
+        consumeEvent(event);
+        state.triageQueueKey = "";
+        runTriageForInbox(true);
+        return;
+      }
+
+      const triageItem = target.closest(".rv-triage-item");
+      if (triageItem instanceof HTMLElement) {
+        consumeEvent(event);
+        lockInteractions(700);
+        state.settingsPinned = false;
+        state.currentView = "list";
+        state.activeThreadId = "";
+        state.lockListView = false;
+        const level = normalize(triageItem.getAttribute("data-triage-level") || "").toLowerCase();
+        if (!TRIAGE_LEVELS.includes(level)) return;
+        const nextHash = `#inbox?triage=${level}`;
+        state.lastListHash = nextHash;
+        state.triageFilter = level;
+        navigateToList(nextHash, "Inbox");
+        const list = root.querySelector(".rv-list");
+        if (list instanceof HTMLElement) {
+          list.innerHTML = '<div class="rv-empty" data-reskin="true">Loading inbox triage...</div>';
+        }
+        setTimeout(() => {
+          const latestRoot = document.getElementById(ROOT_ID);
+          if (latestRoot instanceof HTMLElement) applyReskin();
+        }, 320);
+        return;
+      }
+
       const navItem = target.closest(".rv-nav-item");
       if (!(navItem instanceof HTMLElement)) return;
+      consumeEvent(event);
       lockInteractions(900);
       const nextHash = navItem.getAttribute("data-target-hash") || "#inbox";
       const nativeLabel = navItem.getAttribute("data-native-label") || "";
+      state.settingsPinned = false;
       state.currentView = "list";
       state.activeThreadId = "";
       state.lockListView = false;
-      state.lastListHash = sanitizeListHash(nextHash);
-      navigateToList(nextHash, nativeLabel);
+      state.lastListHash = sanitizeListHash(nextHash, { clearTriage: true });
+      state.triageFilter = "";
+      navigateToList(state.lastListHash, nativeLabel);
+
       const list = root.querySelector(".rv-list");
       if (list instanceof HTMLElement) {
         list.innerHTML = `<div class="rv-empty" data-reskin="true">Loading ${escapeHtml(nextHash.replace("#", ""))}...</div>`;
       }
+
       setTimeout(() => {
         const latestRoot = document.getElementById(ROOT_ID);
         if (latestRoot instanceof HTMLElement) applyReskin();
       }, 250);
+
       setTimeout(() => {
         const latestRoot = document.getElementById(ROOT_ID);
         if (latestRoot instanceof HTMLElement) applyReskin();
       }, 900);
     });
+
     root.setAttribute("data-bound", "true");
   }
 
@@ -413,6 +687,7 @@
   function threadIdFromHref(href) {
     const value = normalize(href);
     if (!value) return "";
+
     const matchTh = value.match(/[?#&]th=([A-Za-z0-9_-]+)/);
     if (matchTh && matchTh[1]) return matchTh[1];
 
@@ -463,6 +738,20 @@
     return "";
   }
 
+  function extractSnippet(row) {
+    const snippets = [
+      row.querySelector(".y2"),
+      row.querySelector("span.y2"),
+      row.querySelector('[role="gridcell"] span')
+    ];
+    for (const node of snippets) {
+      if (!(node instanceof HTMLElement)) continue;
+      const text = normalize(node.innerText || node.textContent);
+      if (text.length >= 6) return text;
+    }
+    return "";
+  }
+
   function extractSubject(row, sender) {
     const candidateSelectors = [
       '[role="link"][aria-label]',
@@ -491,7 +780,6 @@
     });
 
     if (filtered.length > 0) {
-      // Prefer concise subject-like text over long snippet-like strings.
       filtered.sort((a, b) => a.length - b.length);
       return filtered[0];
     }
@@ -508,18 +796,6 @@
         if (looksLikeDateOrTime(part)) continue;
         return part;
       }
-    }
-
-    const rowText = normalize(row.textContent);
-    if (isUseful(rowText)) {
-      const cleaned = rowText
-        .replace(sender, "")
-        .replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+[A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4},?\s+\d{1,2}:\d{2}\s?(AM|PM)\b/gi, "")
-        .replace(/\b\d{1,2}:\d{2}\s?(AM|PM)\b/gi, "")
-        .replace(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/gi, "")
-        .replace(/\s{2,}/g, " ")
-        .trim();
-      if (isUseful(cleaned)) return cleaned.slice(0, 120);
     }
 
     return "No subject captured";
@@ -544,7 +820,6 @@
       .replace(/\b\d{1,2}:\d{2}\s?(?:AM|PM)\b/gi, "")
       .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/gi, "")
       .replace(/\s+[|-]\s+.*$/, "")
-      .replace(/\s+[–—]\s+.*$/, "")
       .replace(/^\s*(re|fw|fwd)\s*:\s*/i, "")
       .replace(/\s{2,}/g, " ")
       .replace(/\s*[-,|:]\s*$/, "")
@@ -558,7 +833,7 @@
     const items = [];
     const seen = new Set();
     let source = "rows";
-    const mailboxKey = mailboxKeyFromHash(getActiveNavHash());
+    const mailboxKey = mailboxKeyFromHash(state.lastListHash || window.location.hash || "#inbox");
     const strictMailbox = mailboxKey !== "inbox";
 
     for (const row of rows) {
@@ -570,13 +845,13 @@
       const sender = extractSender(row);
       const date = extractDate(row);
       const subject = cleanSubject(extractSubject(row, sender), sender, date);
+      const snippet = extractSnippet(row);
 
       const rowLink = row.querySelector('a[href*="#"], a[href*="th="], a[href]');
       const href = rowLink instanceof HTMLAnchorElement ? rowLink.getAttribute("href") || "" : "";
-      if (strictMailbox) {
-        if (!href || !hrefMatchesMailbox(href, mailboxKey)) continue;
-      }
-      items.push({ threadId, sender, subject, date, href });
+      if (strictMailbox && (!href || !hrefMatchesMailbox(href, mailboxKey))) continue;
+
+      items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "" });
       if (items.length >= limit) break;
     }
 
@@ -596,19 +871,19 @@
           const row = link.closest('[role="row"], tr, div');
           const sender = row ? extractSender(row) : "Unknown sender";
           const date = row ? extractDate(row) : "";
+          const snippet = row ? extractSnippet(row) : "";
           const linkTitle = normalize(link.getAttribute("title"));
           const linkText = normalize(link.textContent);
-          const subject =
-            cleanSubject(
-              (isUseful(linkTitle) && linkTitle) ||
-                (isUseful(linkText) && linkText) ||
-                (row ? extractSubject(row, sender) : "No subject captured"),
-              sender,
-              date
-            );
+          const subject = cleanSubject(
+            (isUseful(linkTitle) && linkTitle) ||
+              (isUseful(linkText) && linkText) ||
+              (row ? extractSubject(row, sender) : "No subject captured"),
+            sender,
+            date
+          );
 
           seen.add(threadId);
-          items.push({ threadId, sender, subject, date, href });
+          items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "" });
           if (items.length >= limit) break;
         }
 
@@ -621,12 +896,14 @@
 
   function openThread(threadId, href = "") {
     if (!threadId) return false;
+
     const link =
       document.querySelector(`[role="main"] a[href$="/${CSS.escape(threadId)}"]`) ||
       document.querySelector(`[role="main"] a[href*="/${CSS.escape(threadId)}"]`) ||
       document.querySelector(`a[href$="/${CSS.escape(threadId)}"]`) ||
       document.querySelector(`a[href*="/${CSS.escape(threadId)}"]`) ||
       document.querySelector(`a[href*="th=${CSS.escape(threadId)}"]`);
+
     if (link instanceof HTMLElement) {
       link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
       link.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
@@ -663,9 +940,7 @@
       .filter((text) => isUseful(text) && !looksLikeDateOrTime(text));
     const subject = subjectCandidates[0] || "No subject captured";
 
-    const senderNode = main.querySelector(
-      'h3 span[email], .gD[email], span[email], [email], [data-hovercard-id]'
-    );
+    const senderNode = main.querySelector('h3 span[email], .gD[email], span[email], [email], [data-hovercard-id]');
     const sender = senderNode instanceof HTMLElement ? normalize(senderNode.innerText || senderNode.textContent) : "";
 
     const dateCandidates = Array.from(main.querySelectorAll("span.g3[title], time, span[title], div[title]"))
@@ -676,7 +951,7 @@
     const bodyNodes = Array.from(
       main.querySelectorAll('.a3s.aiL, .a3s, [data-message-id] .ii.gt, [role="listitem"] div[dir="ltr"], [role="listitem"] div[dir="auto"]')
     ).filter((node) => node instanceof HTMLElement);
-    bodyNodes.sort((a, b) => normalize((b).innerText || "").length - normalize((a).innerText || "").length);
+    bodyNodes.sort((a, b) => normalize(b.innerText || "").length - normalize(a.innerText || "").length);
     const bodyNode = bodyNodes[0] || null;
     const bodyHtml = bodyNode instanceof HTMLElement ? bodyNode.innerHTML : "";
     const bodyText = bodyNode instanceof HTMLElement ? normalize(bodyNode.innerText || bodyNode.textContent) : "";
@@ -694,11 +969,10 @@
     const list = root.querySelector(".rv-list");
     if (!(list instanceof HTMLElement)) return;
     const thread = extractOpenThreadData();
-    const backLabel = "Back to inbox";
 
     list.innerHTML = `
       <section class="rv-thread" data-reskin="true">
-        <button type="button" class="rv-back" data-reskin="true">${backLabel}</button>
+        <button type="button" class="rv-back" data-reskin="true">Back to inbox</button>
         <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(thread.subject)}</h2>
         <div class="rv-thread-meta" data-reskin="true">
           <span class="rv-thread-sender" data-reskin="true">${escapeHtml(thread.sender)}</span>
@@ -724,7 +998,7 @@
         state.activeThreadId = "";
         state.lockListView = true;
         const targetHash = state.lastListHash || "#inbox";
-        navigateToList(targetHash);
+        navigateToList(targetHash, "Inbox");
         setTimeout(() => {
           const latestRoot = document.getElementById(ROOT_ID);
           if (latestRoot instanceof HTMLElement) applyReskin();
@@ -733,8 +1007,69 @@
     }
   }
 
+  async function runTriageForInbox(force = false) {
+    if (state.currentView !== "list") return;
+    if (activeMailbox() !== "inbox") return;
+    if (!window.ReskinAI || !window.ReskinTriage) return;
+    if (state.triageRunning) return;
+
+    const settings = await loadSettingsCached();
+    if (!settings || !settings.enabled || !settings.consentTriage) {
+      state.triageStatus = "Enable triage + consent in Settings";
+      return;
+    }
+
+    const listRoot = document.getElementById(ROOT_ID);
+    if (!(listRoot instanceof HTMLElement)) return;
+
+    const result = collectMessages(120);
+    const candidates = [];
+    for (const msg of result.items) {
+      const level = getTriageLevelForMessage(msg);
+      msg.triageLevel = level;
+      if (!level) candidates.push(msg);
+    }
+
+    state.triageUntriagedCount = candidates.length;
+    if (candidates.length === 0) {
+      state.triageStatus = "Inbox triage is up to date";
+      return;
+    }
+
+    const queueKey = candidates.slice(0, settings.batchSize).map((m) => m.threadId).join(",");
+    if (!force && queueKey && queueKey === state.triageQueueKey) return;
+    state.triageQueueKey = queueKey;
+    state.triageRunning = true;
+    state.triageStatus = `Triaging ${Math.min(candidates.length, settings.batchSize)} of ${candidates.length}...`;
+
+    try {
+      const scored = await window.ReskinAI.triageBatch(candidates.slice(0, settings.batchSize), settings);
+      let applied = 0;
+      for (const item of scored) {
+        if (!item || !item.threadId || !item.urgency) continue;
+        const ok = await window.ReskinTriage.applyLabelToThread(item.threadId, item.urgency);
+        if (ok) {
+          state.triageLocalMap[item.threadId] = item.urgency;
+          applied += 1;
+        }
+      }
+      state.triageStatus = `Applied ${applied} triage labels`;
+    } catch (error) {
+      const message = error && error.message ? error.message : "triage failed";
+      state.triageStatus = `Triage unavailable: ${message.slice(0, 120)}`;
+      logWarn("Inbox triage run failed", error);
+    } finally {
+      state.triageRunning = false;
+      const root = document.getElementById(ROOT_ID);
+      if (root instanceof HTMLElement && state.currentView === "list") {
+        renderCurrentView(root);
+      }
+    }
+  }
+
   function renderCurrentView(root) {
     renderSidebar(root);
+    renderRightRail(root);
     if (state.currentView === "settings") {
       renderSettings(root);
       return;
@@ -749,25 +1084,84 @@
   function renderSettings(root) {
     const list = root.querySelector(".rv-list");
     if (!(list instanceof HTMLElement)) return;
+
+    const settings = state.settingsCache || {
+      provider: "openrouter",
+      apiKey: "",
+      model: "openrouter/free",
+      enabled: true,
+      consentTriage: false,
+      batchSize: 25,
+      timeoutMs: 30000,
+      retryCount: 2,
+      retryBackoffMs: 1200,
+      maxInputChars: 2200
+    };
+
+    if (!state.settingsCache) {
+      loadSettingsCached().then(() => {
+        if (state.currentView !== "settings") return;
+        const latestRoot = document.getElementById(ROOT_ID);
+        if (!(latestRoot instanceof HTMLElement)) return;
+        const latestList = latestRoot.querySelector(".rv-list");
+        if (!(latestList instanceof HTMLElement)) return;
+        renderSettings(latestRoot);
+      });
+    }
+
+    const groqOptions = window.ReskinAI && Array.isArray(window.ReskinAI.GROQ_FREE_MODELS)
+      ? window.ReskinAI.GROQ_FREE_MODELS
+      : ["llama-3.1-8b-instant"];
+
     list.innerHTML = `
       <section class="rv-settings-view" data-reskin="true">
-        <h2 class="rv-settings-title" data-reskin="true">Settings</h2>
-        <p class="rv-settings-copy" data-reskin="true">This settings page is fully inside your app UI.</p>
-        <div class="rv-settings-grid" data-reskin="true">
-          <div class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Folder Navigation</div>
-            <div class="rv-settings-value" data-reskin="true">Sidebar-enabled</div>
-          </div>
-          <div class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Thread Viewer</div>
-            <div class="rv-settings-value" data-reskin="true">Custom overlay</div>
-          </div>
-          <div class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Theme</div>
-            <div class="rv-settings-value" data-reskin="true">Monochrome</div>
-          </div>
+        <h2 class="rv-settings-title" data-reskin="true">AI Settings</h2>
+        <p class="rv-settings-copy" data-reskin="true">Inbox-only triage. Already-labeled emails are never re-triaged.</p>
+        <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Provider</div>
+            <select name="provider" class="rv-field" data-reskin="true">
+              <option value="openrouter" ${settings.provider === "openrouter" ? "selected" : ""}>OpenRouter (free)</option>
+              <option value="groq" ${settings.provider === "groq" ? "selected" : ""}>Groq (free)</option>
+              <option value="ollama" ${settings.provider === "ollama" ? "selected" : ""}>Local Ollama</option>
+            </select>
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">API Key</div>
+            <input name="apiKey" class="rv-field" data-reskin="true" type="password" value="${escapeHtml(settings.apiKey || "")}" placeholder="Required for Groq/OpenRouter" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Model</div>
+            <input name="model" class="rv-field" data-reskin="true" value="${escapeHtml(settings.provider === "openrouter" ? "openrouter/free" : settings.model || groqOptions[0])}" placeholder="Model id" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Batch Size</div>
+            <input name="batchSize" class="rv-field" data-reskin="true" type="number" min="1" max="100" value="${Number(settings.batchSize) || 25}" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Timeout (ms)</div>
+            <input name="timeoutMs" class="rv-field" data-reskin="true" type="number" min="5000" max="120000" value="${Number(settings.timeoutMs) || 30000}" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Retry Count</div>
+            <input name="retryCount" class="rv-field" data-reskin="true" type="number" min="0" max="5" value="${Number(settings.retryCount) || 2}" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Retry Backoff (ms)</div>
+            <input name="retryBackoffMs" class="rv-field" data-reskin="true" type="number" min="200" max="20000" value="${Number(settings.retryBackoffMs) || 1200}" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Max Input Chars</div>
+            <input name="maxInputChars" class="rv-field" data-reskin="true" type="number" min="400" max="10000" value="${Number(settings.maxInputChars) || 2200}" />
+          </label>
         </div>
-        <button type="button" class="rv-settings-back" data-reskin="true">Back to Inbox</button>
+        <label class="rv-toggle" data-reskin="true"><input name="enabled" type="checkbox" ${settings.enabled ? "checked" : ""} /> Enable triage</label>
+        <label class="rv-toggle" data-reskin="true"><input name="consentTriage" type="checkbox" ${settings.consentTriage ? "checked" : ""} /> I consent to send inbox content to the selected AI provider for triage.</label>
+        <div class="rv-settings-actions" data-reskin="true">
+          <button type="button" class="rv-settings-test" data-reskin="true">Test Connection</button>
+          <button type="button" class="rv-settings-save" data-reskin="true">Save Settings</button>
+          <button type="button" class="rv-settings-back" data-reskin="true">Back to Inbox</button>
+        </div>
       </section>
     `;
   }
@@ -776,67 +1170,105 @@
     const list = root.querySelector(".rv-list");
     if (!(list instanceof HTMLElement)) return;
 
+    const route = parseListRoute(window.location.hash || state.lastListHash || "#inbox");
+    state.triageFilter = route.triage;
+
     const result = collectMessages();
-    const messages = result.items;
-    const listSignature = `${getActiveNavHash()}|${messages.map((m) => m.threadId).join(",")}`;
+    const allMessages = result.items;
+
+    for (const msg of allMessages) {
+      msg.triageLevel = getTriageLevelForMessage(msg);
+    }
+
+    state.triageCounts = window.ReskinTriage && typeof window.ReskinTriage.countLevels === "function"
+      ? window.ReskinTriage.countLevels(allMessages)
+      : { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 };
+
+    let messages = allMessages;
+    if (route.mailbox === "inbox" && route.triage) {
+      messages = allMessages.filter((msg) => msg.triageLevel === route.triage);
+    }
+
+    const listSignature = `${route.hash}|${messages.map((m) => `${m.threadId}:${m.triageLevel || "u"}`).join(",")}`;
     if (state.lastListSignature === listSignature && !interactionsLocked()) return;
     state.lastListSignature = listSignature;
+
     list.innerHTML = "";
 
     if (state.lastSource !== result.source) {
       state.lastSource = result.source;
       logInfo(`Extractor source: ${result.source}`);
     }
+
     if (state.lastRenderedCount !== messages.length) {
       state.lastRenderedCount = messages.length;
       logInfo(`Rendered ${messages.length} messages`);
     }
 
     if (messages.length === 0) {
-      logWarn("No messages captured. Gmail selectors did not match this view.");
       const empty = document.createElement("div");
       empty.className = "rv-empty";
       empty.setAttribute("data-reskin", "true");
-      empty.textContent = "No messages captured yet.";
+      empty.textContent = route.triage
+        ? `No ${triageLabelText(route.triage)} inbox messages captured yet.`
+        : "No messages captured yet.";
       list.appendChild(empty);
-      return;
+    } else {
+      for (const msg of messages) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "rv-item";
+        item.setAttribute("data-reskin", "true");
+
+        const level = msg.triageLevel;
+        const badgeClass = level ? `is-${level}` : "is-untriaged";
+        const badgeText = level ? triageLabelText(level) : "Untriaged";
+
+        item.innerHTML = `
+          <div class="rv-item-top" data-reskin="true">
+            <span class="rv-sender" data-reskin="true">${escapeHtml(msg.sender)}</span>
+            <span class="rv-date" data-reskin="true">${escapeHtml(msg.date || "")}</span>
+          </div>
+          <div class="rv-subject" data-reskin="true">${escapeHtml(msg.subject)}</div>
+          <div class="rv-triage-row" data-reskin="true">
+            <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
+            <span class="rv-snippet" data-reskin="true">${escapeHtml(msg.snippet || "")}</span>
+          </div>
+        `;
+
+        item.addEventListener("click", () => {
+          lockInteractions(900);
+          state.lockListView = false;
+          state.currentView = "thread";
+          state.activeThreadId = msg.threadId;
+          renderThread(root);
+          const ok = openThread(msg.threadId, msg.href);
+          if (!ok) {
+            logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
+            state.currentView = "list";
+            state.activeThreadId = "";
+            renderList(root);
+            return;
+          }
+          setTimeout(() => {
+            const latestRoot = document.getElementById(ROOT_ID);
+            if (!(latestRoot instanceof HTMLElement)) return;
+            if (state.currentView !== "thread") return;
+            renderThread(latestRoot);
+          }, 220);
+        });
+
+        list.appendChild(item);
+      }
     }
 
-    for (const msg of messages) {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = "rv-item";
-      item.setAttribute("data-reskin", "true");
-      item.innerHTML = `
-        <div class="rv-item-top" data-reskin="true">
-          <span class="rv-sender" data-reskin="true">${msg.sender}</span>
-          <span class="rv-date" data-reskin="true">${msg.date || ""}</span>
-        </div>
-        <div class="rv-subject" data-reskin="true">${msg.subject}</div>
-      `;
-      item.addEventListener("click", () => {
-        lockInteractions(900);
-        state.lockListView = false;
-        state.currentView = "thread";
-        state.activeThreadId = msg.threadId;
-        renderThread(root);
-        const ok = openThread(msg.threadId, msg.href);
-        if (!ok) {
-          logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
-          state.currentView = "list";
-          state.activeThreadId = "";
-          renderList(root);
-          return;
-        }
-        setTimeout(() => {
-          const latestRoot = document.getElementById(ROOT_ID);
-          if (!(latestRoot instanceof HTMLElement)) return;
-          if (state.currentView !== "thread") return;
-          renderThread(latestRoot);
-        }, 220);
-      });
-      list.appendChild(item);
+    if (route.mailbox === "inbox") {
+      setTimeout(() => {
+        runTriageForInbox(false);
+      }, 120);
     }
+
+    renderSidebar(root);
   }
 
   function applyReskin() {
@@ -854,45 +1286,63 @@
     }
   }
 
+  function observerDomSignature() {
+    const hash = normalize(window.location.hash || "");
+    const main = document.querySelector('[role="main"]') || document.querySelector('[gh="tl"]');
+    if (!(main instanceof HTMLElement)) return `${hash}|0|${state.currentView}`;
+
+    const rows = main.querySelectorAll(
+      '[data-thread-id], [data-legacy-thread-id], tr[role="row"], [role="option"][data-thread-id], [role="option"][data-legacy-thread-id]'
+    ).length;
+    return `${hash}|${rows}|${state.currentView}`;
+  }
+
+  function renderFromObserver() {
+    if (document.hidden) return;
+    if (state.currentView === "settings" && state.settingsPinned && isAppSettingsHash()) return;
+
+    const root = document.getElementById(ROOT_ID);
+    if (!(root instanceof HTMLElement)) return;
+
+    const signature = observerDomSignature();
+    if (signature === state.lastObserverSignature) return;
+    state.lastObserverSignature = signature;
+    state.lastObserverRenderAt = Date.now();
+    renderCurrentView(root);
+  }
+
   function startObserver() {
-    if (state.observer || !document.body) return;
-    state.observer = new MutationObserver((mutations) => {
+    if (state.pollTimer || !document.body) return;
+
+    state.pollTimer = window.setInterval(() => {
+      if (document.hidden) return;
       if (interactionsLocked()) return;
       if (state.isApplying) return;
-      let hasExternalMutation = false;
-      for (const mutation of mutations) {
-        const target = mutation.target;
-        if (!(target instanceof Node)) continue;
-        const root = document.getElementById(ROOT_ID);
-        if (root && root.contains(target)) continue;
-        hasExternalMutation = true;
-        break;
+
+      const hasStyle = Boolean(document.getElementById(STYLE_ID));
+      const hasRoot = Boolean(document.getElementById(ROOT_ID));
+      if (!hasStyle || !hasRoot) {
+        applyReskin();
+        return;
       }
-      if (!hasExternalMutation) return;
-      clearTimeout(state.debounceTimer);
-      state.debounceTimer = setTimeout(() => {
-        if (interactionsLocked()) return;
-        if (state.isApplying) return;
-        const hasStyle = Boolean(document.getElementById(STYLE_ID));
-        const hasRoot = Boolean(document.getElementById(ROOT_ID));
-        if (!hasStyle || !hasRoot) {
-          applyReskin();
-          return;
-        }
-        const root = document.getElementById(ROOT_ID);
-        if (root instanceof HTMLElement) renderCurrentView(root);
-      }, 75);
-    });
-    state.observer.observe(document.body, { childList: true, subtree: true });
+
+      const elapsed = Date.now() - state.lastObserverRenderAt;
+      if (elapsed >= Math.max(OBSERVER_MIN_RENDER_GAP_MS, UI_POLL_INTERVAL_MS)) {
+        renderFromObserver();
+      }
+    }, UI_POLL_INTERVAL_MS);
   }
 
   function waitForReady() {
     removeLegacyNodes();
+
     window.addEventListener("hashchange", () => {
       syncViewFromHash();
+      state.lastObserverSignature = "";
       const root = document.getElementById(ROOT_ID);
       if (root instanceof HTMLElement) renderCurrentView(root);
     });
+
     logInfo("Waiting for Gmail landmarks...");
     const poll = setInterval(() => {
       const ready = selectFirst(GMAIL_READY_SELECTORS);
@@ -901,7 +1351,7 @@
       logInfo("Gmail ready. Applying viewer.");
       applyReskin();
       startObserver();
-      logOnce("observer-started", "info", "Mutation observer started (debounced 75ms).");
+      logOnce("observer-started", "info", "Low-power UI poller started (900ms interval).");
     }, 200);
   }
 
