@@ -1,7 +1,10 @@
 # Changelog
 
-## v0.6.4 - 2026-02-18
+## v0.6.5 - 2026-02-18
 
+- Reduced Gmail polling/render pressure further to prevent severe browser slowdowns and tab instability.
+- Scoped message/link extraction to Gmail main content when available (avoids broad document-wide scans).
+- Added hash-change-aware rendering and lowered automatic list refresh cadence (12s) to cut repeated heavy DOM work.
 - Replaced full-page `MutationObserver` rerender loop with a low-power UI poller (900ms) to reduce CPU pressure.
 - Preserved render dedupe and guardrails while cutting high-frequency Gmail DOM callback load.
 - Updated runtime startup logging to reflect low-power polling mode.

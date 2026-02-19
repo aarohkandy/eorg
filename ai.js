@@ -156,9 +156,11 @@
         const urgency = normalize(item.urgency).toLowerCase();
         if (!LEVELS.includes(urgency)) return null;
         const threadId = normalize(item.threadId);
-        if (!threadId) return null;
+        const index = Number.isInteger(Number(item.i)) ? Number(item.i) : -1;
+        if (!threadId && index < 0) return null;
         return {
           threadId,
+          i: index,
           urgency,
           score: clamp(Number(item.score) || 50, 0, 100),
           reason: normalize(item.reason || "") || "Model triage"

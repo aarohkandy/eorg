@@ -8,37 +8,69 @@
   const OBSERVER_DEBOUNCE_MS = 180;
   const OBSERVER_MIN_RENDER_GAP_MS = 320;
   const UI_POLL_INTERVAL_MS = 900;
+  const LIST_REFRESH_INTERVAL_MS = 12000;
   const GMAIL_READY_SELECTORS = ['[role="main"]', '[aria-label="Main menu"]'];
   const ROW_SELECTORS = [
     '[role="main"] tr[role="row"][data-thread-id]',
     '[role="main"] tr[role="row"][data-legacy-thread-id]',
     '[role="main"] [role="row"][data-thread-id]',
     '[role="main"] [role="row"][data-legacy-thread-id]',
+    '[role="main"] tr[role="row"]',
+    '[role="main"] tr.zA',
+    '[role="main"] [role="row"]',
     '[role="main"] tr[data-thread-id]',
     '[role="main"] tr[data-legacy-thread-id]',
     '[gh="tl"] tr[role="row"]',
     '[gh="tl"] tr',
     '[role="row"][data-thread-id]',
     '[role="row"][data-legacy-thread-id]',
+    'tr[role="row"]',
+    'tr.zA',
+    '[role="option"][data-thread-id]',
+    '[role="option"][data-legacy-thread-id]',
+    '[data-thread-id]',
+    '[data-legacy-thread-id]'
+  ];
+  const SCOPED_ROW_SELECTORS = [
+    'tr[role="row"][data-thread-id]',
+    'tr[role="row"][data-legacy-thread-id]',
+    '[role="row"][data-thread-id]',
+    '[role="row"][data-legacy-thread-id]',
+    'tr[role="row"]',
+    'tr.zA',
+    '[role="row"]',
+    'tr[data-thread-id]',
+    'tr[data-legacy-thread-id]',
     '[role="option"][data-thread-id]',
     '[role="option"][data-legacy-thread-id]',
     '[data-thread-id]',
     '[data-legacy-thread-id]'
   ];
   const LINK_SELECTORS = [
+    '[role="main"] a[href*="th="]',
     '[role="main"] a[href*="#inbox/"]',
     '[role="main"] a[href*="#all/"]',
     '[role="main"] a[href*="#label/"]',
     '[role="main"] a[href*="#sent/"]',
     '[role="main"] [role="link"][href*="#"]',
+    '[gh="tl"] a[href*="th="]',
     '[gh="tl"] a[href*="#inbox/"]',
     '[gh="tl"] a[href*="#all/"]',
     '[gh="tl"] a[href*="#label/"]',
     '[gh="tl"] a[href*="#sent/"]',
+    'a[href*="th="]',
     'a[href*="#inbox/"]',
     'a[href*="#all/"]',
     'a[href*="#label/"]',
     'a[href*="#sent/"]'
+  ];
+  const SCOPED_LINK_SELECTORS = [
+    'a[href*="th="]',
+    'a[href*="#inbox/"]',
+    'a[href*="#all/"]',
+    'a[href*="#label/"]',
+    'a[href*="#sent/"]',
+    '[role="link"][href*="#"]'
   ];
   const NAV_ITEMS = [
     { label: "Inbox", hash: "#inbox", nativeLabel: "Inbox" },
@@ -88,10 +120,13 @@
     triageUntriagedCount: 0,
     triageLocalMap: {},
     settingsCache: null,
+    settingsLoadInFlight: false,
+    settingsLoadFailed: false,
     settingsPinned: false,
     lastObserverRenderAt: 0,
     pendingObserverTimer: null,
-    lastObserverSignature: ""
+    lastObserverSignature: "",
+    lastSeenHash: ""
   };
 
   function logInfo(message, extra) {
@@ -147,6 +182,22 @@
       .replace(/'/g, "&#39;");
   }
 
+  function resolveExtensionUrl(path) {
+    const chromeRuntime =
+      globalThis.chrome && globalThis.chrome.runtime && typeof globalThis.chrome.runtime.getURL === "function"
+        ? globalThis.chrome.runtime
+        : null;
+    if (chromeRuntime) return chromeRuntime.getURL(path);
+
+    const browserRuntime =
+      globalThis.browser && globalThis.browser.runtime && typeof globalThis.browser.runtime.getURL === "function"
+        ? globalThis.browser.runtime
+        : null;
+    if (browserRuntime) return browserRuntime.getURL(path);
+
+    return path;
+  }
+
   function isUseful(text) {
     const value = normalize(text);
     if (!value || value.length < 2) return false;
@@ -174,6 +225,14 @@
     return null;
   }
 
+  function getGmailMainRoot() {
+    return (
+      document.querySelector('[role="main"]') ||
+      document.querySelector('[gh="tl"]') ||
+      null
+    );
+  }
+
   function removeLegacyNodes() {
     const oldRoot = document.getElementById(ROOT_ID);
     if (oldRoot) oldRoot.remove();
@@ -191,7 +250,7 @@
     const link = document.createElement("link");
     link.id = STYLE_ID;
     link.rel = "stylesheet";
-    link.href = chrome.runtime.getURL("styles.css");
+    link.href = resolveExtensionUrl("styles.css");
     head.appendChild(link);
     return link;
   }
@@ -381,6 +440,8 @@
       const active = currentFilter === level;
       return `<button type="button" class="rv-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`;
     }).join("");
+    const startDisabled = !isInbox || state.triageRunning;
+    const startLabel = state.triageRunning ? "Running..." : "Start";
 
     rail.innerHTML = `
       <section class="rv-ai-panel" data-reskin="true">
@@ -390,10 +451,10 @@
       <section class="rv-triage rv-triage-right" data-reskin="true">
         <div class="rv-triage-head" data-reskin="true">
           <span data-reskin="true">Triage</span>
-          <button type="button" class="rv-triage-refresh" data-reskin="true">Refresh</button>
+          <button type="button" class="rv-triage-start" data-reskin="true" ${startDisabled ? "disabled" : ""}>${startLabel}</button>
         </div>
         <div class="rv-triage-list${isInbox ? "" : " is-off-inbox"}" data-reskin="true">${rows}</div>
-        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || (state.triageRunning ? "Triage running..." : "Inbox-only triage"))}</div>
+        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || (state.triageRunning ? "Triage running..." : "Press Start to organize untriaged inbox messages"))}</div>
       </section>
     `;
   }
@@ -470,13 +531,20 @@
 
   async function loadSettingsCached(force = false) {
     if (!force && state.settingsCache) return state.settingsCache;
+    if (!force && state.settingsLoadFailed) return null;
+    if (state.settingsLoadInFlight) return state.settingsCache;
     if (!window.ReskinAI || typeof window.ReskinAI.loadSettings !== "function") return null;
+    state.settingsLoadInFlight = true;
     try {
       state.settingsCache = await window.ReskinAI.loadSettings();
+      state.settingsLoadFailed = false;
       return state.settingsCache;
     } catch (error) {
+      state.settingsLoadFailed = true;
       logWarn("Failed to load AI settings", error);
       return null;
+    } finally {
+      state.settingsLoadInFlight = false;
     }
   }
 
@@ -576,11 +644,11 @@
         return;
       }
 
-      const triageRefresh = target.closest(".rv-triage-refresh");
-      if (triageRefresh instanceof HTMLElement) {
+      const triageStart = target.closest(".rv-triage-start");
+      if (triageStart instanceof HTMLElement) {
         consumeEvent(event);
         state.triageQueueKey = "";
-        runTriageForInbox(true);
+        runTriageForInbox({ force: true, processAll: true, source: "manual-start" });
         return;
       }
 
@@ -642,11 +710,14 @@
     root.setAttribute("data-bound", "true");
   }
 
-  function selectRows() {
+  function selectRows(scopeRoot) {
+    const hasScopedRoot = scopeRoot instanceof HTMLElement;
+    const scope = hasScopedRoot ? scopeRoot : document;
+    const selectors = hasScopedRoot ? SCOPED_ROW_SELECTORS : ROW_SELECTORS;
     const unique = new Set();
     const rows = [];
-    for (const selector of ROW_SELECTORS) {
-      const nodes = document.querySelectorAll(selector);
+    for (const selector of selectors) {
+      const nodes = scope.querySelectorAll(selector);
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
         if (unique.has(node)) continue;
@@ -675,7 +746,7 @@
       if (nestedId) return nestedId;
     }
 
-    const link = row.querySelector('a[href*="#"]');
+    const link = row.querySelector('a[href*="th="], a[href*="#"], a[href]');
     if (link instanceof HTMLAnchorElement) {
       const fromHref = threadIdFromHref(link.getAttribute("href"));
       if (fromHref) return fromHref;
@@ -703,8 +774,33 @@
     return "";
   }
 
+  function fallbackThreadIdFromRow(row, index = 0) {
+    const seed = normalize(
+      row.getAttribute("aria-label") ||
+      row.getAttribute("data-article-id") ||
+      row.getAttribute("data-thread-id") ||
+      row.getAttribute("data-legacy-thread-id") ||
+      row.textContent
+    ).slice(0, 180);
+    if (!seed) return `synthetic-${index}`;
+
+    let hash = 0;
+    for (let i = 0; i < seed.length; i += 1) {
+      hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+    }
+    return `synthetic-${hash.toString(36)}`;
+  }
+
+  function messageDedupeKey(threadId, href) {
+    const id = normalize(threadId || "");
+    const link = normalize(href || "");
+    return `${id}|${link}`;
+  }
+
   function extractSender(row) {
     const senderCandidates = [
+      row.querySelector(".yW span[email]"),
+      row.querySelector(".yP"),
       row.querySelector("span[email]"),
       row.querySelector("[email]"),
       row.querySelector("span[name]"),
@@ -712,10 +808,22 @@
     ];
     for (const node of senderCandidates) {
       if (!node) continue;
+      const fromEmail = normalize(node.getAttribute("email"));
+      if (isUseful(fromEmail)) return fromEmail;
+      const fromHovercard = normalize(node.getAttribute("data-hovercard-id"));
+      if (isUseful(fromHovercard)) return fromHovercard;
       const fromText = normalize(node.textContent);
       if (isUseful(fromText)) return fromText;
       const fromTitle = normalize(node.getAttribute("title"));
       if (isUseful(fromTitle)) return fromTitle;
+      const fromAria = normalize(node.getAttribute("aria-label"));
+      if (isUseful(fromAria)) return fromAria;
+    }
+
+    const rowAria = normalize(row.getAttribute("aria-label"));
+    if (rowAria) {
+      const first = normalize(rowAria.split(/[,|-]/)[0]);
+      if (isUseful(first) && !looksLikeDateOrTime(first)) return first;
     }
     return "Unknown sender";
   }
@@ -753,6 +861,18 @@
   }
 
   function extractSubject(row, sender) {
+    const primarySubject = normalize(
+      row.querySelector(".bog, .y6 span, span.bog")?.textContent ||
+      row.querySelector(".y6")?.textContent
+    );
+    if (
+      isUseful(primarySubject) &&
+      primarySubject.toLowerCase() !== sender.toLowerCase() &&
+      !looksLikeDateOrTime(primarySubject)
+    ) {
+      return primarySubject;
+    }
+
     const candidateSelectors = [
       '[role="link"][aria-label]',
       '[role="link"][title]',
@@ -829,46 +949,55 @@
   }
 
   function collectMessages(limit = 60) {
-    const rows = selectRows();
+    const mainRoot = getGmailMainRoot();
+    const queryRoot = mainRoot instanceof HTMLElement ? mainRoot : document;
+    const linkSelectors = mainRoot instanceof HTMLElement ? SCOPED_LINK_SELECTORS : LINK_SELECTORS;
+    const rows = selectRows(mainRoot);
     const items = [];
     const seen = new Set();
     let source = "rows";
     const mailboxKey = mailboxKeyFromHash(state.lastListHash || window.location.hash || "#inbox");
     const strictMailbox = mailboxKey !== "inbox";
 
-    for (const row of rows) {
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
       if (!(row instanceof HTMLElement)) continue;
-      const threadId = extractThreadIdFromRow(row);
-      if (!threadId || seen.has(threadId)) continue;
-      seen.add(threadId);
+      const rowLink = row.querySelector('a[href*="th="], a[href*="#inbox/"], a[href*="#all/"], a[href*="#label/"], a[href*="#sent/"], a[href*="#"], [role="link"][data-thread-id], [role="link"][data-legacy-thread-id]');
+      const href = rowLink instanceof HTMLElement ? (rowLink.getAttribute("href") || "") : "";
+      const threadId =
+        extractThreadIdFromRow(row) ||
+        threadIdFromHref(href) ||
+        fallbackThreadIdFromRow(row, index);
+      const dedupeKey = messageDedupeKey(threadId, href);
+      if (seen.has(dedupeKey)) continue;
 
       const sender = extractSender(row);
       const date = extractDate(row);
       const subject = cleanSubject(extractSubject(row, sender), sender, date);
       const snippet = extractSnippet(row);
-
-      const rowLink = row.querySelector('a[href*="#"], a[href*="th="], a[href]');
-      const href = rowLink instanceof HTMLAnchorElement ? rowLink.getAttribute("href") || "" : "";
+      if (sender === "Unknown sender" && subject === "No subject captured" && !isUseful(snippet)) continue;
       if (strictMailbox && (!href || !hrefMatchesMailbox(href, mailboxKey))) continue;
 
+      seen.add(dedupeKey);
       items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "" });
       if (items.length >= limit) break;
     }
 
     if (items.length < limit) {
       source = items.length > 0 ? "rows+links" : "links";
-      for (const selector of LINK_SELECTORS) {
-        const links = Array.from(document.querySelectorAll(selector));
+      for (const selector of linkSelectors) {
+        const links = Array.from(queryRoot.querySelectorAll(selector));
         if (links.length === 0) continue;
 
         for (const link of links) {
           if (!(link instanceof HTMLElement)) continue;
           const href = link.getAttribute("href") || "";
           const threadId = threadIdFromHref(href);
-          if (!threadId || seen.has(threadId)) continue;
+          const dedupeKey = messageDedupeKey(threadId, href);
+          if (!threadId || seen.has(dedupeKey)) continue;
           if (strictMailbox && !hrefMatchesMailbox(href, mailboxKey)) continue;
 
-          const row = link.closest('[role="row"], tr, div');
+          const row = link.closest('[role="row"], tr, [data-thread-id], [data-legacy-thread-id], .zA');
           const sender = row ? extractSender(row) : "Unknown sender";
           const date = row ? extractDate(row) : "";
           const snippet = row ? extractSnippet(row) : "";
@@ -881,8 +1010,9 @@
             sender,
             date
           );
+          if (sender === "Unknown sender" && subject === "No subject captured" && !isUseful(snippet)) continue;
 
-          seen.add(threadId);
+          seen.add(dedupeKey);
           items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "" });
           if (items.length >= limit) break;
         }
@@ -894,15 +1024,18 @@
     return { items, source };
   }
 
-  function openThread(threadId, href = "") {
-    if (!threadId) return false;
+  function openThread(threadId, href = "", row = null) {
+    if (!threadId && !href && !(row instanceof HTMLElement)) return false;
 
-    const link =
-      document.querySelector(`[role="main"] a[href$="/${CSS.escape(threadId)}"]`) ||
-      document.querySelector(`[role="main"] a[href*="/${CSS.escape(threadId)}"]`) ||
-      document.querySelector(`a[href$="/${CSS.escape(threadId)}"]`) ||
-      document.querySelector(`a[href*="/${CSS.escape(threadId)}"]`) ||
-      document.querySelector(`a[href*="th=${CSS.escape(threadId)}"]`);
+    const link = threadId
+      ? (
+        document.querySelector(`[role="main"] a[href$="/${CSS.escape(threadId)}"]`) ||
+        document.querySelector(`[role="main"] a[href*="/${CSS.escape(threadId)}"]`) ||
+        document.querySelector(`a[href$="/${CSS.escape(threadId)}"]`) ||
+        document.querySelector(`a[href*="/${CSS.escape(threadId)}"]`) ||
+        document.querySelector(`a[href*="th=${CSS.escape(threadId)}"]`)
+      )
+      : null;
 
     if (link instanceof HTMLElement) {
       link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -911,9 +1044,19 @@
       return true;
     }
 
-    const row =
-      document.querySelector(`[data-thread-id="${CSS.escape(threadId)}"]`) ||
-      document.querySelector(`[data-legacy-thread-id="${CSS.escape(threadId)}"]`);
+    const domRow = threadId
+      ? (
+        document.querySelector(`[data-thread-id="${CSS.escape(threadId)}"]`) ||
+        document.querySelector(`[data-legacy-thread-id="${CSS.escape(threadId)}"]`)
+      )
+      : null;
+    if (domRow instanceof HTMLElement) {
+      domRow.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      domRow.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      domRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      return true;
+    }
+
     if (row instanceof HTMLElement) {
       row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
       row.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
@@ -1007,7 +1150,9 @@
     }
   }
 
-  async function runTriageForInbox(force = false) {
+  async function runTriageForInbox(options = {}) {
+    const force = Boolean(options.force);
+    const processAll = Boolean(options.processAll);
     if (state.currentView !== "list") return;
     if (activeMailbox() !== "inbox") return;
     if (!window.ReskinAI || !window.ReskinTriage) return;
@@ -1022,38 +1167,70 @@
     const listRoot = document.getElementById(ROOT_ID);
     if (!(listRoot instanceof HTMLElement)) return;
 
-    const result = collectMessages(120);
-    const candidates = [];
-    for (const msg of result.items) {
-      const level = getTriageLevelForMessage(msg);
-      msg.triageLevel = level;
-      if (!level) candidates.push(msg);
-    }
-
-    state.triageUntriagedCount = candidates.length;
-    if (candidates.length === 0) {
-      state.triageStatus = "Inbox triage is up to date";
-      return;
-    }
-
-    const queueKey = candidates.slice(0, settings.batchSize).map((m) => m.threadId).join(",");
-    if (!force && queueKey && queueKey === state.triageQueueKey) return;
-    state.triageQueueKey = queueKey;
+    const attempted = new Set();
+    let totalApplied = 0;
+    let totalScored = 0;
+    let batchIndex = 0;
+    const maxBatches = processAll ? 30 : 1;
     state.triageRunning = true;
-    state.triageStatus = `Triaging ${Math.min(candidates.length, settings.batchSize)} of ${candidates.length}...`;
 
     try {
-      const scored = await window.ReskinAI.triageBatch(candidates.slice(0, settings.batchSize), settings);
-      let applied = 0;
-      for (const item of scored) {
-        if (!item || !item.threadId || !item.urgency) continue;
-        const ok = await window.ReskinTriage.applyLabelToThread(item.threadId, item.urgency);
-        if (ok) {
-          state.triageLocalMap[item.threadId] = item.urgency;
-          applied += 1;
+      while (batchIndex < maxBatches) {
+        const result = collectMessages(160);
+        const candidates = [];
+        for (const msg of result.items) {
+          const level = getTriageLevelForMessage(msg);
+          msg.triageLevel = level;
+          if (!level && !attempted.has(msg.threadId)) candidates.push(msg);
         }
+
+        state.triageUntriagedCount = candidates.length;
+        if (candidates.length === 0) break;
+
+        const batch = candidates.slice(0, settings.batchSize);
+        const queueKey = batch.map((m) => m.threadId).join(",");
+        if (!force && !processAll && queueKey && queueKey === state.triageQueueKey) break;
+        state.triageQueueKey = queueKey;
+        for (const msg of batch) attempted.add(msg.threadId);
+
+        state.triageStatus = processAll
+          ? `Triaging batch ${batchIndex + 1}: ${batch.length} of ${candidates.length} remaining...`
+          : `Triaging ${batch.length} of ${candidates.length}...`;
+
+        const scored = await window.ReskinAI.triageBatch(batch, settings);
+        totalScored += batch.length;
+        for (const item of scored) {
+          if (!item || !item.urgency) continue;
+          const mappedByThread = item.threadId
+            ? batch.find((msg) => msg.threadId === item.threadId)
+            : null;
+          const mappedByIndex =
+            typeof item.i === "number" && item.i >= 0 && item.i < batch.length ? batch[item.i] : null;
+          const targetMessage = mappedByThread || mappedByIndex || null;
+
+          const ok = window.ReskinTriage && typeof window.ReskinTriage.applyLabelToMessage === "function"
+            ? await window.ReskinTriage.applyLabelToMessage(
+              targetMessage || { threadId: item.threadId, href: "", row: null },
+              item.urgency
+            )
+            : await window.ReskinTriage.applyLabelToThread(item.threadId, item.urgency);
+          if (ok) {
+            const mappedThreadId = (targetMessage && targetMessage.threadId) || item.threadId;
+            if (mappedThreadId) state.triageLocalMap[mappedThreadId] = item.urgency;
+            totalApplied += 1;
+          }
+        }
+
+        batchIndex += 1;
+        if (!processAll) break;
       }
-      state.triageStatus = `Applied ${applied} triage labels`;
+      if (batchIndex === 0) {
+        state.triageStatus = "Inbox triage is up to date";
+      } else if (processAll) {
+        state.triageStatus = `Triage complete: ${totalApplied} labels applied across ${batchIndex} batches`;
+      } else {
+        state.triageStatus = `Applied ${totalApplied} triage labels`;
+      }
     } catch (error) {
       const message = error && error.message ? error.message : "triage failed";
       state.triageStatus = `Triage unavailable: ${message.slice(0, 120)}`;
@@ -1068,6 +1245,12 @@
   }
 
   function renderCurrentView(root) {
+    // Route hash is the source of truth for Settings, so stale state cannot pin us back to list view.
+    if (isAppSettingsHash()) {
+      state.settingsPinned = true;
+      state.currentView = "settings";
+    }
+
     renderSidebar(root);
     renderRightRail(root);
     if (state.currentView === "settings") {
@@ -1098,7 +1281,7 @@
       maxInputChars: 2200
     };
 
-    if (!state.settingsCache) {
+    if (!state.settingsCache && !state.settingsLoadFailed && !state.settingsLoadInFlight) {
       loadSettingsCached().then(() => {
         if (state.currentView !== "settings") return;
         const latestRoot = document.getElementById(ROOT_ID);
@@ -1242,7 +1425,7 @@
           state.currentView = "thread";
           state.activeThreadId = msg.threadId;
           renderThread(root);
-          const ok = openThread(msg.threadId, msg.href);
+          const ok = openThread(msg.threadId, msg.href, msg.row);
           if (!ok) {
             logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
             state.currentView = "list";
@@ -1264,7 +1447,7 @@
 
     if (route.mailbox === "inbox") {
       setTimeout(() => {
-        runTriageForInbox(false);
+        runTriageForInbox({ force: false, processAll: false, source: "auto" });
       }, 120);
     }
 
@@ -1288,13 +1471,22 @@
 
   function observerDomSignature() {
     const hash = normalize(window.location.hash || "");
-    const main = document.querySelector('[role="main"]') || document.querySelector('[gh="tl"]');
+    const main = getGmailMainRoot();
     if (!(main instanceof HTMLElement)) return `${hash}|0|${state.currentView}`;
-
-    const rows = main.querySelectorAll(
-      '[data-thread-id], [data-legacy-thread-id], tr[role="row"], [role="option"][data-thread-id], [role="option"][data-legacy-thread-id]'
-    ).length;
-    return `${hash}|${rows}|${state.currentView}`;
+    const firstRow =
+      main.querySelector('[data-thread-id], [data-legacy-thread-id], tr[role="row"], [role="option"]') || null;
+    const firstRowId = firstRow instanceof HTMLElement
+      ? normalize(
+        firstRow.getAttribute("data-thread-id") ||
+        firstRow.getAttribute("data-legacy-thread-id") ||
+        firstRow.getAttribute("data-article-id") ||
+        firstRow.getAttribute("aria-rowindex") ||
+        firstRow.id ||
+        firstRow.textContent
+      ).slice(0, 80)
+      : "";
+    const busy = normalize(main.getAttribute("aria-busy") || "");
+    return `${hash}|${state.currentView}|${busy}|${firstRowId}`;
   }
 
   function renderFromObserver() {
@@ -1313,6 +1505,7 @@
 
   function startObserver() {
     if (state.pollTimer || !document.body) return;
+    state.lastSeenHash = normalize(window.location.hash || "");
 
     state.pollTimer = window.setInterval(() => {
       if (document.hidden) return;
@@ -1326,8 +1519,34 @@
         return;
       }
 
+      const currentHash = normalize(window.location.hash || "");
+      if (isAppSettingsHash()) {
+        if (!state.settingsPinned || state.currentView !== "settings") {
+          state.settingsPinned = true;
+          state.currentView = "settings";
+          state.lastObserverSignature = "";
+          const root = document.getElementById(ROOT_ID);
+          if (root instanceof HTMLElement) {
+            renderCurrentView(root);
+          }
+        }
+        state.lastSeenHash = currentHash;
+        return;
+      }
+
+      if (currentHash !== state.lastSeenHash) {
+        state.lastSeenHash = currentHash;
+        syncViewFromHash();
+        state.lastObserverSignature = "";
+        const root = document.getElementById(ROOT_ID);
+        if (root instanceof HTMLElement) {
+          renderCurrentView(root);
+        }
+        return;
+      }
+
       const elapsed = Date.now() - state.lastObserverRenderAt;
-      if (elapsed >= Math.max(OBSERVER_MIN_RENDER_GAP_MS, UI_POLL_INTERVAL_MS)) {
+      if (elapsed >= Math.max(OBSERVER_MIN_RENDER_GAP_MS, LIST_REFRESH_INTERVAL_MS)) {
         renderFromObserver();
       }
     }, UI_POLL_INTERVAL_MS);

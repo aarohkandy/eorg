@@ -95,7 +95,7 @@ body[data-reskin-mode="viewer"] {
   margin-bottom: 8px !important;
 }
 
-#reskin-root .rv-triage-refresh {
+#reskin-root .rv-triage-start {
   border: 1px solid #303030 !important;
   border-radius: 8px !important;
   background: #141414 !important;
@@ -105,8 +105,13 @@ body[data-reskin-mode="viewer"] {
   cursor: pointer !important;
 }
 
-#reskin-root .rv-triage-refresh:hover {
+#reskin-root .rv-triage-start:hover {
   background: #1e1e1e !important;
+}
+
+#reskin-root .rv-triage-start[disabled] {
+  opacity: 0.6 !important;
+  cursor: not-allowed !important;
 }
 
 #reskin-root .rv-triage-list {

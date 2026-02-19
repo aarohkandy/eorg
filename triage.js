@@ -82,6 +82,33 @@
     );
   }
 
+  function normalizedHref(href) {
+    const raw = normalize(href);
+    if (!raw) return "";
+    try {
+      return new URL(raw, window.location.origin).toString();
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  function findRowByHref(href) {
+    const target = normalizedHref(href);
+    if (!target) return null;
+
+    const links = Array.from(document.querySelectorAll('a[href], [role="link"][href]'));
+    for (const link of links) {
+      if (!(link instanceof HTMLElement)) continue;
+      const candidate = normalizedHref(link.getAttribute("href") || "");
+      if (!candidate) continue;
+      if (candidate === target || candidate.endsWith(target) || target.endsWith(candidate)) {
+        const row = link.closest('[role="row"], tr, .zA, [data-thread-id], [data-legacy-thread-id]');
+        if (row instanceof HTMLElement) return row;
+      }
+    }
+    return null;
+  }
+
   async function selectRow(row) {
     if (!(row instanceof HTMLElement)) return false;
     const checkbox =
@@ -185,6 +212,35 @@
     return picked;
   }
 
+  async function applyLabelToMessage(message, level) {
+    const config = LEVEL_CONFIG[level];
+    if (!config) return false;
+
+    let row = null;
+    if (message && message.row instanceof HTMLElement && message.row.isConnected) {
+      row = message.row;
+    }
+    if (!row && message && message.threadId) {
+      row = findRowByThreadId(message.threadId);
+    }
+    if (!row && message && message.href) {
+      row = findRowByHref(message.href);
+    }
+    if (!(row instanceof HTMLElement)) return false;
+
+    const existing = detectLevelFromRow(row);
+    if (existing) return true;
+
+    const selected = await selectRow(row);
+    if (!selected) return false;
+
+    const opened = await openLabelMenu();
+    if (!opened) return false;
+
+    const picked = await pickLabelInMenu(config.gmailLabel);
+    return picked;
+  }
+
   function countLevels(messages) {
     const counts = { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 };
     for (const msg of messages || []) {
@@ -199,6 +255,7 @@
     LEVEL_CONFIG,
     detectLevelFromRow,
     applyLabelToThread,
+    applyLabelToMessage,
     countLevels
   };
 })();
