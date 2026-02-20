@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.0 - 2026-02-20
+
+- AI has started to work.
+- Bumped extension/package version to `0.7.0`.
+
 ## v0.6.5 - 2026-02-18
 
 - Reduced Gmail polling/render pressure further to prevent severe browser slowdowns and tab instability.
