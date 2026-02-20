@@ -84,6 +84,8 @@
   ];
 
   const TRIAGE_LEVELS = ["critical", "high", "medium", "low", "fyi"];
+  const TRIAGE_MAP_STORAGE_KEY = "reskin_triage_map_v1";
+  const INBOXSDK_SETTINGS_KEY = "reskin_inboxsdk_settings_v1";
 
   const NOISE_TEXT = new Set([
     "starred",
@@ -117,8 +119,21 @@
     triageStatus: "",
     triageRunning: false,
     triageQueueKey: "",
+    triageAutoPauseUntil: 0,
+    triageLastFailureStatus: "",
     triageUntriagedCount: 0,
     triageLocalMap: {},
+    triageMapLoaded: false,
+    triageMapLoadInFlight: false,
+    triageMapPersistTimer: null,
+    inboxSdk: null,
+    inboxSdkLoading: false,
+    inboxSdkEnabled: false,
+    inboxSdkSettings: null,
+    inboxSdkSettingsLoading: false,
+    aiQuestionText: "",
+    aiAnswerText: "",
+    aiAnswerBusy: false,
     settingsCache: null,
     settingsLoadInFlight: false,
     settingsLoadFailed: false,
@@ -143,6 +158,36 @@
       return;
     }
     console.warn(`[reskin] ${message}`, extra);
+  }
+
+  function logTriageDebug(message, extra) {
+    const codeMap = {
+      "Starting inbox triage run": "C01",
+      "Collected messages for triage pass": "C02",
+      "Prepared triage batch": "C03",
+      "AI returned scored items": "C04",
+      "Label apply attempt finished": "C05",
+      "Triage run finished": "C06",
+      "Triage run failed": "C07",
+      "Skipping duplicate triage queue": "C08",
+      "Skipped triage run because another run is already in progress": "C09"
+    };
+    const enabledCodes = new Set(["C00", "C05", "C06", "C07"]);
+    const now = Date.now();
+    if (!logTriageDebug._last) logTriageDebug._last = new Map();
+    const key = codeMap[message] || message;
+    const previous = logTriageDebug._last.get(key) || 0;
+    const throttleMs = 2000;
+    if (throttleMs && now - previous < throttleMs) return;
+    logTriageDebug._last.set(key, now);
+
+    const code = codeMap[message] || "C00";
+    if (!enabledCodes.has(code)) return;
+    if (typeof extra === "undefined") {
+      console.info(`[reskin][td:${code}] ${message}`);
+      return;
+    }
+    console.info(`[reskin][td:${code}] ${message}`, extra);
   }
 
   function logOnce(key, level, message, extra) {
@@ -180,6 +225,16 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function parseBoolean(value, fallback = false) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const v = normalize(value).toLowerCase();
+      if (v === "true" || v === "1" || v === "yes") return true;
+      if (v === "false" || v === "0" || v === "no") return false;
+    }
+    return fallback;
   }
 
   function resolveExtensionUrl(path) {
@@ -398,16 +453,234 @@
     return config ? config.label : level;
   }
 
+  function canonicalThreadId(threadId) {
+    const raw = normalize(threadId || "");
+    if (!raw) return "";
+    const noHash = raw.startsWith("#") ? raw.slice(1) : raw;
+    if (noHash.startsWith("thread-f:")) return `f:${noHash.slice("thread-f:".length)}`;
+    if (noHash.startsWith("f:")) return noHash;
+    return noHash;
+  }
+
+  function triageLocalGet(threadId) {
+    const raw = normalize(threadId || "");
+    if (!raw) return "";
+    const canonical = canonicalThreadId(raw);
+    const direct = state.triageLocalMap[raw];
+    if (direct && TRIAGE_LEVELS.includes(direct)) return direct;
+    const byCanonical = state.triageLocalMap[canonical];
+    if (byCanonical && TRIAGE_LEVELS.includes(byCanonical)) return byCanonical;
+    return "";
+  }
+
+  function triageLocalSet(threadId, level) {
+    const raw = normalize(threadId || "");
+    const urgency = normalize(level || "").toLowerCase();
+    if (!raw || !TRIAGE_LEVELS.includes(urgency)) return;
+    const canonical = canonicalThreadId(raw);
+    state.triageLocalMap[raw] = urgency;
+    if (canonical) {
+      state.triageLocalMap[canonical] = urgency;
+      state.triageLocalMap[`#${canonical}`] = urgency;
+      if (canonical.startsWith("f:")) {
+        const id = canonical.slice(2);
+        state.triageLocalMap[`thread-f:${id}`] = urgency;
+        state.triageLocalMap[`#thread-f:${id}`] = urgency;
+      }
+    }
+    schedulePersistTriageMap();
+  }
+
+  function normalizePersistedTriageMap(input) {
+    if (!input || typeof input !== "object") return {};
+    const out = {};
+    for (const [threadId, level] of Object.entries(input)) {
+      const id = normalize(threadId || "");
+      const urgency = normalize(level || "").toLowerCase();
+      if (!id || !TRIAGE_LEVELS.includes(urgency)) continue;
+      out[id] = urgency;
+      const canonical = canonicalThreadId(id);
+      if (canonical) {
+        out[canonical] = urgency;
+        out[`#${canonical}`] = urgency;
+        if (canonical.startsWith("f:")) {
+          const suffix = canonical.slice(2);
+          out[`thread-f:${suffix}`] = urgency;
+          out[`#thread-f:${suffix}`] = urgency;
+        }
+      }
+    }
+    return out;
+  }
+
+  async function loadPersistedTriageMap() {
+    if (state.triageMapLoaded || state.triageMapLoadInFlight) return;
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    state.triageMapLoadInFlight = true;
+    try {
+      const raw = await chrome.storage.local.get(TRIAGE_MAP_STORAGE_KEY);
+      const map = normalizePersistedTriageMap(raw[TRIAGE_MAP_STORAGE_KEY]);
+      state.triageLocalMap = map;
+      state.triageMapLoaded = true;
+      logTriageDebug("Loaded local triage map", {
+        keys: Object.keys(map).length
+      });
+    } catch (error) {
+      logWarn("Failed to load local triage map", error);
+    } finally {
+      state.triageMapLoadInFlight = false;
+    }
+  }
+
+  async function loadInboxSdkSettings() {
+    const defaults = {
+      enabled: false,
+      appId: "",
+      version: 2
+    };
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return defaults;
+    try {
+      const raw = await chrome.storage.local.get(INBOXSDK_SETTINGS_KEY);
+      const stored = raw && raw[INBOXSDK_SETTINGS_KEY] && typeof raw[INBOXSDK_SETTINGS_KEY] === "object"
+        ? raw[INBOXSDK_SETTINGS_KEY]
+        : {};
+      return {
+        enabled: parseBoolean(stored.enabled, defaults.enabled),
+        appId: normalize(stored.appId || ""),
+        version: Number(stored.version) || defaults.version
+      };
+    } catch (error) {
+      logWarn("Failed loading InboxSDK settings", error);
+      return defaults;
+    }
+  }
+
+  async function loadInboxSdkSettingsCached(force = false) {
+    if (!force && state.inboxSdkSettings) return state.inboxSdkSettings;
+    if (state.inboxSdkSettingsLoading) return state.inboxSdkSettings;
+    state.inboxSdkSettingsLoading = true;
+    try {
+      state.inboxSdkSettings = await loadInboxSdkSettings();
+      state.inboxSdkEnabled = Boolean(state.inboxSdkSettings && state.inboxSdkSettings.enabled);
+      return state.inboxSdkSettings;
+    } finally {
+      state.inboxSdkSettingsLoading = false;
+    }
+  }
+
+  async function saveInboxSdkSettings(patch) {
+    const current = await loadInboxSdkSettings();
+    const merged = {
+      ...current,
+      ...(patch || {})
+    };
+    const next = {
+      enabled: parseBoolean(merged.enabled, false),
+      appId: normalize(merged.appId || ""),
+      version: Number(merged.version) || 2
+    };
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return next;
+    await chrome.storage.local.set({ [INBOXSDK_SETTINGS_KEY]: next });
+    state.inboxSdkSettings = next;
+    return next;
+  }
+
+  function getInboxSdkGlobal() {
+    if (typeof window === "undefined") return null;
+    if (window.InboxSDK && typeof window.InboxSDK.load === "function") return window.InboxSDK;
+    return null;
+  }
+
+  async function initInboxSdk() {
+    if (state.inboxSdk || state.inboxSdkLoading) return;
+    state.inboxSdkLoading = true;
+    try {
+      const settings = await loadInboxSdkSettingsCached();
+      state.inboxSdkEnabled = Boolean(settings.enabled);
+      if (!settings.enabled) {
+        logTriageDebug("InboxSDK integration disabled");
+        return;
+      }
+      if (!settings.appId) {
+        logTriageDebug("InboxSDK integration skipped: missing appId");
+        return;
+      }
+      const inboxSdk = getInboxSdkGlobal();
+      if (!inboxSdk) {
+        logTriageDebug("InboxSDK integration unavailable: global InboxSDK not found");
+        return;
+      }
+
+      const sdk = await inboxSdk.load(Number(settings.version) || 2, settings.appId);
+      state.inboxSdk = sdk;
+      logTriageDebug("InboxSDK integration initialized", {
+        version: Number(settings.version) || 2
+      });
+
+      try {
+        if (sdk && sdk.Router && typeof sdk.Router.handleAllRoutes === "function") {
+          sdk.Router.handleAllRoutes(() => {
+            state.lastObserverSignature = "";
+            const root = document.getElementById(ROOT_ID);
+            if (root instanceof HTMLElement) renderCurrentView(root);
+          });
+        }
+      } catch (error) {
+        logWarn("InboxSDK Router hook failed", error);
+      }
+
+      try {
+        if (sdk && sdk.Lists && typeof sdk.Lists.registerThreadRowViewHandler === "function") {
+          sdk.Lists.registerThreadRowViewHandler(() => {
+            state.lastObserverSignature = "";
+            const root = document.getElementById(ROOT_ID);
+            if (root instanceof HTMLElement) renderCurrentView(root);
+          });
+        }
+      } catch (error) {
+        logWarn("InboxSDK ThreadRow hook failed", error);
+      }
+    } catch (error) {
+      logWarn("InboxSDK init failed", error);
+    } finally {
+      state.inboxSdkLoading = false;
+    }
+  }
+
+  function schedulePersistTriageMap() {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    if (state.triageMapPersistTimer) {
+      clearTimeout(state.triageMapPersistTimer);
+    }
+    state.triageMapPersistTimer = setTimeout(async () => {
+      state.triageMapPersistTimer = null;
+      try {
+        const compact = {};
+        for (const [key, level] of Object.entries(state.triageLocalMap)) {
+          const canonical = canonicalThreadId(key);
+          if (!canonical || !canonical.startsWith("f:")) continue;
+          compact[canonical] = level;
+        }
+        await chrome.storage.local.set({ [TRIAGE_MAP_STORAGE_KEY]: compact });
+        logTriageDebug("Persisted local triage map", {
+          keys: Object.keys(compact).length
+        });
+      } catch (error) {
+        logWarn("Failed to persist local triage map", error);
+      }
+    }, 250);
+  }
+
   function getTriageLevelForMessage(msg) {
     if (!msg || !msg.threadId) return "";
-    const local = state.triageLocalMap[msg.threadId];
+    const local = triageLocalGet(msg.threadId);
     if (local && TRIAGE_LEVELS.includes(local)) return local;
 
     const fromRow = window.ReskinTriage && typeof window.ReskinTriage.detectLevelFromRow === "function"
       ? window.ReskinTriage.detectLevelFromRow(msg.row)
       : "";
     if (fromRow) {
-      state.triageLocalMap[msg.threadId] = fromRow;
+      triageLocalSet(msg.threadId, fromRow);
       return fromRow;
     }
     return "";
@@ -426,6 +699,24 @@
     const settings = root.querySelector(".rv-settings");
     if (settings instanceof HTMLElement) {
       settings.classList.toggle("is-active", state.currentView === "settings");
+    }
+
+    const sideTriage = root.querySelector(".rv-side-triage");
+    const sideTriageList = root.querySelector(".rv-side-triage-list");
+    if (sideTriage instanceof HTMLElement && sideTriageList instanceof HTMLElement) {
+      const currentFilter = activeTriageFilter();
+      const total = TRIAGE_LEVELS.reduce((sum, level) => sum + (state.triageCounts[level] || 0), 0);
+      const rows = [
+        `<button type="button" class="rv-triage-item rv-side-triage-item${!currentFilter ? " is-active" : ""}" data-triage-level="all" data-reskin="true"><span data-reskin="true">All</span><span class="rv-triage-count" data-reskin="true">${total}</span></button>`
+      ];
+      for (const level of TRIAGE_LEVELS) {
+        const count = state.triageCounts[level] || 0;
+        const active = currentFilter === level;
+        rows.push(
+          `<button type="button" class="rv-triage-item rv-side-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`
+        );
+      }
+      sideTriageList.innerHTML = rows.join("");
     }
   }
 
@@ -456,7 +747,73 @@
         <div class="rv-triage-list${isInbox ? "" : " is-off-inbox"}" data-reskin="true">${rows}</div>
         <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || (state.triageRunning ? "Triage running..." : "Press Start to organize untriaged inbox messages"))}</div>
       </section>
+      <section class="rv-ai-qa" data-reskin="true">
+        <div class="rv-ai-head" data-reskin="true">Ask Inbox</div>
+        <div class="rv-ai-copy" data-reskin="true">Ask questions like "What happened yesterday?"</div>
+        <textarea class="rv-ai-qa-input" data-reskin="true" placeholder="Ask about your inbox...">${escapeHtml(state.aiQuestionText || "")}</textarea>
+        <button type="button" class="rv-ai-qa-submit" data-reskin="true" ${state.aiAnswerBusy ? "disabled" : ""}>${state.aiAnswerBusy ? "Thinking..." : "Ask"}</button>
+        <div class="rv-ai-qa-answer" data-reskin="true">${escapeHtml(state.aiAnswerText || "No answer yet.")}</div>
+      </section>
     `;
+  }
+
+  function buildInboxQuestionPrompt(question, messages) {
+    const compact = (messages || []).slice(0, 120).map((msg, i) => ({
+      i,
+      threadId: msg.threadId,
+      sender: msg.sender,
+      subject: msg.subject,
+      date: msg.date,
+      snippet: normalize(msg.snippet || "").slice(0, 500),
+      body: normalize(msg.bodyText || "").slice(0, 1200)
+    }));
+    return [
+      {
+        role: "system",
+        content:
+          "You answer questions about inbox email context. Be concise. If evidence is missing, say you are unsure."
+      },
+      {
+        role: "user",
+        content: `Question: ${normalize(question)}\n\nInbox context JSON:\n${JSON.stringify(compact)}`
+      }
+    ];
+  }
+
+  async function askInboxQuestion(root) {
+    if (state.aiAnswerBusy) return;
+    const viewQuestion = root.querySelector(".rv-ai-qa-input");
+    const question = normalize(
+      viewQuestion instanceof HTMLTextAreaElement ? viewQuestion.value : state.aiQuestionText || ""
+    );
+    state.aiQuestionText = question;
+    if (!question) {
+      state.aiAnswerText = "Type a question first.";
+      applyReskin();
+      return;
+    }
+    if (!window.ReskinAI || typeof window.ReskinAI.chat !== "function") {
+      state.aiAnswerText = "AI chat is unavailable.";
+      applyReskin();
+      return;
+    }
+
+    state.aiAnswerBusy = true;
+    state.aiAnswerText = "Thinking...";
+    applyReskin();
+    try {
+      const result = collectMessages(140);
+      const prompts = buildInboxQuestionPrompt(question, result.items || []);
+      const answer = await window.ReskinAI.chat(prompts, state.settingsCache || {});
+      state.aiAnswerText = normalize(answer) || "No answer returned.";
+    } catch (error) {
+      const msg = error && error.message ? String(error.message) : "AI answer failed";
+      state.aiAnswerText = `Unable to answer: ${msg.slice(0, 220)}`;
+      logWarn("Inbox Q&A failed", error);
+    } finally {
+      state.aiAnswerBusy = false;
+      applyReskin();
+    }
   }
 
   function syncViewFromHash() {
@@ -503,6 +860,10 @@
           <div class="rv-nav-wrap" data-reskin="true">
             <nav class="rv-nav" data-reskin="true"></nav>
           </div>
+          <section class="rv-side-triage" data-reskin="true">
+            <div class="rv-side-triage-title" data-reskin="true">Triage</div>
+            <div class="rv-side-triage-list" data-reskin="true"></div>
+          </section>
           <button type="button" class="rv-settings" data-reskin="true">Settings</button>
         </aside>
         <main class="rv-main" data-reskin="true">
@@ -566,11 +927,20 @@
       enabled: Boolean(view.querySelector('[name="enabled"]')?.checked),
       consentTriage: Boolean(view.querySelector('[name="consentTriage"]')?.checked)
     };
+    const inboxSdkPayload = {
+      enabled: Boolean(view.querySelector('[name="inboxSdkEnabled"]')?.checked),
+      appId: normalize(view.querySelector('[name="inboxSdkAppId"]')?.value || ""),
+      version: Number(view.querySelector('[name="inboxSdkVersion"]')?.value || 2) || 2
+    };
 
     try {
       const saved = await window.ReskinAI.saveSettings(payload);
+      await saveInboxSdkSettings(inboxSdkPayload);
+      state.inboxSdk = null;
+      state.inboxSdkEnabled = inboxSdkPayload.enabled;
       state.settingsCache = saved;
       state.triageStatus = "Settings saved";
+      initInboxSdk().catch((error) => logWarn("InboxSDK init after save failed", error));
       applyReskin();
     } catch (error) {
       state.triageStatus = "Settings save failed";
@@ -609,6 +979,41 @@
     }
   }
 
+  function defaultModelForProvider(provider) {
+    const value = normalize(provider).toLowerCase();
+    if (value === "groq") {
+      const options = window.ReskinAI && Array.isArray(window.ReskinAI.GROQ_FREE_MODELS)
+        ? window.ReskinAI.GROQ_FREE_MODELS
+        : [];
+      return options[0] || "llama-3.1-8b-instant";
+    }
+    if (value === "ollama") return "llama3.1";
+    return "openrouter/free";
+  }
+
+  function apiKeyPlaceholderForProvider(provider) {
+    const value = normalize(provider).toLowerCase();
+    if (value === "groq") return "Groq API key";
+    if (value === "ollama") return "Not required for local Ollama";
+    return "OpenRouter API key";
+  }
+
+  function applyProviderDefaultsToSettingsForm(root) {
+    const view = root.querySelector(".rv-settings-view");
+    if (!(view instanceof HTMLElement)) return;
+    const providerSelect = view.querySelector('[name="provider"]');
+    const modelInput = view.querySelector('[name="model"]');
+    const keyInput = view.querySelector('[name="apiKey"]');
+    if (!(providerSelect instanceof HTMLSelectElement)) return;
+    if (!(modelInput instanceof HTMLInputElement)) return;
+
+    const provider = normalize(providerSelect.value || "openrouter").toLowerCase();
+    modelInput.value = defaultModelForProvider(provider);
+    if (keyInput instanceof HTMLInputElement) {
+      keyInput.placeholder = apiKeyPlaceholderForProvider(provider);
+    }
+  }
+
   function bindRootEvents(root) {
     if (root.getAttribute("data-bound") === "true") return;
 
@@ -644,6 +1049,12 @@
         return;
       }
 
+      if (target.closest(".rv-ai-qa-submit")) {
+        consumeEvent(event);
+        askInboxQuestion(root);
+        return;
+      }
+
       const triageStart = target.closest(".rv-triage-start");
       if (triageStart instanceof HTMLElement) {
         consumeEvent(event);
@@ -661,10 +1072,10 @@
         state.activeThreadId = "";
         state.lockListView = false;
         const level = normalize(triageItem.getAttribute("data-triage-level") || "").toLowerCase();
-        if (!TRIAGE_LEVELS.includes(level)) return;
-        const nextHash = `#inbox?triage=${level}`;
+        const nextHash = level === "all" ? "#inbox" : `#inbox?triage=${level}`;
+        if (level !== "all" && !TRIAGE_LEVELS.includes(level)) return;
         state.lastListHash = nextHash;
-        state.triageFilter = level;
+        state.triageFilter = level === "all" ? "" : level;
         navigateToList(nextHash, "Inbox");
         const list = root.querySelector(".rv-list");
         if (list instanceof HTMLElement) {
@@ -705,6 +1116,14 @@
         const latestRoot = document.getElementById(ROOT_ID);
         if (latestRoot instanceof HTMLElement) applyReskin();
       }, 900);
+    });
+
+    root.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const providerSelect = target.closest('[name="provider"]');
+      if (!(providerSelect instanceof HTMLSelectElement)) return;
+      applyProviderDefaultsToSettingsForm(root);
     });
 
     root.setAttribute("data-bound", "true");
@@ -1151,18 +1570,60 @@
   }
 
   async function runTriageForInbox(options = {}) {
+    await loadPersistedTriageMap();
     const force = Boolean(options.force);
     const processAll = Boolean(options.processAll);
-    if (state.currentView !== "list") return;
-    if (activeMailbox() !== "inbox") return;
-    if (!window.ReskinAI || !window.ReskinTriage) return;
-    if (state.triageRunning) return;
+    const oneByOneMode = Boolean(options.oneByOne);
+    const source = normalize(options.source || "unknown");
+    if (source === "auto" && Date.now() < state.triageAutoPauseUntil) {
+      logTriageDebug("Skipped auto triage due to cooldown", {
+        cooldownMsRemaining: Math.max(0, state.triageAutoPauseUntil - Date.now())
+      });
+      return;
+    }
+    if (state.currentView !== "list") {
+      logTriageDebug("Skipped triage run because current view is not list", {
+        currentView: state.currentView
+      });
+      return;
+    }
+    if (activeMailbox() !== "inbox") {
+      logTriageDebug("Skipped triage run because mailbox is not inbox", {
+        mailbox: activeMailbox()
+      });
+      return;
+    }
+    if (!window.ReskinAI || !window.ReskinTriage) {
+      logTriageDebug("Skipped triage run because AI or triage module is missing", {
+        hasAI: Boolean(window.ReskinAI),
+        hasTriage: Boolean(window.ReskinTriage)
+      });
+      return;
+    }
+    if (state.triageRunning) {
+      logTriageDebug("Skipped triage run because another run is already in progress");
+      return;
+    }
 
     const settings = await loadSettingsCached();
     if (!settings || !settings.enabled || !settings.consentTriage) {
       state.triageStatus = "Enable triage + consent in Settings";
+      logTriageDebug("Skipped triage run because settings are disabled or consent missing", {
+        hasSettings: Boolean(settings),
+        enabled: Boolean(settings && settings.enabled),
+        consentTriage: Boolean(settings && settings.consentTriage)
+      });
       return;
     }
+    logTriageDebug("Starting inbox triage run", {
+      source,
+      force,
+      processAll,
+      oneByOneMode,
+      batchSize: settings.batchSize,
+      provider: settings.provider,
+      model: settings.model
+    });
 
     const listRoot = document.getElementById(ROOT_ID);
     if (!(listRoot instanceof HTMLElement)) return;
@@ -1171,12 +1632,19 @@
     let totalApplied = 0;
     let totalScored = 0;
     let batchIndex = 0;
-    const maxBatches = processAll ? 30 : 1;
+    let haltedOnEmptyAI = false;
+    let haltedOnDuplicateQueue = false;
+    let consecutiveApplyFailures = 0;
+    const maxBatches = processAll ? 1200 : 1;
     state.triageRunning = true;
 
     try {
       while (batchIndex < maxBatches) {
         const result = collectMessages(160);
+        logTriageDebug("Collected messages for triage pass", {
+          extracted: result.items.length,
+          source: result.source || "unknown"
+        });
         const candidates = [];
         for (const msg of result.items) {
           const level = getTriageLevelForMessage(msg);
@@ -1185,20 +1653,57 @@
         }
 
         state.triageUntriagedCount = candidates.length;
-        if (candidates.length === 0) break;
+        if (candidates.length === 0) {
+          logTriageDebug("No untriaged inbox candidates found", {
+            scanned: result.items.length
+          });
+          break;
+        }
 
-        const batch = candidates.slice(0, settings.batchSize);
+        const batchSize = oneByOneMode ? 1 : settings.batchSize;
+        const batch = candidates.slice(0, batchSize);
         const queueKey = batch.map((m) => m.threadId).join(",");
-        if (!force && !processAll && queueKey && queueKey === state.triageQueueKey) break;
+        if (!force && !processAll && queueKey && queueKey === state.triageQueueKey) {
+          logTriageDebug("Skipping duplicate triage queue", { queueKey });
+          haltedOnDuplicateQueue = true;
+          break;
+        }
         state.triageQueueKey = queueKey;
         for (const msg of batch) attempted.add(msg.threadId);
+        logTriageDebug("Prepared triage batch", {
+          batchIndex: batchIndex + 1,
+          batchSize: batch.length,
+          candidatesRemaining: candidates.length,
+          threadIds: batch.map((msg) => msg.threadId)
+        });
 
         state.triageStatus = processAll
           ? `Triaging batch ${batchIndex + 1}: ${batch.length} of ${candidates.length} remaining...`
           : `Triaging ${batch.length} of ${candidates.length}...`;
+        if (oneByOneMode) {
+          const current = batch[0];
+          state.triageStatus = processAll
+            ? `Triaging 1-by-1 (${batchIndex + 1}): ${current ? current.subject || current.threadId : "message"}`
+            : `Triaging 1 message...`;
+        }
 
         const scored = await window.ReskinAI.triageBatch(batch, settings);
         totalScored += batch.length;
+        logTriageDebug("AI returned scored items", {
+          requested: batch.length,
+          returned: Array.isArray(scored) ? scored.length : 0,
+          scored
+        });
+        if (!Array.isArray(scored) || scored.length === 0) {
+          state.triageStatus = "AI returned no labels. Please retry or switch provider in Settings.";
+          state.triageLastFailureStatus = state.triageStatus;
+          state.triageQueueKey = "";
+          haltedOnEmptyAI = true;
+          logTriageDebug("Stopping triage because AI returned zero parsed labels", {
+            requested: batch.length
+          });
+          break;
+        }
         for (const item of scored) {
           if (!item || !item.urgency) continue;
           const mappedByThread = item.threadId
@@ -1207,6 +1712,10 @@
           const mappedByIndex =
             typeof item.i === "number" && item.i >= 0 && item.i < batch.length ? batch[item.i] : null;
           const targetMessage = mappedByThread || mappedByIndex || null;
+          const mappedThreadId = (targetMessage && targetMessage.threadId) || item.threadId || "";
+          if (mappedThreadId) {
+            triageLocalSet(mappedThreadId, item.urgency);
+          }
 
           const ok = window.ReskinTriage && typeof window.ReskinTriage.applyLabelToMessage === "function"
             ? await window.ReskinTriage.applyLabelToMessage(
@@ -1214,27 +1723,64 @@
               item.urgency
             )
             : await window.ReskinTriage.applyLabelToThread(item.threadId, item.urgency);
+          logTriageDebug("Label apply attempt finished", {
+            threadId: (targetMessage && targetMessage.threadId) || item.threadId || "",
+            urgency: item.urgency,
+            byThreadId: Boolean(mappedByThread),
+            byIndex: Boolean(mappedByIndex),
+            ok
+          });
           if (ok) {
-            const mappedThreadId = (targetMessage && targetMessage.threadId) || item.threadId;
-            if (mappedThreadId) state.triageLocalMap[mappedThreadId] = item.urgency;
             totalApplied += 1;
+            consecutiveApplyFailures = 0;
+          } else {
+            consecutiveApplyFailures += 1;
           }
+        }
+
+        if (consecutiveApplyFailures >= 3) {
+          state.triageStatus =
+            "Gmail label UI could not be controlled. Stopped after repeated failures.";
+          state.triageLastFailureStatus = state.triageStatus;
+          logTriageDebug("Halting triage after repeated apply failures", {
+            consecutiveApplyFailures
+          });
+          break;
         }
 
         batchIndex += 1;
         if (!processAll) break;
       }
-      if (batchIndex === 0) {
+      if (haltedOnEmptyAI) {
+        // Preserve the explicit user-facing AI failure status set above.
+      } else if (haltedOnDuplicateQueue) {
+        state.triageStatus = state.triageLastFailureStatus || "Triage waiting for new inbox changes.";
+      } else if (batchIndex === 0) {
         state.triageStatus = "Inbox triage is up to date";
+      } else if (totalScored > 0 && totalApplied === 0) {
+        state.triageStatus = `AI triaged ${totalScored} messages locally. Gmail label sync failed.`;
       } else if (processAll) {
         state.triageStatus = `Triage complete: ${totalApplied} labels applied across ${batchIndex} batches`;
       } else {
         state.triageStatus = `Applied ${totalApplied} triage labels`;
       }
+      logTriageDebug("Triage run finished", {
+        batchIndex,
+        totalScored,
+        totalApplied,
+        status: state.triageStatus
+      });
     } catch (error) {
       const message = error && error.message ? error.message : "triage failed";
       state.triageStatus = `Triage unavailable: ${message.slice(0, 120)}`;
+      state.triageLastFailureStatus = state.triageStatus;
+      state.triageQueueKey = "";
+      state.triageAutoPauseUntil = Date.now() + 45000;
       logWarn("Inbox triage run failed", error);
+      logTriageDebug("Triage run failed", {
+        message,
+        stack: error && error.stack ? String(error.stack) : ""
+      });
     } finally {
       state.triageRunning = false;
       const root = document.getElementById(ROOT_ID);
@@ -1295,6 +1841,15 @@
     const groqOptions = window.ReskinAI && Array.isArray(window.ReskinAI.GROQ_FREE_MODELS)
       ? window.ReskinAI.GROQ_FREE_MODELS
       : ["llama-3.1-8b-instant"];
+    const inboxSdkSettings = state.inboxSdkSettings || { enabled: false, appId: "", version: 2 };
+    if (!state.inboxSdkSettings && !state.inboxSdkSettingsLoading) {
+      loadInboxSdkSettingsCached().then(() => {
+        if (state.currentView !== "settings") return;
+        const latestRoot = document.getElementById(ROOT_ID);
+        if (!(latestRoot instanceof HTMLElement)) return;
+        renderSettings(latestRoot);
+      });
+    }
 
     list.innerHTML = `
       <section class="rv-settings-view" data-reskin="true">
@@ -1311,11 +1866,11 @@
           </label>
           <label class="rv-settings-card" data-reskin="true">
             <div class="rv-settings-label" data-reskin="true">API Key</div>
-            <input name="apiKey" class="rv-field" data-reskin="true" type="password" value="${escapeHtml(settings.apiKey || "")}" placeholder="Required for Groq/OpenRouter" />
+            <input name="apiKey" class="rv-field" data-reskin="true" type="password" value="${escapeHtml(settings.apiKey || "")}" placeholder="${escapeHtml(apiKeyPlaceholderForProvider(settings.provider || "openrouter"))}" />
           </label>
           <label class="rv-settings-card" data-reskin="true">
             <div class="rv-settings-label" data-reskin="true">Model</div>
-            <input name="model" class="rv-field" data-reskin="true" value="${escapeHtml(settings.provider === "openrouter" ? "openrouter/free" : settings.model || groqOptions[0])}" placeholder="Model id" />
+            <input name="model" class="rv-field" data-reskin="true" value="${escapeHtml(settings.model || groqOptions[0])}" placeholder="Model id" />
           </label>
           <label class="rv-settings-card" data-reskin="true">
             <div class="rv-settings-label" data-reskin="true">Batch Size</div>
@@ -1340,6 +1895,22 @@
         </div>
         <label class="rv-toggle" data-reskin="true"><input name="enabled" type="checkbox" ${settings.enabled ? "checked" : ""} /> Enable triage</label>
         <label class="rv-toggle" data-reskin="true"><input name="consentTriage" type="checkbox" ${settings.consentTriage ? "checked" : ""} /> I consent to send inbox content to the selected AI provider for triage.</label>
+        <h3 class="rv-settings-title" data-reskin="true">InboxSDK Integration</h3>
+        <p class="rv-settings-copy" data-reskin="true">Optional Gmail integration hooks for better route/list detection. Requires a valid InboxSDK App ID.</p>
+        <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">Enable InboxSDK</div>
+            <input name="inboxSdkEnabled" class="rv-field" data-reskin="true" type="checkbox" ${inboxSdkSettings.enabled ? "checked" : ""} />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">InboxSDK App ID</div>
+            <input name="inboxSdkAppId" class="rv-field" data-reskin="true" value="${escapeHtml(inboxSdkSettings.appId || "")}" placeholder="sdk_your_app_id" />
+          </label>
+          <label class="rv-settings-card" data-reskin="true">
+            <div class="rv-settings-label" data-reskin="true">InboxSDK Version</div>
+            <input name="inboxSdkVersion" class="rv-field" data-reskin="true" type="number" min="1" max="2" value="${Number(inboxSdkSettings.version) || 2}" />
+          </label>
+        </div>
         <div class="rv-settings-actions" data-reskin="true">
           <button type="button" class="rv-settings-test" data-reskin="true">Test Connection</button>
           <button type="button" class="rv-settings-save" data-reskin="true">Save Settings</button>
@@ -1568,9 +2139,16 @@
       if (!ready) return;
       clearInterval(poll);
       logInfo("Gmail ready. Applying viewer.");
-      applyReskin();
-      startObserver();
-      logOnce("observer-started", "info", "Low-power UI poller started (900ms interval).");
+      loadPersistedTriageMap()
+        .catch((error) => logWarn("Local triage map bootstrap failed", error))
+        .finally(() => {
+          loadInboxSdkSettingsCached().then(() => initInboxSdk()).catch((error) => {
+            logWarn("InboxSDK bootstrap failed", error);
+          });
+          applyReskin();
+          startObserver();
+          logOnce("observer-started", "info", "Low-power UI poller started (900ms interval).");
+        });
     }, 200);
   }
 

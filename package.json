@@ -1,0 +1,23 @@
+{
+  "name": "eorg",
+  "version": "0.6.39",
+  "private": true,
+  "type": "module",
+  "description": "Gmail Hard Reskin extension with AI triage + InboxSDK + headless tests",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "typecheck": "tsc --noEmit",
+    "test:headless": "bash tests/headless/run_all.sh",
+    "test:triage": ".venv/bin/python tests/headless/run_triage_harness.py",
+    "test:chat": ".venv/bin/python tests/headless/run_chat_harness.py"
+  },
+  "devDependencies": {
+    "@inboxsdk/core": "2.2.11",
+    "@types/chrome": "latest",
+    "playwright": "latest",
+    "typescript": "latest",
+    "wxt": "latest"
+  }
+}

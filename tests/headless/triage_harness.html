@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Triage Harness</title>
+  <style>
+    body { font-family: sans-serif; }
+    #reskin-root { position: fixed; inset: 0; background: rgba(0,0,0,0.2); }
+    [role="row"] { padding: 8px; border: 1px solid #ccc; margin: 8px; }
+    .label-marker { font-size: 12px; color: #b00; }
+    #label-dialog { display: none; border: 1px solid #222; padding: 8px; width: 260px; background: #fff; }
+  </style>
+</head>
+<body data-reskin-mode="viewer">
+  <section id="reskin-root"></section>
+  <main role="main">
+    <div id="list-view">
+      <div role="row" data-thread-id="thread-f:123" aria-selected="false">
+        <div role="checkbox" aria-label="Select" aria-checked="false"></div>
+        <a href="#thread-f:123">Thread Link</a>
+        <span class="subject">Test Subject</span>
+      </div>
+    </div>
+
+    <div id="thread-view" style="display:none;">
+      <button id="label-btn" aria-label="Label as">Label as</button>
+      <div id="label-dialog" role="dialog">
+        <input id="label-search" aria-label="Search labels" type="text" />
+      </div>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      const listView = document.getElementById("list-view");
+      const threadView = document.getElementById("thread-view");
+      const labelBtn = document.getElementById("label-btn");
+      const labelDialog = document.getElementById("label-dialog");
+      const labelSearch = document.getElementById("label-search");
+      const row = document.querySelector('[role="row"][data-thread-id="thread-f:123"]');
+      const checkbox = row.querySelector('[role="checkbox"]');
+
+      function updateView() {
+        const inThread = (window.location.hash || "") === "#thread-f:123";
+        listView.style.display = inThread ? "none" : "block";
+        threadView.style.display = inThread ? "block" : "none";
+      }
+
+      // Simulate Gmail ignoring synthetic checkbox clicks.
+      checkbox.addEventListener("click", function () {
+        checkbox.setAttribute("aria-checked", "false");
+        row.setAttribute("aria-selected", "false");
+      });
+
+      labelBtn.addEventListener("click", function () {
+        labelDialog.style.display = "block";
+      });
+
+      labelSearch.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter") return;
+        const value = (labelSearch.value || "").trim();
+        if (!value) return;
+        const marker = document.createElement("span");
+        marker.className = "label-marker";
+        marker.setAttribute("aria-label", value);
+        marker.textContent = value;
+        row.appendChild(marker);
+        labelDialog.style.display = "none";
+      });
+
+      window.addEventListener("hashchange", updateView);
+      updateView();
+    })();
+  </script>
+</body>
+</html>

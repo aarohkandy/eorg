@@ -68,6 +68,29 @@ body[data-reskin-mode="viewer"] {
   width: 100% !important;
 }
 
+#reskin-root .rv-side-triage {
+  border-top: 1px solid #1f1f1f !important;
+  margin-top: 6px !important;
+  padding-top: 10px !important;
+}
+
+#reskin-root .rv-side-triage-title {
+  color: #9d9d9d !important;
+  font-size: 11px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.07em !important;
+  margin: 0 8px 8px !important;
+}
+
+#reskin-root .rv-side-triage-list {
+  display: grid !important;
+  gap: 5px !important;
+}
+
+#reskin-root .rv-side-triage-item {
+  border-radius: 10px !important;
+}
+
 #reskin-root .rv-triage {
   border-top: 1px solid #1f1f1f !important;
   margin-top: 2px !important;
@@ -228,6 +251,53 @@ body[data-reskin-mode="viewer"] {
   border-radius: 12px !important;
   background: #101010 !important;
   padding: 12px !important;
+}
+
+#reskin-root .rv-ai-qa {
+  border: 1px solid #252525 !important;
+  border-radius: 12px !important;
+  background: #101010 !important;
+  padding: 12px !important;
+  display: grid !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-ai-qa-input {
+  width: 100% !important;
+  min-height: 76px !important;
+  border: 1px solid #2c2c2c !important;
+  border-radius: 10px !important;
+  background: #0d0d0d !important;
+  color: #f0f0f0 !important;
+  padding: 10px !important;
+  resize: vertical !important;
+  font: inherit !important;
+}
+
+#reskin-root .rv-ai-qa-submit {
+  border: 1px solid #303030 !important;
+  border-radius: 10px !important;
+  background: #141414 !important;
+  color: #f2f2f2 !important;
+  padding: 9px 10px !important;
+  cursor: pointer !important;
+  font-weight: 600 !important;
+}
+
+#reskin-root .rv-ai-qa-submit[disabled] {
+  opacity: 0.7 !important;
+  cursor: not-allowed !important;
+}
+
+#reskin-root .rv-ai-qa-answer {
+  border: 1px solid #242424 !important;
+  border-radius: 10px !important;
+  background: #0b0b0b !important;
+  color: #d8d8d8 !important;
+  padding: 10px !important;
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+  white-space: pre-wrap !important;
 }
 
 #reskin-root .rv-ai-head {
@@ -602,6 +672,30 @@ body[data-reskin-mode="viewer"] {
   #reskin-root .rv-settings {
     margin-top: 8px !important;
     text-align: center !important;
+  }
+
+  #reskin-root .rv-side-triage {
+    margin-top: 8px !important;
+    padding-top: 8px !important;
+  }
+
+  #reskin-root .rv-side-triage-title {
+    margin: 0 0 6px !important;
+    font-size: 10px !important;
+  }
+
+  #reskin-root .rv-side-triage-list {
+    display: flex !important;
+    gap: 6px !important;
+    overflow-x: auto !important;
+    padding-bottom: 4px !important;
+  }
+
+  #reskin-root .rv-side-triage-item {
+    white-space: nowrap !important;
+    min-width: max-content !important;
+    padding: 8px 10px !important;
+    font-size: 12px !important;
   }
 
   #reskin-root .rv-right {

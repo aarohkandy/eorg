@@ -2,21 +2,38 @@
   "manifest_version": 3,
   "name": "Gmail Hard Reskin",
   "description": "A resilient visual Gmail overlay that survives SPA rerenders.",
-  "version": "0.6.13",
-  "permissions": ["storage"],
-  "host_permissions": ["https://mail.google.com/*"],
+  "version": "0.6.39",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*"],
-      "css": ["styles.css"],
-      "js": ["ai.js", "triage.js", "content.js"],
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "js": [
+        "inboxsdk.js",
+        "ai.js",
+        "triage.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["styles.css"],
-      "matches": ["https://mail.google.com/*"]
+      "resources": [
+        "styles.css"
+      ],
+      "matches": [
+        "https://mail.google.com/*"
+      ]
     }
   ]
 }

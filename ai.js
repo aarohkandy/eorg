@@ -32,6 +32,46 @@
     return Math.max(min, Math.min(max, value));
   }
 
+  function logTriageDebug(message, extra) {
+    const codeMap = {
+      "Sending triage request": "A01",
+      "AI triage request attempt failed": "A02",
+      "AI response produced zero parsed triage items": "A03",
+      "Failed to parse AI triage JSON response": "A04",
+      "AI triage response did not contain JSON object boundaries": "A05",
+      "Retrying without response_format=json_object after 400 response": "A06"
+    };
+    const enabledCodes = new Set(["A02", "A03", "A04", "A05", "A06"]);
+    const now = Date.now();
+    if (!logTriageDebug._last) logTriageDebug._last = new Map();
+    const key = `${codeMap[message] || "A00"}:${String(extra && extra.error ? extra.error : "")}`;
+    const previous = logTriageDebug._last.get(key) || 0;
+    const throttleMs = 2500;
+    if (throttleMs && now - previous < throttleMs) return;
+    logTriageDebug._last.set(key, now);
+
+    const compact = (value) => {
+      if (!value || typeof value !== "object") return value;
+      const pick = ["provider", "model", "attempt", "maxAttempts", "error", "requestedMessages"];
+      return pick
+        .filter((k) => typeof value[k] !== "undefined")
+        .map((k) => `${k}=${String(value[k]).slice(0, 64)}`)
+        .join(" ");
+    };
+
+    const code = codeMap[message] || "A00";
+    if (!enabledCodes.has(code)) return;
+    const details = typeof extra === "undefined" ? "" : compact(extra);
+    console.info(`[reskin][td:${code}] ${message}${details ? " | " + details : ""}`);
+  }
+
+  function maskKey(key) {
+    const raw = normalize(key || "");
+    if (!raw) return "(empty)";
+    if (raw.length <= 8) return `${raw.slice(0, 2)}***`;
+    return `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+  }
+
   async function getStorage() {
     return new Promise((resolve) => resolve(chrome.storage.local));
   }
@@ -91,7 +131,9 @@
 
     if (provider === "openrouter") {
       next.baseURL = "https://openrouter.ai/api/v1";
-      next.model = "openrouter/free";
+      if (!next.model) {
+        next.model = "openrouter/free";
+      }
     }
 
     if (provider === "groq") {
@@ -142,11 +184,25 @@
     let payload = null;
     try {
       payload = JSON.parse(raw);
-    } catch (_) {
+    } catch (firstError) {
       const start = raw.indexOf("{");
       const end = raw.lastIndexOf("}");
       if (start >= 0 && end > start) {
-        payload = JSON.parse(raw.slice(start, end + 1));
+        try {
+          payload = JSON.parse(raw.slice(start, end + 1));
+        } catch (secondError) {
+          logTriageDebug("Failed to parse AI triage JSON response", {
+            primaryError: firstError && firstError.message ? String(firstError.message) : String(firstError),
+            fallbackError: secondError && secondError.message ? String(secondError.message) : String(secondError),
+            responsePreview: raw.slice(0, 1200)
+          });
+          payload = null;
+        }
+      } else {
+        logTriageDebug("AI triage response did not contain JSON object boundaries", {
+          primaryError: firstError && firstError.message ? String(firstError.message) : String(firstError),
+          responsePreview: raw.slice(0, 1200)
+        });
       }
     }
 
@@ -177,12 +233,70 @@
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         const detail = (body.error && body.error.message) || JSON.stringify(body).slice(0, 240);
+        if (res.status === 401) {
+          throw new Error(
+            "AI provider rejected credentials (401): " + detail
+          );
+        }
+        if (res.status === 429) {
+          throw new Error(
+            "Rate limit reached from AI provider (429). Please wait a minute, reduce batch size, or switch provider."
+          );
+        }
         throw new Error("AI request failed (" + res.status + "): " + detail);
       }
       return body;
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async function chat(messages, overrideSettings) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      throw new Error("Chat requires at least one message");
+    }
+    const settings = validateSettings(overrideSettings || (await loadSettings()));
+    if (!settings.enabled || !settings.consentTriage) {
+      throw new Error("Enable triage + consent in Settings");
+    }
+    if (settings.provider !== "ollama" && !settings.apiKey) {
+      throw new Error("Missing API key for selected provider");
+    }
+    if (settings.provider === "openrouter" && !settings.apiKey.startsWith("sk-or-")) {
+      throw new Error("OpenRouter requires an OpenRouter key (starts with 'sk-or-').");
+    }
+
+    const endpoint = settings.baseURL.replace(/\/$/, "") + "/chat/completions";
+    const headers = { "Content-Type": "application/json" };
+    if (settings.provider !== "ollama") {
+      headers.Authorization = "Bearer " + settings.apiKey;
+    }
+    if (settings.provider === "openrouter") {
+      headers["HTTP-Referer"] = "https://mail.google.com";
+      headers["X-Title"] = "Gmail Hard Reskin";
+    }
+
+    const payload = {
+      model: settings.model,
+      temperature: 0.2,
+      max_tokens: 900,
+      messages
+    };
+
+    const data = await requestWithTimeout(
+      endpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload)
+      },
+      settings.timeoutMs
+    );
+    const text = data && data.choices && data.choices[0] && data.choices[0].message
+      ? normalize(data.choices[0].message.content || "")
+      : "";
+    if (!text) throw new Error("AI returned an empty response");
+    return text;
   }
 
   async function triageBatch(messages, overrideSettings) {
@@ -195,6 +309,9 @@
 
     if (settings.provider !== "ollama" && !settings.apiKey) {
       throw new Error("Missing API key for selected provider");
+    }
+    if (settings.provider === "openrouter" && !settings.apiKey.startsWith("sk-or-")) {
+      throw new Error("OpenRouter requires an OpenRouter key (starts with 'sk-or-').");
     }
 
     const trimmed = messages.slice(0, settings.batchSize).map((msg) => ({
@@ -213,18 +330,29 @@
       headers["X-Title"] = "Gmail Hard Reskin";
     }
 
-    const payload = {
-      model: settings.model,
-      temperature: 0.1,
-      max_tokens: 1000,
-      response_format: { type: "json_object" },
-      messages: buildTriagePrompt(trimmed)
-    };
+    let useStructuredJSON = true;
 
     let attempt = 0;
     let lastError = null;
     while (attempt <= settings.retryCount) {
       try {
+        logTriageDebug("Sending triage request", {
+          provider: settings.provider,
+          model: settings.model,
+          endpoint,
+          keyPreview: maskKey(settings.apiKey),
+          batchSize: trimmed.length
+        });
+        const payload = {
+          model: settings.model,
+          temperature: 0.1,
+          max_tokens: 1000,
+          messages: buildTriagePrompt(trimmed)
+        };
+        if (useStructuredJSON) {
+          payload.response_format = { type: "json_object" };
+        }
+
         const data = await requestWithTimeout(
           endpoint,
           {
@@ -238,9 +366,35 @@
         const text = data && data.choices && data.choices[0] && data.choices[0].message
           ? data.choices[0].message.content
           : "";
-        return parseJSONResult(text);
+        const parsed = parseJSONResult(text);
+        if (parsed.length === 0) {
+          logTriageDebug("AI response produced zero parsed triage items", {
+            provider: settings.provider,
+            model: settings.model,
+            requestedMessages: trimmed.length,
+            responsePreview: normalize(text).slice(0, 1200)
+          });
+        }
+        return parsed;
       } catch (error) {
         lastError = error;
+        const message = error && error.message ? String(error.message) : String(error);
+        logTriageDebug("AI triage request attempt failed", {
+          attempt: attempt + 1,
+          maxAttempts: settings.retryCount + 1,
+          provider: settings.provider,
+          model: settings.model,
+          useStructuredJSON,
+          error: message
+        });
+        if (useStructuredJSON && message.includes("AI request failed (400)")) {
+          useStructuredJSON = false;
+          logTriageDebug("Retrying without response_format=json_object after 400 response", {
+            provider: settings.provider,
+            model: settings.model
+          });
+          continue;
+        }
         if (attempt >= settings.retryCount) break;
         await new Promise((resolve) => setTimeout(resolve, settings.retryBackoffMs * (attempt + 1)));
       }
@@ -276,6 +430,7 @@
     saveSettings,
     validateSettings,
     triageBatch,
+    chat,
     testConnection
   };
 })();
