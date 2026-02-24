@@ -1097,6 +1097,8 @@ body[data-reskin-mode="viewer"][data-reskin-theme="light"] {
     white-space: nowrap !important;
     padding: 8px 10px !important;
     font-size: 12px !important;
+    width: auto !important;
+    flex: 0 0 auto !important;
   }
 
   #reskin-root .rv-settings {
@@ -1122,7 +1124,7 @@ body[data-reskin-mode="viewer"][data-reskin-theme="light"] {
   }
 
   #reskin-root .rv-side-triage-meta {
-    min-width: 220px !important;
+    min-width: 180px !important;
   }
 
   #reskin-root .rv-side-triage-item {

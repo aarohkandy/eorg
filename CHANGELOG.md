@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.0 - 2026-02-24
+
+- Promoted the extension/package release line to `1.0.0`.
+- Synced repository state for full-workspace GitHub publishing.
+
 ## v0.7.7 - 2026-02-23
 
 - Added AI row summaries with throttled background generation and local cache persistence.

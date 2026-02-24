@@ -93,6 +93,9 @@
   const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
   const SUMMARY_BATCH_SIZE = 3;
 
+  const LIST_LOAD_MORE_DISTANCE_PX = 280;
+  const LIST_PREFETCH_DISTANCE_PX = 900;
+
   const NOISE_TEXT = new Set([
     "starred",
     "not starred",
@@ -2615,8 +2618,9 @@
     if (route.mailbox === "inbox") {
       list.onscroll = () => {
         if (state.currentView !== "list") return;
-        const nearBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 280;
-        const nearEndPrefetch = list.scrollTop + list.clientHeight >= list.scrollHeight - 900;
+        const nearBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - LIST_LOAD_MORE_DISTANCE_PX;
+        const nearEndPrefetch =
+          list.scrollTop + list.clientHeight >= list.scrollHeight - LIST_PREFETCH_DISTANCE_PX;
         if (!nearBottom && !nearEndPrefetch) return;
         const current = Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize);
         if (nearBottom && current < messages.length) {
