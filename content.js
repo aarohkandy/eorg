@@ -5,6 +5,9 @@
   const ROOT_ID = "reskin-root";
   const MODE_ATTR = "data-reskin-mode";
   const MODE_VALUE = "viewer";
+  const THEME_ATTR = "data-reskin-theme";
+  const THEME_DARK = "dark";
+  const THEME_LIGHT = "light";
   const OBSERVER_DEBOUNCE_MS = 180;
   const OBSERVER_MIN_RENDER_GAP_MS = 320;
   const UI_POLL_INTERVAL_MS = 900;
@@ -82,10 +85,13 @@
     { label: "Spam", hash: "#spam", nativeLabel: "Spam" },
     { label: "Trash", hash: "#trash", nativeLabel: "Trash" }
   ];
+  const PRIMARY_NAV_HASHES = new Set(["#inbox", "#sent", "#drafts"]);
 
   const TRIAGE_LEVELS = ["critical", "high", "medium", "low", "fyi"];
   const TRIAGE_MAP_STORAGE_KEY = "reskin_triage_map_v1";
-  const INBOXSDK_SETTINGS_KEY = "reskin_inboxsdk_settings_v1";
+  const SUMMARY_STORAGE_KEY = "reskin_row_summaries_v1";
+  const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
+  const SUMMARY_BATCH_SIZE = 3;
 
   const NOISE_TEXT = new Set([
     "starred",
@@ -126,23 +132,43 @@
     triageMapLoaded: false,
     triageMapLoadInFlight: false,
     triageMapPersistTimer: null,
-    inboxSdk: null,
-    inboxSdkLoading: false,
-    inboxSdkEnabled: false,
-    inboxSdkSettings: null,
-    inboxSdkSettingsLoading: false,
+    summaryByThreadId: {},
+    summaryMetaByThreadId: {},
+    summaryStatusByThreadId: {},
+    summaryQueue: [],
+    summaryWorkerRunning: false,
+    summaryCooldownUntil: 0,
+    summaryLoadInFlight: false,
+    summaryLoaded: false,
+    summaryPersistTimer: null,
+    fullScanRunning: false,
+    fullScanStatus: "",
+    fullScanCompletedByMailbox: {},
+    scannedMailboxMessages: {},
+    listVisibleByMailbox: {},
+    listChunkSize: 120,
     aiQuestionText: "",
-    aiAnswerText: "",
     aiAnswerBusy: false,
+    aiChatMessages: [],
     settingsCache: null,
     settingsLoadInFlight: false,
     settingsLoadFailed: false,
+    settingsAutosaveTimer: null,
     settingsPinned: false,
+    settingsTab: "api",
+    apiKeyGuideGranted: false,
+    showApiKeyPermissionModal: false,
+    lastAutoTriageAt: 0,
+    lastAutoTriageKickAt: 0,
     lastObserverRenderAt: 0,
     pendingObserverTimer: null,
     lastObserverSignature: "",
     lastSeenHash: ""
   };
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   function logInfo(message, extra) {
     if (typeof extra === "undefined") {
@@ -227,16 +253,6 @@
       .replace(/'/g, "&#39;");
   }
 
-  function parseBoolean(value, fallback = false) {
-    if (typeof value === "boolean") return value;
-    if (typeof value === "string") {
-      const v = normalize(value).toLowerCase();
-      if (v === "true" || v === "1" || v === "yes") return true;
-      if (v === "false" || v === "0" || v === "no") return false;
-    }
-    return fallback;
-  }
-
   function resolveExtensionUrl(path) {
     const chromeRuntime =
       globalThis.chrome && globalThis.chrome.runtime && typeof globalThis.chrome.runtime.getURL === "function"
@@ -315,6 +331,22 @@
     if (document.body) document.body.setAttribute(MODE_ATTR, MODE_VALUE);
   }
 
+  function normalizeTheme(value) {
+    return normalize(value || "").toLowerCase() === THEME_LIGHT ? THEME_LIGHT : THEME_DARK;
+  }
+
+  function activeTheme() {
+    return normalizeTheme(state.settingsCache && state.settingsCache.theme);
+  }
+
+  function applyTheme(root) {
+    const theme = activeTheme();
+    const shell = root instanceof HTMLElement ? root : document.getElementById(ROOT_ID);
+    if (shell instanceof HTMLElement) shell.setAttribute(THEME_ATTR, theme);
+    document.documentElement.setAttribute(THEME_ATTR, theme);
+    if (document.body) document.body.setAttribute(THEME_ATTR, theme);
+  }
+
   function parseListRoute(hashValue) {
     const raw = normalize(hashValue || "");
     if (!raw) return { hash: "#inbox", mailbox: "inbox", triage: "" };
@@ -355,11 +387,19 @@
     return mailbox === "inbox" && triage ? `#inbox?triage=${triage}` : `#${mailbox}`;
   }
 
+  function hashHasTriageParam(hashValue) {
+    const raw = normalize(hashValue || "");
+    return /\btriage=/.test(raw);
+  }
+
   function activeMailbox() {
     return parseListRoute(state.currentView === "thread" ? state.lastListHash : window.location.hash).mailbox;
   }
 
   function activeTriageFilter() {
+    if (activeMailbox() !== "inbox") return "";
+    const fromState = normalize(state.triageFilter || "").toLowerCase();
+    if (TRIAGE_LEVELS.includes(fromState)) return fromState;
     return parseListRoute(state.currentView === "thread" ? state.lastListHash : window.location.hash).triage;
   }
 
@@ -432,10 +472,10 @@
     return false;
   }
 
-  function navigateToList(targetHash, nativeLabel = "") {
+  function navigateToList(targetHash, nativeLabel = "", options = {}) {
     const nextHash = sanitizeListHash(targetHash);
     window.location.hash = nextHash;
-    if (nativeLabel) clickNativeMailboxLink(nativeLabel);
+    if (nativeLabel && options.native !== false) clickNativeMailboxLink(nativeLabel);
   }
 
   function openSettingsView(root) {
@@ -532,121 +572,6 @@
     }
   }
 
-  async function loadInboxSdkSettings() {
-    const defaults = {
-      enabled: false,
-      appId: "",
-      version: 2
-    };
-    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return defaults;
-    try {
-      const raw = await chrome.storage.local.get(INBOXSDK_SETTINGS_KEY);
-      const stored = raw && raw[INBOXSDK_SETTINGS_KEY] && typeof raw[INBOXSDK_SETTINGS_KEY] === "object"
-        ? raw[INBOXSDK_SETTINGS_KEY]
-        : {};
-      return {
-        enabled: parseBoolean(stored.enabled, defaults.enabled),
-        appId: normalize(stored.appId || ""),
-        version: Number(stored.version) || defaults.version
-      };
-    } catch (error) {
-      logWarn("Failed loading InboxSDK settings", error);
-      return defaults;
-    }
-  }
-
-  async function loadInboxSdkSettingsCached(force = false) {
-    if (!force && state.inboxSdkSettings) return state.inboxSdkSettings;
-    if (state.inboxSdkSettingsLoading) return state.inboxSdkSettings;
-    state.inboxSdkSettingsLoading = true;
-    try {
-      state.inboxSdkSettings = await loadInboxSdkSettings();
-      state.inboxSdkEnabled = Boolean(state.inboxSdkSettings && state.inboxSdkSettings.enabled);
-      return state.inboxSdkSettings;
-    } finally {
-      state.inboxSdkSettingsLoading = false;
-    }
-  }
-
-  async function saveInboxSdkSettings(patch) {
-    const current = await loadInboxSdkSettings();
-    const merged = {
-      ...current,
-      ...(patch || {})
-    };
-    const next = {
-      enabled: parseBoolean(merged.enabled, false),
-      appId: normalize(merged.appId || ""),
-      version: Number(merged.version) || 2
-    };
-    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return next;
-    await chrome.storage.local.set({ [INBOXSDK_SETTINGS_KEY]: next });
-    state.inboxSdkSettings = next;
-    return next;
-  }
-
-  function getInboxSdkGlobal() {
-    if (typeof window === "undefined") return null;
-    if (window.InboxSDK && typeof window.InboxSDK.load === "function") return window.InboxSDK;
-    return null;
-  }
-
-  async function initInboxSdk() {
-    if (state.inboxSdk || state.inboxSdkLoading) return;
-    state.inboxSdkLoading = true;
-    try {
-      const settings = await loadInboxSdkSettingsCached();
-      state.inboxSdkEnabled = Boolean(settings.enabled);
-      if (!settings.enabled) {
-        logTriageDebug("InboxSDK integration disabled");
-        return;
-      }
-      if (!settings.appId) {
-        logTriageDebug("InboxSDK integration skipped: missing appId");
-        return;
-      }
-      const inboxSdk = getInboxSdkGlobal();
-      if (!inboxSdk) {
-        logTriageDebug("InboxSDK integration unavailable: global InboxSDK not found");
-        return;
-      }
-
-      const sdk = await inboxSdk.load(Number(settings.version) || 2, settings.appId);
-      state.inboxSdk = sdk;
-      logTriageDebug("InboxSDK integration initialized", {
-        version: Number(settings.version) || 2
-      });
-
-      try {
-        if (sdk && sdk.Router && typeof sdk.Router.handleAllRoutes === "function") {
-          sdk.Router.handleAllRoutes(() => {
-            state.lastObserverSignature = "";
-            const root = document.getElementById(ROOT_ID);
-            if (root instanceof HTMLElement) renderCurrentView(root);
-          });
-        }
-      } catch (error) {
-        logWarn("InboxSDK Router hook failed", error);
-      }
-
-      try {
-        if (sdk && sdk.Lists && typeof sdk.Lists.registerThreadRowViewHandler === "function") {
-          sdk.Lists.registerThreadRowViewHandler(() => {
-            state.lastObserverSignature = "";
-            const root = document.getElementById(ROOT_ID);
-            if (root instanceof HTMLElement) renderCurrentView(root);
-          });
-        }
-      } catch (error) {
-        logWarn("InboxSDK ThreadRow hook failed", error);
-      }
-    } catch (error) {
-      logWarn("InboxSDK init failed", error);
-    } finally {
-      state.inboxSdkLoading = false;
-    }
-  }
-
   function schedulePersistTriageMap() {
     if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
     if (state.triageMapPersistTimer) {
@@ -671,6 +596,223 @@
     }, 250);
   }
 
+  function summaryThreadKey(threadId) {
+    const canonical = canonicalThreadId(threadId);
+    return normalize(canonical || threadId || "");
+  }
+
+  function normalizePersistedSummaryMap(input) {
+    if (!input || typeof input !== "object") return {};
+    const out = {};
+    const now = Date.now();
+    for (const [rawThreadId, rawValue] of Object.entries(input)) {
+      const threadId = summaryThreadKey(rawThreadId);
+      if (!threadId) continue;
+      const value = rawValue && typeof rawValue === "object" ? rawValue : {};
+      const summary = normalize(value.summary || "");
+      const updatedAt = Number(value.updatedAt || 0);
+      if (!summary || !updatedAt) continue;
+      if (now - updatedAt > SUMMARY_TTL_MS) continue;
+      out[threadId] = { summary, updatedAt };
+    }
+    return out;
+  }
+
+  async function loadPersistedSummaries() {
+    if (state.summaryLoaded || state.summaryLoadInFlight) return;
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    state.summaryLoadInFlight = true;
+    try {
+      const raw = await chrome.storage.local.get(SUMMARY_STORAGE_KEY);
+      const map = normalizePersistedSummaryMap(raw[SUMMARY_STORAGE_KEY]);
+      const summaries = {};
+      const meta = {};
+      for (const [threadId, value] of Object.entries(map)) {
+        summaries[threadId] = value.summary;
+        meta[threadId] = { updatedAt: Number(value.updatedAt || 0) };
+      }
+      state.summaryByThreadId = summaries;
+      state.summaryMetaByThreadId = meta;
+      state.summaryLoaded = true;
+    } catch (error) {
+      logWarn("Failed to load row summaries", error);
+    } finally {
+      state.summaryLoadInFlight = false;
+    }
+  }
+
+  function schedulePersistSummaries() {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    if (state.summaryPersistTimer) clearTimeout(state.summaryPersistTimer);
+    state.summaryPersistTimer = setTimeout(async () => {
+      state.summaryPersistTimer = null;
+      try {
+        const payload = {};
+        const now = Date.now();
+        const keys = Object.keys(state.summaryByThreadId || {});
+        for (const threadId of keys) {
+          const summary = normalize(state.summaryByThreadId[threadId] || "");
+          if (!summary) continue;
+          const updatedAt = Number((state.summaryMetaByThreadId[threadId] || {}).updatedAt || now);
+          if (now - updatedAt > SUMMARY_TTL_MS) continue;
+          payload[threadId] = { summary, updatedAt };
+        }
+        await chrome.storage.local.set({ [SUMMARY_STORAGE_KEY]: payload });
+      } catch (error) {
+        logWarn("Failed to persist row summaries", error);
+      }
+    }, 350);
+  }
+
+  function getSummaryForMessage(msg) {
+    if (!msg) return "";
+    const key = summaryThreadKey(msg.threadId);
+    if (!key) return "";
+    const summary = normalize(state.summaryByThreadId[key] || "");
+    const updatedAt = Number((state.summaryMetaByThreadId[key] || {}).updatedAt || 0);
+    if (!summary || !updatedAt) return "";
+    if (Date.now() - updatedAt > SUMMARY_TTL_MS) {
+      delete state.summaryByThreadId[key];
+      delete state.summaryMetaByThreadId[key];
+      return "";
+    }
+    return summary;
+  }
+
+  function summaryBackoffMsFromError(error) {
+    const status = Number(error && error.status ? error.status : 0);
+    if (status === 429) {
+      const retryMs = Number(error && error.retryAfterMs ? error.retryAfterMs : 0);
+      return retryMs > 0 ? retryMs : 60000;
+    }
+    const message = normalize(error && error.message ? String(error.message) : "").toLowerCase();
+    if (message.includes("rate limit")) return 60000;
+    if (status >= 500 && status < 600) return 25000;
+    if (message.includes("missing api key") || message.includes("disabled in settings")) return 120000;
+    return 20000;
+  }
+
+  function findMessageForSummary(threadId) {
+    const key = summaryThreadKey(threadId);
+    if (!key) return null;
+    const mailbox = mailboxCacheKey(activeMailbox());
+    const candidates = Array.isArray(state.scannedMailboxMessages[mailbox]) ? state.scannedMailboxMessages[mailbox] : [];
+    for (const msg of candidates) {
+      if (summaryThreadKey(msg.threadId) === key) return msg;
+    }
+    const live = collectMessages(260).items || [];
+    for (const msg of live) {
+      if (summaryThreadKey(msg.threadId) === key) return msg;
+    }
+    return null;
+  }
+
+  function queueSummariesForMessages(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    loadPersistedSummaries()
+      .catch((error) => logWarn("Row summary bootstrap failed", error))
+      .finally(() => {
+        const now = Date.now();
+        const nextQueue = Array.isArray(state.summaryQueue) ? state.summaryQueue.slice() : [];
+        for (const msg of messages) {
+          const key = summaryThreadKey(msg && msg.threadId);
+          if (!key) continue;
+          if (getSummaryForMessage(msg)) continue;
+          const status = normalize(state.summaryStatusByThreadId[key] || "idle").toLowerCase();
+          if (status === "pending") continue;
+          if (!nextQueue.includes(key)) nextQueue.push(key);
+          if (!state.summaryStatusByThreadId[key]) state.summaryStatusByThreadId[key] = "idle";
+        }
+        state.summaryQueue = nextQueue;
+        if (state.summaryWorkerRunning) return;
+        if (now < Number(state.summaryCooldownUntil || 0)) return;
+        const root = document.getElementById(ROOT_ID);
+        runSummaryWorker(root);
+      });
+  }
+
+  async function runSummaryWorker(root) {
+    if (state.summaryWorkerRunning) return;
+    if (!window.ReskinAI || typeof window.ReskinAI.summarizeMessages !== "function") return;
+    if (Date.now() < Number(state.summaryCooldownUntil || 0)) return;
+
+    state.summaryWorkerRunning = true;
+    try {
+      while (Array.isArray(state.summaryQueue) && state.summaryQueue.length > 0) {
+        if (Date.now() < Number(state.summaryCooldownUntil || 0)) break;
+        const ids = [];
+        while (state.summaryQueue.length > 0 && ids.length < SUMMARY_BATCH_SIZE) {
+          const nextId = state.summaryQueue.shift();
+          const key = summaryThreadKey(nextId);
+          if (!key) continue;
+          if (state.summaryStatusByThreadId[key] === "pending") continue;
+          if (state.summaryByThreadId[key]) continue;
+          ids.push(key);
+          state.summaryStatusByThreadId[key] = "pending";
+        }
+        if (ids.length === 0) continue;
+
+        const batch = [];
+        for (const threadId of ids) {
+          const msg = findMessageForSummary(threadId);
+          if (!msg) {
+            state.summaryStatusByThreadId[threadId] = "failed";
+            continue;
+          }
+          batch.push({
+            threadId,
+            sender: normalize(msg.sender || ""),
+            subject: normalize(msg.subject || ""),
+            date: normalize(msg.date || ""),
+            snippet: normalize(msg.snippet || ""),
+            bodyText: normalize(msg.bodyText || "")
+          });
+        }
+        if (batch.length === 0) continue;
+
+        try {
+          const summaries = await window.ReskinAI.summarizeMessages(batch, state.settingsCache || {});
+          const now = Date.now();
+          const map = {};
+          for (const item of Array.isArray(summaries) ? summaries : []) {
+            const key = summaryThreadKey(item && item.threadId ? item.threadId : "");
+            const summary = normalize(item && item.summary ? item.summary : "");
+            if (!key || !summary) continue;
+            map[key] = summary;
+          }
+          for (const input of batch) {
+            const key = summaryThreadKey(input.threadId);
+            if (map[key]) {
+              state.summaryByThreadId[key] = map[key];
+              state.summaryMetaByThreadId[key] = { updatedAt: now };
+              state.summaryStatusByThreadId[key] = "done";
+            } else {
+              state.summaryStatusByThreadId[key] = "failed";
+            }
+          }
+          schedulePersistSummaries();
+          if (root instanceof HTMLElement && state.currentView === "list") {
+            renderList(root);
+          }
+        } catch (error) {
+          const backoffMs = summaryBackoffMsFromError(error);
+          state.summaryCooldownUntil = Date.now() + backoffMs;
+          for (const input of batch) {
+            const key = summaryThreadKey(input.threadId);
+            state.summaryStatusByThreadId[key] = "idle";
+            if (!state.summaryQueue.includes(key)) state.summaryQueue.push(key);
+          }
+          logWarn("Row summary generation paused", error);
+          break;
+        }
+
+        await sleep(650 + Math.floor(Math.random() * 250));
+      }
+    } finally {
+      state.summaryWorkerRunning = false;
+    }
+  }
+
   function getTriageLevelForMessage(msg) {
     if (!msg || !msg.threadId) return "";
     const local = triageLocalGet(msg.threadId);
@@ -689,12 +831,32 @@
   function renderSidebar(root) {
     const nav = root.querySelector(".rv-nav");
     if (!(nav instanceof HTMLElement)) return;
+    const navOverflow = root.querySelector(".rv-nav-overflow");
 
     const activeHash = getActiveNavHash();
-    nav.innerHTML = NAV_ITEMS.map((item) => {
+    const primaryItems = NAV_ITEMS.filter((item) => PRIMARY_NAV_HASHES.has(item.hash));
+    const secondaryItems = NAV_ITEMS.filter((item) => !PRIMARY_NAV_HASHES.has(item.hash));
+
+    nav.innerHTML = primaryItems.map((item) => {
       const isActive = item.hash === activeHash;
       return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
     }).join("");
+    if (navOverflow instanceof HTMLElement) {
+      const hiddenActive = secondaryItems.some((item) => item.hash === activeHash);
+      navOverflow.innerHTML = secondaryItems.length > 0
+        ? `
+          <div class="rv-nav-more" data-reskin="true">
+            <button type="button" class="rv-nav-more-trigger${hiddenActive ? " is-active" : ""}" aria-label="More folders" data-reskin="true">...</button>
+            <div class="rv-nav-more-menu" data-reskin="true">
+              ${secondaryItems.map((item) => {
+                const isActive = item.hash === activeHash;
+                return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
+              }).join("")}
+            </div>
+          </div>
+        `
+        : "";
+    }
 
     const settings = root.querySelector(".rv-settings");
     if (settings instanceof HTMLElement) {
@@ -716,66 +878,72 @@
           `<button type="button" class="rv-triage-item rv-side-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`
         );
       }
-      sideTriageList.innerHTML = rows.join("");
+      sideTriageList.innerHTML = `
+        ${rows.join("")}
+        <div class="rv-side-triage-meta" data-reskin="true">
+          <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || "Auto-triage runs in the background.")}</div>
+          <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.fullScanStatus || "Auto-scan loads all inbox pages in the background.")}</div>
+        </div>
+      `;
     }
   }
 
   function renderRightRail(root) {
     const rail = root.querySelector(".rv-right");
     if (!(rail instanceof HTMLElement)) return;
-
-    const isInbox = activeMailbox() === "inbox";
-    const currentFilter = activeTriageFilter();
-    const rows = TRIAGE_LEVELS.map((level) => {
-      const count = state.triageCounts[level] || 0;
-      const active = currentFilter === level;
-      return `<button type="button" class="rv-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`;
-    }).join("");
-    const startDisabled = !isInbox || state.triageRunning;
-    const startLabel = state.triageRunning ? "Running..." : "Start";
+    const messages = Array.isArray(state.aiChatMessages) ? state.aiChatMessages : [];
+    const transcript = messages.length
+      ? messages.map((msg) => {
+        const role = normalize(msg.role || "assistant").toLowerCase() === "user" ? "user" : "assistant";
+        return `<div class="rv-chat-msg is-${role}" data-reskin="true"><div class="rv-chat-bubble" data-reskin="true">${escapeHtml(normalize(msg.content || ""))}</div></div>`;
+      }).join("")
+      : `<div class="rv-chat-empty" data-reskin="true">Ask anything about your inbox.</div>`;
 
     rail.innerHTML = `
-      <section class="rv-ai-panel" data-reskin="true">
-        <div class="rv-ai-head" data-reskin="true">AI Copilot</div>
-        <div class="rv-ai-copy" data-reskin="true">Inbox-only triage is active. Existing labels are never re-triaged.</div>
-      </section>
-      <section class="rv-triage rv-triage-right" data-reskin="true">
-        <div class="rv-triage-head" data-reskin="true">
-          <span data-reskin="true">Triage</span>
-          <button type="button" class="rv-triage-start" data-reskin="true" ${startDisabled ? "disabled" : ""}>${startLabel}</button>
+      <section class="rv-ai-chat" data-reskin="true">
+        <div class="rv-ai-chat-head" data-reskin="true">
+          <div class="rv-ai-head" data-reskin="true">Inbox Chat</div>
+          <div class="rv-ai-copy" data-reskin="true">Type at the top, then messages flow below.</div>
         </div>
-        <div class="rv-triage-list${isInbox ? "" : " is-off-inbox"}" data-reskin="true">${rows}</div>
-        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || (state.triageRunning ? "Triage running..." : "Press Start to organize untriaged inbox messages"))}</div>
-      </section>
-      <section class="rv-ai-qa" data-reskin="true">
-        <div class="rv-ai-head" data-reskin="true">Ask Inbox</div>
-        <div class="rv-ai-copy" data-reskin="true">Ask questions like "What happened yesterday?"</div>
-        <textarea class="rv-ai-qa-input" data-reskin="true" placeholder="Ask about your inbox...">${escapeHtml(state.aiQuestionText || "")}</textarea>
-        <button type="button" class="rv-ai-qa-submit" data-reskin="true" ${state.aiAnswerBusy ? "disabled" : ""}>${state.aiAnswerBusy ? "Thinking..." : "Ask"}</button>
-        <div class="rv-ai-qa-answer" data-reskin="true">${escapeHtml(state.aiAnswerText || "No answer yet.")}</div>
+        <div class="rv-chat-composer" data-reskin="true">
+          <textarea class="rv-ai-qa-input" data-reskin="true" placeholder="Start typing your inbox question...">${escapeHtml(state.aiQuestionText || "")}</textarea>
+          <button type="button" class="rv-ai-qa-submit" data-reskin="true" ${state.aiAnswerBusy ? "disabled" : ""}>${state.aiAnswerBusy ? "Thinking..." : "Send"}</button>
+        </div>
+        <div class="rv-chat-transcript" data-reskin="true">${transcript}</div>
       </section>
     `;
+
+    const transcriptNode = rail.querySelector(".rv-chat-transcript");
+    if (transcriptNode instanceof HTMLElement) {
+      transcriptNode.scrollTop = transcriptNode.scrollHeight;
+    }
   }
 
   function buildInboxQuestionPrompt(question, messages) {
-    const compact = (messages || []).slice(0, 120).map((msg, i) => ({
+    let compact = (messages || []).slice(0, 120).map((msg, i) => ({
       i,
       threadId: msg.threadId,
       sender: msg.sender,
       subject: msg.subject,
       date: msg.date,
-      snippet: normalize(msg.snippet || "").slice(0, 500),
-      body: normalize(msg.bodyText || "").slice(0, 1200)
+      snippet: normalize(msg.snippet || "").slice(0, 180),
+      body: normalize(msg.bodyText || "").slice(0, 280)
     }));
+    let compactJson = JSON.stringify(compact);
+    while (compactJson.length > 14000 && compact.length > 10) {
+      compact = compact.slice(0, Math.max(10, Math.floor(compact.length * 0.7)));
+      compactJson = JSON.stringify(compact);
+    }
     return [
       {
         role: "system",
         content:
-          "You answer questions about inbox email context. Be concise. If evidence is missing, say you are unsure."
+          "You answer questions about inbox email context. Be concise. If evidence is missing, say you are unsure. " +
+          "Support requests like last N messages, messages from a date, and keyword matches."
       },
       {
         role: "user",
-        content: `Question: ${normalize(question)}\n\nInbox context JSON:\n${JSON.stringify(compact)}`
+        content: `Question: ${normalize(question)}\n\nInbox context JSON:\n${compactJson}`
       }
     ];
   }
@@ -788,27 +956,56 @@
     );
     state.aiQuestionText = question;
     if (!question) {
-      state.aiAnswerText = "Type a question first.";
+      state.aiChatMessages.push({ role: "assistant", content: "Type a question first." });
       applyReskin();
       return;
     }
     if (!window.ReskinAI || typeof window.ReskinAI.chat !== "function") {
-      state.aiAnswerText = "AI chat is unavailable.";
+      state.aiChatMessages.push({ role: "assistant", content: "AI chat is unavailable." });
       applyReskin();
       return;
     }
 
+    state.aiChatMessages.push({ role: "user", content: question });
     state.aiAnswerBusy = true;
-    state.aiAnswerText = "Thinking...";
+    state.aiChatMessages.push({ role: "assistant", content: "Thinking..." });
     applyReskin();
     try {
-      const result = collectMessages(140);
-      const prompts = buildInboxQuestionPrompt(question, result.items || []);
-      const answer = await window.ReskinAI.chat(prompts, state.settingsCache || {});
-      state.aiAnswerText = normalize(answer) || "No answer returned.";
+      if (!state.fullScanCompletedByMailbox[mailboxCacheKey("inbox")] && !state.fullScanRunning) {
+        state.aiChatMessages[state.aiChatMessages.length - 1] = {
+          role: "assistant",
+          content: "Scanning inbox pages first so I can answer across all messages..."
+        };
+        applyReskin();
+        await runFullMailboxScan(root);
+      }
+      const allMessages = getMailboxMessages("inbox", 2000);
+      const selected = selectMessagesForQuestion(question, allMessages);
+      let prompts = buildInboxQuestionPrompt(question, selected);
+      let answer = "";
+      try {
+        answer = await window.ReskinAI.chat(prompts, state.settingsCache || {});
+      } catch (error) {
+        const message = normalize(error && error.message ? error.message : String(error || ""));
+        if (message.includes("413") && selected.length > 12) {
+          const trimmed = selected.slice(0, Math.max(12, Math.floor(selected.length / 3)));
+          prompts = buildInboxQuestionPrompt(question, trimmed);
+          answer = await window.ReskinAI.chat(prompts, state.settingsCache || {});
+        } else {
+          throw error;
+        }
+      }
+      state.aiChatMessages[state.aiChatMessages.length - 1] = {
+        role: "assistant",
+        content:
+          `${normalize(answer) || "No answer returned."}\n\n(Used ${selected.length} of ${allMessages.length} cached inbox messages.)`
+      };
     } catch (error) {
       const msg = error && error.message ? String(error.message) : "AI answer failed";
-      state.aiAnswerText = `Unable to answer: ${msg.slice(0, 220)}`;
+      state.aiChatMessages[state.aiChatMessages.length - 1] = {
+        role: "assistant",
+        content: `Unable to answer: ${msg.slice(0, 220)}`
+      };
       logWarn("Inbox Q&A failed", error);
     } finally {
       state.aiAnswerBusy = false;
@@ -840,8 +1037,14 @@
 
     state.currentView = threadHash ? "thread" : "list";
     if (state.currentView === "list") {
-      state.lastListHash = sanitizeListHash(window.location.hash || "#inbox");
-      state.triageFilter = activeTriageFilter();
+      const currentHash = window.location.hash || "#inbox";
+      const parsed = parseListRoute(currentHash);
+      state.lastListHash = sanitizeListHash(currentHash);
+      if (parsed.mailbox !== "inbox") {
+        state.triageFilter = "";
+      } else if (hashHasTriageParam(currentHash)) {
+        state.triageFilter = parsed.triage;
+      }
     }
   }
 
@@ -856,15 +1059,18 @@
     root.innerHTML = `
       <div class="rv-shell" data-reskin="true">
         <aside class="rv-sidebar" data-reskin="true">
-          <div class="rv-brand" data-reskin="true">Mail Viewer</div>
+          <div class="rv-brand" data-reskin="true">Mailita</div>
           <div class="rv-nav-wrap" data-reskin="true">
             <nav class="rv-nav" data-reskin="true"></nav>
+            <div class="rv-nav-overflow" data-reskin="true"></div>
           </div>
           <section class="rv-side-triage" data-reskin="true">
             <div class="rv-side-triage-title" data-reskin="true">Triage</div>
             <div class="rv-side-triage-list" data-reskin="true"></div>
           </section>
-          <button type="button" class="rv-settings" data-reskin="true">Settings</button>
+          <div class="rv-sidebar-footer" data-reskin="true">
+            <button type="button" class="rv-settings" data-reskin="true">Settings</button>
+          </div>
         </aside>
         <main class="rv-main" data-reskin="true">
           <div class="rv-list" data-reskin="true"></div>
@@ -898,6 +1104,7 @@
     state.settingsLoadInFlight = true;
     try {
       state.settingsCache = await window.ReskinAI.loadSettings();
+      applyTheme();
       state.settingsLoadFailed = false;
       return state.settingsCache;
     } catch (error) {
@@ -909,39 +1116,33 @@
     }
   }
 
-  async function saveSettingsFromDom(root) {
+  async function saveSettingsFromDom(root, options = {}) {
     if (!window.ReskinAI || typeof window.ReskinAI.saveSettings !== "function") return;
     const view = root.querySelector(".rv-settings-view");
     if (!(view instanceof HTMLElement)) return;
 
     const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
+    const apiKey = normalize(view.querySelector('[name="apiKey"]')?.value || "");
+    const selectedTheme = normalizeTheme(
+      view.querySelector('[name="theme"]:checked')?.value ||
+      view.querySelector('[name="theme"]')?.value ||
+      THEME_DARK
+    );
     const payload = {
       provider,
-      apiKey: normalize(view.querySelector('[name="apiKey"]')?.value || ""),
-      model: normalize(view.querySelector('[name="model"]')?.value || ""),
-      batchSize: Number(view.querySelector('[name="batchSize"]')?.value || 25),
-      timeoutMs: Number(view.querySelector('[name="timeoutMs"]')?.value || 30000),
-      retryCount: Number(view.querySelector('[name="retryCount"]')?.value || 2),
-      retryBackoffMs: Number(view.querySelector('[name="retryBackoffMs"]')?.value || 1200),
-      maxInputChars: Number(view.querySelector('[name="maxInputChars"]')?.value || 2200),
-      enabled: Boolean(view.querySelector('[name="enabled"]')?.checked),
-      consentTriage: Boolean(view.querySelector('[name="consentTriage"]')?.checked)
-    };
-    const inboxSdkPayload = {
-      enabled: Boolean(view.querySelector('[name="inboxSdkEnabled"]')?.checked),
-      appId: normalize(view.querySelector('[name="inboxSdkAppId"]')?.value || ""),
-      version: Number(view.querySelector('[name="inboxSdkVersion"]')?.value || 2) || 2
+      apiKey,
+      apiKeys: apiKey ? [apiKey] : [],
+      theme: selectedTheme,
+      model: defaultModelForProvider(provider)
     };
 
     try {
       const saved = await window.ReskinAI.saveSettings(payload);
-      await saveInboxSdkSettings(inboxSdkPayload);
-      state.inboxSdk = null;
-      state.inboxSdkEnabled = inboxSdkPayload.enabled;
       state.settingsCache = saved;
-      state.triageStatus = "Settings saved";
-      initInboxSdk().catch((error) => logWarn("InboxSDK init after save failed", error));
-      applyReskin();
+      if (!options || !options.silent) {
+        state.triageStatus = "Settings saved";
+        applyReskin();
+      }
     } catch (error) {
       state.triageStatus = "Settings save failed";
       logWarn("Save settings failed", error);
@@ -949,34 +1150,16 @@
     }
   }
 
-  async function testSettingsFromDom(root) {
-    if (!window.ReskinAI || typeof window.ReskinAI.testConnection !== "function") return;
-    const view = root.querySelector(".rv-settings-view");
-    if (!(view instanceof HTMLElement)) return;
-
-    const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
-    const payload = {
-      provider,
-      apiKey: normalize(view.querySelector('[name="apiKey"]')?.value || ""),
-      model: normalize(view.querySelector('[name="model"]')?.value || ""),
-      enabled: true,
-      consentTriage: true,
-      batchSize: Number(view.querySelector('[name="batchSize"]')?.value || 25),
-      timeoutMs: Number(view.querySelector('[name="timeoutMs"]')?.value || 30000),
-      retryCount: Number(view.querySelector('[name="retryCount"]')?.value || 2),
-      retryBackoffMs: Number(view.querySelector('[name="retryBackoffMs"]')?.value || 1200),
-      maxInputChars: Number(view.querySelector('[name="maxInputChars"]')?.value || 2200)
-    };
-
-    try {
-      await window.ReskinAI.testConnection(payload);
-      state.triageStatus = "Connection successful";
-      applyReskin();
-    } catch (error) {
-      state.triageStatus = "Connection failed";
-      logWarn("Connection test failed", error);
-      applyReskin();
+  function scheduleSettingsAutosave(root, delayMs = 650) {
+    if (!(root instanceof HTMLElement)) return;
+    if (state.settingsAutosaveTimer) {
+      clearTimeout(state.settingsAutosaveTimer);
     }
+    state.settingsAutosaveTimer = setTimeout(() => {
+      state.settingsAutosaveTimer = null;
+      if (state.currentView !== "settings") return;
+      saveSettingsFromDom(root, { silent: true });
+    }, Math.max(180, Number(delayMs) || 650));
   }
 
   function defaultModelForProvider(provider) {
@@ -998,17 +1181,55 @@
     return "OpenRouter API key";
   }
 
+  function providerNeedsApiKey(provider) {
+    return normalize(provider).toLowerCase() !== "ollama";
+  }
+
+  function buildApiKeyGuide(provider) {
+    const value = normalize(provider).toLowerCase();
+    if (value === "groq") {
+      return {
+        label: "Groq",
+        linkText: "Open Groq Console",
+        href: "https://console.groq.com/keys",
+        steps: [
+          "Sign in to your Groq account.",
+          "Open API Keys and create a new key.",
+          "Copy the key once shown.",
+          "Paste it into API Key below."
+        ]
+      };
+    }
+    return {
+      label: "OpenRouter",
+      linkText: "Open OpenRouter Keys",
+      href: "https://openrouter.ai/keys",
+      steps: [
+        "Sign in to your OpenRouter account.",
+        "Create a new API key from the keys page.",
+        "Copy the key value.",
+        "Paste it into API Key below."
+      ]
+    };
+  }
+
+  function openApiKeyGuidePrompt(root) {
+    const view = root.querySelector(".rv-settings-view");
+    if (!(view instanceof HTMLElement)) return;
+    const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
+    if (!providerNeedsApiKey(provider)) return;
+    state.showApiKeyPermissionModal = true;
+    renderSettings(root);
+  }
+
   function applyProviderDefaultsToSettingsForm(root) {
     const view = root.querySelector(".rv-settings-view");
     if (!(view instanceof HTMLElement)) return;
     const providerSelect = view.querySelector('[name="provider"]');
-    const modelInput = view.querySelector('[name="model"]');
     const keyInput = view.querySelector('[name="apiKey"]');
     if (!(providerSelect instanceof HTMLSelectElement)) return;
-    if (!(modelInput instanceof HTMLInputElement)) return;
 
     const provider = normalize(providerSelect.value || "openrouter").toLowerCase();
-    modelInput.value = defaultModelForProvider(provider);
     if (keyInput instanceof HTMLInputElement) {
       keyInput.placeholder = apiKeyPlaceholderForProvider(provider);
     }
@@ -1027,25 +1248,38 @@
         return;
       }
 
-      if (target.closest(".rv-settings-back")) {
+      if (target.closest(".rv-back")) {
         consumeEvent(event);
-        lockInteractions(500);
         state.settingsPinned = false;
         state.currentView = "list";
-        window.location.hash = sanitizeListHash(state.lastListHash || "#inbox");
+        state.activeThreadId = "";
+        state.lockListView = false;
+        const targetHash = sanitizeListHash(state.lastListHash || "#inbox");
+        state.lastListHash = targetHash;
+        navigateToList(targetHash, "", { native: false });
         renderCurrentView(root);
         return;
       }
 
-      if (target.closest(".rv-settings-save")) {
+      if (target.closest(".rv-api-key-permission")) {
         consumeEvent(event);
-        saveSettingsFromDom(root);
+        openApiKeyGuidePrompt(root);
         return;
       }
 
-      if (target.closest(".rv-settings-test")) {
+      if (target.closest(".rv-api-permission-allow")) {
         consumeEvent(event);
-        testSettingsFromDom(root);
+        state.apiKeyGuideGranted = true;
+        state.showApiKeyPermissionModal = false;
+        renderSettings(root);
+        return;
+      }
+
+      if (target.closest(".rv-api-permission-decline")) {
+        consumeEvent(event);
+        state.apiKeyGuideGranted = false;
+        state.showApiKeyPermissionModal = false;
+        renderSettings(root);
         return;
       }
 
@@ -1055,17 +1289,19 @@
         return;
       }
 
-      const triageStart = target.closest(".rv-triage-start");
-      if (triageStart instanceof HTMLElement) {
-        consumeEvent(event);
-        state.triageQueueKey = "";
-        runTriageForInbox({ force: true, processAll: true, source: "manual-start" });
-        return;
+      const chatShell = target.closest(".rv-ai-chat");
+      if (chatShell instanceof HTMLElement) {
+        const interactive = target.closest("button, a, textarea, input, select, [role='button']");
+        if (!interactive) {
+          const input = root.querySelector(".rv-ai-qa-input");
+          if (input instanceof HTMLTextAreaElement) input.focus();
+        }
       }
 
-      const triageItem = target.closest(".rv-triage-item");
+      const triageItem = target.closest(".rv-side-triage .rv-triage-item");
       if (triageItem instanceof HTMLElement) {
         consumeEvent(event);
+        if (state.currentView === "settings") saveSettingsFromDom(root);
         lockInteractions(700);
         state.settingsPinned = false;
         state.currentView = "list";
@@ -1074,9 +1310,10 @@
         const level = normalize(triageItem.getAttribute("data-triage-level") || "").toLowerCase();
         const nextHash = level === "all" ? "#inbox" : `#inbox?triage=${level}`;
         if (level !== "all" && !TRIAGE_LEVELS.includes(level)) return;
-        state.lastListHash = nextHash;
+        state.lastListHash = "#inbox";
         state.triageFilter = level === "all" ? "" : level;
-        navigateToList(nextHash, "Inbox");
+        state.listVisibleByMailbox[mailboxCacheKey("inbox")] = state.listChunkSize;
+        navigateToList(nextHash, "", { native: false });
         const list = root.querySelector(".rv-list");
         if (list instanceof HTMLElement) {
           list.innerHTML = '<div class="rv-empty" data-reskin="true">Loading inbox triage...</div>';
@@ -1091,6 +1328,7 @@
       const navItem = target.closest(".rv-nav-item");
       if (!(navItem instanceof HTMLElement)) return;
       consumeEvent(event);
+      if (state.currentView === "settings") saveSettingsFromDom(root);
       lockInteractions(900);
       const nextHash = navItem.getAttribute("data-target-hash") || "#inbox";
       const nativeLabel = navItem.getAttribute("data-native-label") || "";
@@ -1100,6 +1338,7 @@
       state.lockListView = false;
       state.lastListHash = sanitizeListHash(nextHash, { clearTriage: true });
       state.triageFilter = "";
+      state.listVisibleByMailbox[mailboxCacheKey(parseListRoute(state.lastListHash).mailbox)] = state.listChunkSize;
       navigateToList(state.lastListHash, nativeLabel);
 
       const list = root.querySelector(".rv-list");
@@ -1116,14 +1355,96 @@
         const latestRoot = document.getElementById(ROOT_ID);
         if (latestRoot instanceof HTMLElement) applyReskin();
       }, 900);
+
+      return;
+    });
+
+    root.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const loadMore = target.closest(".rv-list-more");
+      if (!(loadMore instanceof HTMLElement)) return;
+      consumeEvent(event);
+      const mailbox = mailboxCacheKey(activeMailbox());
+      const current = Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize);
+      state.listVisibleByMailbox[mailbox] = current + state.listChunkSize;
+      const latestRoot = document.getElementById(ROOT_ID);
+      if (latestRoot instanceof HTMLElement) renderCurrentView(latestRoot);
     });
 
     root.addEventListener("change", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
       const providerSelect = target.closest('[name="provider"]');
-      if (!(providerSelect instanceof HTMLSelectElement)) return;
-      applyProviderDefaultsToSettingsForm(root);
+      if (providerSelect instanceof HTMLSelectElement) {
+        applyProviderDefaultsToSettingsForm(root);
+        const view = root.querySelector(".rv-settings-view");
+        if (!(view instanceof HTMLElement)) return;
+        const keyInput = view.querySelector('[name="apiKey"]');
+        if (keyInput instanceof HTMLInputElement) {
+          keyInput.placeholder = apiKeyPlaceholderForProvider(providerSelect.value);
+        }
+        scheduleSettingsAutosave(root, 250);
+        return;
+      }
+
+      if (target.closest(".rv-settings-view")) {
+        const themeSelect = target.closest('[name="theme"]');
+        if (themeSelect instanceof HTMLSelectElement || themeSelect instanceof HTMLInputElement) {
+          if (!state.settingsCache) state.settingsCache = {};
+          state.settingsCache.theme = normalizeTheme(themeSelect.value);
+          const view = root.querySelector(".rv-settings-view");
+          if (view instanceof HTMLElement) {
+            for (const option of view.querySelectorAll(".rv-theme-option")) {
+              if (!(option instanceof HTMLElement)) continue;
+              const input = option.querySelector('input[name="theme"]');
+              option.classList.toggle("is-active", input instanceof HTMLInputElement && input.checked);
+            }
+          }
+          applyTheme(root);
+        }
+        scheduleSettingsAutosave(root, 450);
+      }
+    });
+
+    root.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLTextAreaElement)) return;
+      if (!target.classList.contains("rv-ai-qa-input")) return;
+      state.aiQuestionText = target.value || "";
+      target.classList.toggle("is-has-text", Boolean(normalize(target.value || "")));
+    });
+
+    root.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const view = target.closest(".rv-settings-view");
+      if (!(view instanceof HTMLElement)) return;
+      if (target.classList.contains("rv-ai-qa-input")) return;
+      scheduleSettingsAutosave(root, 700);
+    });
+
+    root.addEventListener("keydown", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLTextAreaElement)) return;
+      if (!target.classList.contains("rv-ai-qa-input")) return;
+      if (event.key !== "Enter" || event.shiftKey) return;
+      consumeEvent(event);
+      askInboxQuestion(root);
+    });
+
+    root.addEventListener("focusin", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLTextAreaElement)) return;
+      if (!target.classList.contains("rv-ai-qa-input")) return;
+      target.classList.add("is-focused");
+    });
+
+    root.addEventListener("focusout", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLTextAreaElement)) return;
+      if (!target.classList.contains("rv-ai-qa-input")) return;
+      target.classList.remove("is-focused");
     });
 
     root.setAttribute("data-bound", "true");
@@ -1443,6 +1764,215 @@
     return { items, source };
   }
 
+  function mailboxCacheKey(mailbox) {
+    const value = normalize(mailbox || "").toLowerCase();
+    return value || "inbox";
+  }
+
+  function messageCacheKey(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    return `${normalize(msg.threadId || "")}|${normalize(msg.href || "")}`;
+  }
+
+  function mergeMailboxCache(mailbox, incoming) {
+    const key = mailboxCacheKey(mailbox);
+    const existing = Array.isArray(state.scannedMailboxMessages[key]) ? state.scannedMailboxMessages[key] : [];
+    const map = new Map();
+    for (const msg of existing) {
+      const id = messageCacheKey(msg);
+      if (!id) continue;
+      map.set(id, msg);
+    }
+    for (const msg of incoming || []) {
+      const id = messageCacheKey(msg);
+      if (!id) continue;
+      map.set(id, {
+        threadId: msg.threadId || "",
+        sender: msg.sender || "",
+        subject: msg.subject || "",
+        snippet: msg.snippet || "",
+        bodyText: msg.bodyText || "",
+        date: msg.date || "",
+        href: msg.href || "",
+        row: msg.row || null,
+        triageLevel: msg.triageLevel || ""
+      });
+    }
+    const merged = Array.from(map.values());
+    state.scannedMailboxMessages[key] = merged;
+    return merged;
+  }
+
+  function getMailboxMessages(mailbox, limit = 300) {
+    const key = mailboxCacheKey(mailbox);
+    const cached = Array.isArray(state.scannedMailboxMessages[key]) ? state.scannedMailboxMessages[key] : [];
+    if (cached.length > 0) return cached.slice(0, limit);
+    const live = collectMessages(limit).items || [];
+    return mergeMailboxCache(key, live).slice(0, limit);
+  }
+
+  function firstPageFingerprint() {
+    const rows = collectMessages(5).items || [];
+    return rows.map((item) => normalize(item.threadId || item.href || "")).join("|");
+  }
+
+  function isDisabledButton(node) {
+    if (!(node instanceof HTMLElement)) return true;
+    if (node.getAttribute("aria-disabled") === "true") return true;
+    if (node.getAttribute("disabled") !== null) return true;
+    return false;
+  }
+
+  function findPagerButton(kind) {
+    const labels = kind === "next" ? ["Older", "older"] : ["Newer", "newer"];
+    const candidates = [];
+    for (const label of labels) {
+      candidates.push(
+        `[aria-label="${label}"][role="button"]`,
+        `[aria-label*="${label}"][role="button"]`,
+        `[aria-label="${label}"]`,
+        `[aria-label*="${label}"]`
+      );
+    }
+    for (const selector of candidates) {
+      const node = document.querySelector(selector);
+      if (node instanceof HTMLElement) return node;
+    }
+    return null;
+  }
+
+  function dispatchSyntheticClick(node) {
+    if (!(node instanceof HTMLElement)) return;
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  }
+
+  async function waitForPageChange(previousFingerprint, timeoutMs = 7000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = firstPageFingerprint();
+      if (current && current !== previousFingerprint) return true;
+      await sleep(140);
+    }
+    return false;
+  }
+
+  async function runFullMailboxScan(root) {
+    if (state.fullScanRunning) return;
+    if (!(root instanceof HTMLElement)) return;
+    if (state.currentView !== "list") return;
+    if (activeMailbox() !== "inbox") {
+      state.fullScanStatus = "Full scan currently supports Inbox only.";
+      renderSidebar(root);
+      return;
+    }
+
+    const mailbox = mailboxCacheKey(activeMailbox());
+    state.fullScanRunning = true;
+    state.fullScanStatus = "Starting full inbox scan...";
+    state.fullScanCompletedByMailbox[mailbox] = false;
+    renderSidebar(root);
+
+    let pageCount = 0;
+    let movedPages = 0;
+    const maxPages = 120;
+    try {
+      while (pageCount < maxPages) {
+        const result = collectMessages(250);
+        const merged = mergeMailboxCache(mailbox, result.items || []);
+        state.fullScanStatus = `Scanning page ${pageCount + 1}... found ${merged.length} emails`;
+        renderSidebar(root);
+
+        const nextButton = findPagerButton("next");
+        if (!(nextButton instanceof HTMLElement) || isDisabledButton(nextButton)) {
+          break;
+        }
+        const previousFingerprint = firstPageFingerprint();
+        dispatchSyntheticClick(nextButton);
+        const changed = await waitForPageChange(previousFingerprint, 7000);
+        if (!changed) break;
+        movedPages += 1;
+        pageCount += 1;
+        await sleep(220);
+      }
+
+      for (let i = 0; i < movedPages; i += 1) {
+        const prevButton = findPagerButton("prev");
+        if (!(prevButton instanceof HTMLElement) || isDisabledButton(prevButton)) break;
+        const previousFingerprint = firstPageFingerprint();
+        dispatchSyntheticClick(prevButton);
+        const changed = await waitForPageChange(previousFingerprint, 7000);
+        if (!changed) break;
+        await sleep(180);
+      }
+
+      const count = Array.isArray(state.scannedMailboxMessages[mailbox])
+        ? state.scannedMailboxMessages[mailbox].length
+        : 0;
+      state.fullScanCompletedByMailbox[mailbox] = true;
+      state.fullScanStatus = `Full scan complete. Cached ${count} inbox emails.`;
+      const visible = Number(state.listVisibleByMailbox[mailbox] || 0);
+      if (!visible) state.listVisibleByMailbox[mailbox] = state.listChunkSize;
+    } catch (error) {
+      const message = error && error.message ? String(error.message) : "Scan failed";
+      state.fullScanStatus = `Full scan failed: ${message.slice(0, 120)}`;
+      logWarn("Full mailbox scan failed", error);
+    } finally {
+      state.fullScanRunning = false;
+      const latestRoot = document.getElementById(ROOT_ID);
+      if (latestRoot instanceof HTMLElement) renderCurrentView(latestRoot);
+    }
+  }
+
+  function parseLastCountQuery(question) {
+    const q = normalize(question).toLowerCase();
+    const match = q.match(/\blast\s+(\d{1,3})\s+(emails?|messages?)\b/);
+    if (!match) return 0;
+    return Math.max(1, Math.min(200, Number(match[1]) || 0));
+  }
+
+  function parseFromDateQuery(question) {
+    const q = normalize(question);
+    const match = q.match(/\bfrom\s+([A-Za-z]{3,9}\s+\d{1,2}(?:,\s*\d{4})?|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/i);
+    if (!match) return "";
+    return normalize(match[1]).toLowerCase();
+  }
+
+  function parseKeywordQuery(question) {
+    const q = normalize(question);
+    const quoted = q.match(/"(.*?)"/);
+    if (quoted && normalize(quoted[1])) return normalize(quoted[1]).toLowerCase();
+    const withMatch = q.match(/\b(?:with|containing|keyword)\s+([A-Za-z0-9@._:-]{2,})\b/i);
+    if (!withMatch) return "";
+    return normalize(withMatch[1]).toLowerCase();
+  }
+
+  function selectMessagesForQuestion(question, messages) {
+    const all = Array.isArray(messages) ? messages.slice() : [];
+    if (all.length === 0) return [];
+    const lastCount = parseLastCountQuery(question);
+    if (lastCount > 0) return all.slice(0, lastCount);
+
+    const dateToken = parseFromDateQuery(question);
+    if (dateToken) {
+      const byDate = all.filter((msg) => normalize(msg.date || "").toLowerCase().includes(dateToken));
+      if (byDate.length > 0) return byDate.slice(0, 120);
+    }
+
+    const keyword = parseKeywordQuery(question);
+    if (keyword) {
+      const byKeyword = all.filter((msg) => {
+        const haystack = `${msg.sender || ""}\n${msg.subject || ""}\n${msg.snippet || ""}\n${msg.bodyText || ""}`
+          .toLowerCase();
+        return haystack.includes(keyword);
+      });
+      if (byKeyword.length > 0) return byKeyword.slice(0, 120);
+    }
+
+    return all.slice(0, 80);
+  }
+
   function openThread(threadId, href = "", row = null) {
     if (!threadId && !href && !(row instanceof HTMLElement)) return false;
 
@@ -1553,20 +2083,6 @@
       }
     }
 
-    const back = list.querySelector(".rv-back");
-    if (back instanceof HTMLElement) {
-      back.addEventListener("click", () => {
-        state.currentView = "list";
-        state.activeThreadId = "";
-        state.lockListView = true;
-        const targetHash = state.lastListHash || "#inbox";
-        navigateToList(targetHash, "Inbox");
-        setTimeout(() => {
-          const latestRoot = document.getElementById(ROOT_ID);
-          if (latestRoot instanceof HTMLElement) applyReskin();
-        }, 260);
-      });
-    }
   }
 
   async function runTriageForInbox(options = {}) {
@@ -1579,6 +2095,9 @@
       logTriageDebug("Skipped auto triage due to cooldown", {
         cooldownMsRemaining: Math.max(0, state.triageAutoPauseUntil - Date.now())
       });
+      return;
+    }
+    if (source === "auto" && processAll && Date.now() - Number(state.lastAutoTriageAt || 0) < 25000) {
       return;
     }
     if (state.currentView !== "list") {
@@ -1628,6 +2147,12 @@
     const listRoot = document.getElementById(ROOT_ID);
     if (!(listRoot instanceof HTMLElement)) return;
 
+    if (processAll && !state.fullScanCompletedByMailbox[mailboxCacheKey("inbox")] && !state.fullScanRunning) {
+      state.triageStatus = "Scanning full inbox before triage...";
+      renderSidebar(listRoot);
+      await runFullMailboxScan(listRoot);
+    }
+
     const attempted = new Set();
     let totalApplied = 0;
     let totalScored = 0;
@@ -1637,10 +2162,19 @@
     let consecutiveApplyFailures = 0;
     const maxBatches = processAll ? 1200 : 1;
     state.triageRunning = true;
+    if (source === "auto" && processAll) {
+      state.lastAutoTriageAt = Date.now();
+    }
 
     try {
       while (batchIndex < maxBatches) {
-        const result = collectMessages(160);
+        const sourceItems = processAll
+          ? getMailboxMessages("inbox", 6000)
+          : getMailboxMessages("inbox", 200);
+        const result = {
+          items: sourceItems,
+          source: processAll ? "cache" : "live"
+        };
         logTriageDebug("Collected messages for triage pass", {
           extracted: result.items.length,
           source: result.source || "unknown"
@@ -1669,7 +2203,6 @@
           break;
         }
         state.triageQueueKey = queueKey;
-        for (const msg of batch) attempted.add(msg.threadId);
         logTriageDebug("Prepared triage batch", {
           batchIndex: batchIndex + 1,
           batchSize: batch.length,
@@ -1687,7 +2220,23 @@
             : `Triaging 1 message...`;
         }
 
-        const scored = await window.ReskinAI.triageBatch(batch, settings);
+        let scored = [];
+        try {
+          scored = await window.ReskinAI.triageBatch(batch, settings);
+        } catch (error) {
+          const msg = normalize(error && error.message ? error.message : String(error || ""));
+          const isRateLimit = msg.includes("429") || msg.toLowerCase().includes("rate limit");
+          if (isRateLimit && processAll) {
+            const waitMs = Number(error && error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 65000;
+            state.triageStatus = `Rate limited. Waiting ${Math.ceil(waitMs / 1000)}s, then continuing...`;
+            renderSidebar(listRoot);
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            state.triageStatus = "Resuming triage...";
+            continue;
+          }
+          throw error;
+        }
+        for (const msg of batch) attempted.add(msg.threadId);
         totalScored += batch.length;
         logTriageDebug("AI returned scored items", {
           requested: batch.length,
@@ -1738,7 +2287,17 @@
           }
         }
 
-        if (consecutiveApplyFailures >= 3) {
+        if (consecutiveApplyFailures >= 8) {
+          if (processAll) {
+            state.triageStatus =
+              "Gmail label controls were unstable. Retrying with a fresh pass...";
+            logTriageDebug("Backing off triage after repeated apply failures", {
+              consecutiveApplyFailures
+            });
+            consecutiveApplyFailures = 0;
+            await sleep(1200);
+            continue;
+          }
           state.triageStatus =
             "Gmail label UI could not be controlled. Stopped after repeated failures.";
           state.triageLastFailureStatus = state.triageStatus;
@@ -1817,6 +2376,8 @@
     const settings = state.settingsCache || {
       provider: "openrouter",
       apiKey: "",
+      apiKeys: [],
+      theme: THEME_DARK,
       model: "openrouter/free",
       enabled: true,
       consentTriage: false,
@@ -1838,84 +2399,82 @@
       });
     }
 
-    const groqOptions = window.ReskinAI && Array.isArray(window.ReskinAI.GROQ_FREE_MODELS)
-      ? window.ReskinAI.GROQ_FREE_MODELS
-      : ["llama-3.1-8b-instant"];
-    const inboxSdkSettings = state.inboxSdkSettings || { enabled: false, appId: "", version: 2 };
-    if (!state.inboxSdkSettings && !state.inboxSdkSettingsLoading) {
-      loadInboxSdkSettingsCached().then(() => {
-        if (state.currentView !== "settings") return;
-        const latestRoot = document.getElementById(ROOT_ID);
-        if (!(latestRoot instanceof HTMLElement)) return;
-        renderSettings(latestRoot);
-      });
-    }
+    const apiKey = normalize(settings.apiKey || "");
+    const selectedProvider = normalize(settings.provider || "openrouter").toLowerCase();
+    const currentTheme = normalizeTheme(settings.theme);
+    const needsApiKey = providerNeedsApiKey(selectedProvider);
+    const apiGuide = buildApiKeyGuide(selectedProvider);
 
     list.innerHTML = `
       <section class="rv-settings-view" data-reskin="true">
-        <h2 class="rv-settings-title" data-reskin="true">AI Settings</h2>
-        <p class="rv-settings-copy" data-reskin="true">Inbox-only triage. Already-labeled emails are never re-triaged.</p>
-        <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Provider</div>
-            <select name="provider" class="rv-field" data-reskin="true">
-              <option value="openrouter" ${settings.provider === "openrouter" ? "selected" : ""}>OpenRouter (free)</option>
-              <option value="groq" ${settings.provider === "groq" ? "selected" : ""}>Groq (free)</option>
-              <option value="ollama" ${settings.provider === "ollama" ? "selected" : ""}>Local Ollama</option>
-            </select>
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">API Key</div>
-            <input name="apiKey" class="rv-field" data-reskin="true" type="password" value="${escapeHtml(settings.apiKey || "")}" placeholder="${escapeHtml(apiKeyPlaceholderForProvider(settings.provider || "openrouter"))}" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Model</div>
-            <input name="model" class="rv-field" data-reskin="true" value="${escapeHtml(settings.model || groqOptions[0])}" placeholder="Model id" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Batch Size</div>
-            <input name="batchSize" class="rv-field" data-reskin="true" type="number" min="1" max="100" value="${Number(settings.batchSize) || 25}" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Timeout (ms)</div>
-            <input name="timeoutMs" class="rv-field" data-reskin="true" type="number" min="5000" max="120000" value="${Number(settings.timeoutMs) || 30000}" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Retry Count</div>
-            <input name="retryCount" class="rv-field" data-reskin="true" type="number" min="0" max="5" value="${Number(settings.retryCount) || 2}" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Retry Backoff (ms)</div>
-            <input name="retryBackoffMs" class="rv-field" data-reskin="true" type="number" min="200" max="20000" value="${Number(settings.retryBackoffMs) || 1200}" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Max Input Chars</div>
-            <input name="maxInputChars" class="rv-field" data-reskin="true" type="number" min="400" max="10000" value="${Number(settings.maxInputChars) || 2200}" />
-          </label>
-        </div>
-        <label class="rv-toggle" data-reskin="true"><input name="enabled" type="checkbox" ${settings.enabled ? "checked" : ""} /> Enable triage</label>
-        <label class="rv-toggle" data-reskin="true"><input name="consentTriage" type="checkbox" ${settings.consentTriage ? "checked" : ""} /> I consent to send inbox content to the selected AI provider for triage.</label>
-        <h3 class="rv-settings-title" data-reskin="true">InboxSDK Integration</h3>
-        <p class="rv-settings-copy" data-reskin="true">Optional Gmail integration hooks for better route/list detection. Requires a valid InboxSDK App ID.</p>
-        <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">Enable InboxSDK</div>
-            <input name="inboxSdkEnabled" class="rv-field" data-reskin="true" type="checkbox" ${inboxSdkSettings.enabled ? "checked" : ""} />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">InboxSDK App ID</div>
-            <input name="inboxSdkAppId" class="rv-field" data-reskin="true" value="${escapeHtml(inboxSdkSettings.appId || "")}" placeholder="sdk_your_app_id" />
-          </label>
-          <label class="rv-settings-card" data-reskin="true">
-            <div class="rv-settings-label" data-reskin="true">InboxSDK Version</div>
-            <input name="inboxSdkVersion" class="rv-field" data-reskin="true" type="number" min="1" max="2" value="${Number(inboxSdkSettings.version) || 2}" />
-          </label>
-        </div>
-        <div class="rv-settings-actions" data-reskin="true">
-          <button type="button" class="rv-settings-test" data-reskin="true">Test Connection</button>
-          <button type="button" class="rv-settings-save" data-reskin="true">Save Settings</button>
-          <button type="button" class="rv-settings-back" data-reskin="true">Back to Inbox</button>
-        </div>
+        <h2 class="rv-settings-title" data-reskin="true">Mailita Settings</h2>
+        <p class="rv-settings-copy" data-reskin="true">Inbox-only triage with autosave. Already-labeled emails are never re-triaged.</p>
+
+        <section class="rv-settings-section" data-reskin="true">
+          <div class="rv-settings-section-title" data-reskin="true">API</div>
+          <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
+            <label class="rv-settings-card" data-reskin="true">
+              <div class="rv-settings-label" data-reskin="true">Provider</div>
+              <select name="provider" class="rv-field" data-reskin="true">
+                <option value="openrouter" ${settings.provider === "openrouter" ? "selected" : ""}>OpenRouter (free)</option>
+                <option value="groq" ${settings.provider === "groq" ? "selected" : ""}>Groq (free)</option>
+                <option value="ollama" ${settings.provider === "ollama" ? "selected" : ""}>Local Ollama</option>
+              </select>
+            </label>
+            <label class="rv-settings-card" data-reskin="true">
+              <div class="rv-settings-label" data-reskin="true">API Key</div>
+              <input name="apiKey" class="rv-field" data-reskin="true" type="password" value="${escapeHtml(apiKey)}" placeholder="${escapeHtml(apiKeyPlaceholderForProvider(settings.provider || "openrouter"))}" />
+            </label>
+          </div>
+          ${needsApiKey ? `
+            <div class="rv-api-permission-inline" data-reskin="true">
+              <div class="rv-settings-copy" data-reskin="true">Need help getting a ${escapeHtml(apiGuide.label)} key?</div>
+              <button type="button" class="rv-api-key-permission" data-reskin="true">Show Key Setup Help</button>
+            </div>
+          ` : ""}
+          ${needsApiKey && state.apiKeyGuideGranted ? `
+            <div class="rv-api-key-guide" data-reskin="true">
+              <div class="rv-settings-label" data-reskin="true">${escapeHtml(apiGuide.label)} key setup</div>
+              <ol class="rv-api-key-guide-steps" data-reskin="true">
+                ${apiGuide.steps.map((step) => `<li data-reskin="true">${escapeHtml(step)}</li>`).join("")}
+              </ol>
+              <a class="rv-api-key-guide-link" data-reskin="true" href="${escapeHtml(apiGuide.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(apiGuide.linkText)}</a>
+            </div>
+          ` : ""}
+        </section>
+
+        <section class="rv-settings-section" data-reskin="true">
+          <div class="rv-settings-section-title" data-reskin="true">Appearance</div>
+          <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
+            <div class="rv-settings-card" data-reskin="true">
+              <div class="rv-settings-label" data-reskin="true">Theme</div>
+              <div class="rv-theme-picker" data-reskin="true">
+                <label class="rv-theme-option${currentTheme === THEME_DARK ? " is-active" : ""}" data-reskin="true">
+                  <input type="radio" name="theme" value="${THEME_DARK}" ${currentTheme === THEME_DARK ? "checked" : ""} />
+                  <span data-reskin="true">Dark</span>
+                </label>
+                <label class="rv-theme-option${currentTheme === THEME_LIGHT ? " is-active" : ""}" data-reskin="true">
+                  <input type="radio" name="theme" value="${THEME_LIGHT}" ${currentTheme === THEME_LIGHT ? "checked" : ""} />
+                  <span data-reskin="true">Light</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <p class="rv-settings-copy" data-reskin="true">Theme changes apply immediately and autosave.</p>
+        </section>
+
+        ${state.showApiKeyPermissionModal ? `
+          <div class="rv-modal-backdrop" data-reskin="true">
+            <div class="rv-modal" data-reskin="true">
+              <h3 class="rv-modal-title" data-reskin="true">Allow API Key Setup Help?</h3>
+              <p class="rv-modal-copy" data-reskin="true">If you allow this, we will show quick steps and direct links to create your provider API key.</p>
+              <div class="rv-modal-actions" data-reskin="true">
+                <button type="button" class="rv-api-permission-allow" data-reskin="true">Allow</button>
+                <button type="button" class="rv-api-permission-decline" data-reskin="true">Not now</button>
+              </div>
+            </div>
+          </div>
+        ` : ""}
       </section>
     `;
   }
@@ -1925,10 +2484,19 @@
     if (!(list instanceof HTMLElement)) return;
 
     const route = parseListRoute(window.location.hash || state.lastListHash || "#inbox");
-    state.triageFilter = route.triage;
+    if (route.mailbox !== "inbox") {
+      state.triageFilter = "";
+    } else if (hashHasTriageParam(window.location.hash || "")) {
+      state.triageFilter = route.triage;
+    }
 
+    const mailbox = mailboxCacheKey(route.mailbox);
     const result = collectMessages();
-    const allMessages = result.items;
+    const liveMessages = result.items || [];
+    const mergedCache = mergeMailboxCache(mailbox, liveMessages);
+    const useCached = Boolean(state.fullScanRunning || state.fullScanCompletedByMailbox[mailbox]);
+    const sourcePool = useCached ? mergedCache : liveMessages;
+    const allMessages = sourcePool.slice();
 
     for (const msg of allMessages) {
       msg.triageLevel = getTriageLevelForMessage(msg);
@@ -1939,11 +2507,17 @@
       : { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 };
 
     let messages = allMessages;
-    if (route.mailbox === "inbox" && route.triage) {
-      messages = allMessages.filter((msg) => msg.triageLevel === route.triage);
+    const filterLevel = route.mailbox === "inbox"
+      ? normalize(state.triageFilter || route.triage || "").toLowerCase()
+      : "";
+    if (route.mailbox === "inbox" && TRIAGE_LEVELS.includes(filterLevel)) {
+      messages = allMessages.filter((msg) => msg.triageLevel === filterLevel);
     }
 
-    const listSignature = `${route.hash}|${messages.map((m) => `${m.threadId}:${m.triageLevel || "u"}`).join(",")}`;
+    const visibleLimit = Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize);
+    const visibleMessages = messages.slice(0, Math.max(state.listChunkSize, visibleLimit));
+
+    const listSignature = `${route.hash}|${visibleMessages.map((m) => `${m.threadId}:${m.triageLevel || "u"}`).join(",")}`;
     if (state.lastListSignature === listSignature && !interactionsLocked()) return;
     state.lastListSignature = listSignature;
 
@@ -1954,21 +2528,21 @@
       logInfo(`Extractor source: ${result.source}`);
     }
 
-    if (state.lastRenderedCount !== messages.length) {
-      state.lastRenderedCount = messages.length;
-      logInfo(`Rendered ${messages.length} messages`);
+    if (state.lastRenderedCount !== visibleMessages.length) {
+      state.lastRenderedCount = visibleMessages.length;
+      logInfo(`Rendered ${visibleMessages.length} messages`);
     }
 
     if (messages.length === 0) {
       const empty = document.createElement("div");
       empty.className = "rv-empty";
       empty.setAttribute("data-reskin", "true");
-      empty.textContent = route.triage
-        ? `No ${triageLabelText(route.triage)} inbox messages captured yet.`
+      empty.textContent = TRIAGE_LEVELS.includes(filterLevel)
+        ? `No ${triageLabelText(filterLevel)} inbox messages captured yet.`
         : "No messages captured yet.";
       list.appendChild(empty);
     } else {
-      for (const msg of messages) {
+      for (const msg of visibleMessages) {
         const item = document.createElement("button");
         item.type = "button";
         item.className = "rv-item";
@@ -1977,16 +2551,27 @@
         const level = msg.triageLevel;
         const badgeClass = level ? `is-${level}` : "is-untriaged";
         const badgeText = level ? triageLabelText(level) : "Untriaged";
+        const summaryText = getSummaryForMessage(msg);
+        const previewText = normalize(msg.snippet || "") || "No preview available yet.";
+        const hasSummary = Boolean(summaryText);
+        const summaryHtml = hasSummary
+          ? `<div class="rv-row-text has-summary" data-reskin="true">
+              <span class="rv-row-summary" data-reskin="true">${escapeHtml(summaryText)}</span>
+              <span class="rv-row-preview" data-reskin="true">${escapeHtml(previewText)}</span>
+            </div>`
+          : `<div class="rv-row-text no-summary" data-reskin="true">
+              <span class="rv-row-preview is-fallback" data-reskin="true">${escapeHtml(previewText)}</span>
+            </div>`;
 
         item.innerHTML = `
           <div class="rv-item-top" data-reskin="true">
-            <span class="rv-sender" data-reskin="true">${escapeHtml(msg.sender)}</span>
+            <span class="rv-subject" data-reskin="true">${escapeHtml(msg.subject)}</span>
             <span class="rv-date" data-reskin="true">${escapeHtml(msg.date || "")}</span>
           </div>
-          <div class="rv-subject" data-reskin="true">${escapeHtml(msg.subject)}</div>
+          <div class="rv-sender" data-reskin="true">${escapeHtml(msg.sender)}</div>
           <div class="rv-triage-row" data-reskin="true">
             <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
-            <span class="rv-snippet" data-reskin="true">${escapeHtml(msg.snippet || "")}</span>
+            ${summaryHtml}
           </div>
         `;
 
@@ -2014,12 +2599,44 @@
 
         list.appendChild(item);
       }
+
+      queueSummariesForMessages(visibleMessages.slice(0, 30));
+
+      if (visibleMessages.length < messages.length) {
+        const loadMore = document.createElement("button");
+        loadMore.type = "button";
+        loadMore.className = "rv-list-more";
+        loadMore.setAttribute("data-reskin", "true");
+        loadMore.textContent = `Load more (${visibleMessages.length}/${messages.length})`;
+        list.appendChild(loadMore);
+      }
     }
 
     if (route.mailbox === "inbox") {
+      list.onscroll = () => {
+        if (state.currentView !== "list") return;
+        const nearBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 280;
+        const nearEndPrefetch = list.scrollTop + list.clientHeight >= list.scrollHeight - 900;
+        if (!nearBottom && !nearEndPrefetch) return;
+        const current = Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize);
+        if (nearBottom && current < messages.length) {
+          state.listVisibleByMailbox[mailbox] = current + state.listChunkSize;
+          const latestRoot = document.getElementById(ROOT_ID);
+          if (latestRoot instanceof HTMLElement) renderList(latestRoot);
+          return;
+        }
+        if (nearEndPrefetch && !state.fullScanCompletedByMailbox[mailbox] && !state.fullScanRunning) {
+          runFullMailboxScan(root);
+        }
+      };
+      if (!state.fullScanCompletedByMailbox[mailbox] && !state.fullScanRunning) {
+        setTimeout(() => runFullMailboxScan(root), 220);
+      }
       setTimeout(() => {
-        runTriageForInbox({ force: false, processAll: false, source: "auto" });
+        runTriageForInbox({ force: false, processAll: true, source: "auto" });
       }, 120);
+    } else {
+      list.onscroll = null;
     }
 
     renderSidebar(root);
@@ -2032,6 +2649,7 @@
       ensureStylesheet();
       const root = ensureRoot();
       if (!root) return;
+      applyTheme(root);
       syncViewFromHash();
       renderCurrentView(root);
       ensureMode();
@@ -2116,6 +2734,16 @@
         return;
       }
 
+      const canAutoKickTriage =
+        state.currentView === "list" &&
+        activeMailbox() === "inbox" &&
+        !state.triageRunning &&
+        !state.fullScanRunning;
+      if (canAutoKickTriage && Date.now() - Number(state.lastAutoTriageKickAt || 0) > 15000) {
+        state.lastAutoTriageKickAt = Date.now();
+        runTriageForInbox({ force: false, processAll: true, source: "auto" });
+      }
+
       const elapsed = Date.now() - state.lastObserverRenderAt;
       if (elapsed >= Math.max(OBSERVER_MIN_RENDER_GAP_MS, LIST_REFRESH_INTERVAL_MS)) {
         renderFromObserver();
@@ -2142,9 +2770,7 @@
       loadPersistedTriageMap()
         .catch((error) => logWarn("Local triage map bootstrap failed", error))
         .finally(() => {
-          loadInboxSdkSettingsCached().then(() => initInboxSdk()).catch((error) => {
-            logWarn("InboxSDK bootstrap failed", error);
-          });
+          loadPersistedSummaries().catch((error) => logWarn("Row summary cache bootstrap failed", error));
           applyReskin();
           startObserver();
           logOnce("observer-started", "info", "Low-power UI poller started (900ms interval).");

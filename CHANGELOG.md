@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.7.7 - 2026-02-23
+
+- Added AI row summaries with throttled background generation and local cache persistence.
+- Rows now default to preview snippet until summary response arrives, then switch to summary-first display.
+- Added hover behavior to temporarily reveal preview snippet when a summary exists.
+- Kept click behavior opening the existing full email thread view.
+
+## v0.7.6 - 2026-02-23
+
+- Fixed thread `Back to inbox` interaction by handling it via root-level delegated click routing.
+- Fixed left-sidebar triage filter clicks so `#inbox?triage=...` is preserved (no native inbox override).
+- Moved non-core folders (`Starred`, `Snoozed`, `All Mail`, `Spam`, `Trash`) into a bottom `...` hover menu.
+- Increased list card spacing and refined message card styling to reduce visual crowding.
+
+## v0.7.5 - 2026-02-23
+
+- Removed multi-key API input rows from Settings.
+- Replaced `API Keys` with a single `API Key` field.
+- Removed add/remove key-row behavior and related key-row UI styling.
+
+## v0.7.4 - 2026-02-22
+
+- Removed `Test Connection`, `Save Settings`, and `Back to Inbox` buttons from in-app Settings.
+- Removed editable `Model` field from Settings UI.
+- Switched Settings model persistence/testing to provider-default model selection only.
+
+## v0.7.3 - 2026-02-20
+
+- Removed manual `Scan Full Inbox` and `Start Triage` controls in favor of automatic background behavior.
+- Added earlier near-end prefetch so full inbox scanning starts before hitting the bottom wait point.
+- Switched idle auto-triage to process-all mode continuously on inbox list view.
+- Reduced Ask Inbox context size with adaptive prompt compaction and 413 fallback retry.
+
+## v0.7.2 - 2026-02-20
+
+- Added auto-pagination scan flow that continues through inbox pages until no more pages remain.
+- Added full-mailbox cache usage in triage so "Start Triage" can process all scanned inbox emails.
+- Added Ask Inbox query-aware context selection for "last N", "from date", and keyword-style requests.
+- Added scroll-driven incremental rendering (`Load more`) to keep large inbox views responsive.
+
+## v0.7.1 - 2026-02-20
+
+- Fixed triage segment click reliability.
+- Added full inbox scan with paginated caching and chunked "Load more" rendering.
+- Added multi-key API rotation and provider-aware key validation.
+- Redesigned settings into API/Appearance/Behavior sections with row-based key inputs.
+- Removed InboxSDK runtime/settings integration from active app path.
+- Moved triage controls to the left sidebar and upgraded right-rail chat layout.
+
 ## v0.7.0 - 2026-02-20
 
 - AI has started to work.

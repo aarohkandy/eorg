@@ -1,5 +1,8 @@
 # Repository Guidelines
 
+## Session Start Rule
+Before doing other work, read `PERSISTENT_PREFERENCES.md` and apply those preferences.
+
 ## Project Structure & Module Organization
 This repository is currently in bootstrap state (no source tree yet). Use the structure below as the default layout when adding code:
 - `src/` application or library source code

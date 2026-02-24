@@ -44,6 +44,7 @@ body[data-reskin-mode="viewer"] {
   padding: 18px 12px !important;
   display: flex !important;
   flex-direction: column !important;
+  gap: 0 !important;
 }
 
 #reskin-root .rv-brand {
@@ -58,7 +59,9 @@ body[data-reskin-mode="viewer"] {
 #reskin-root .rv-nav-wrap {
   flex: 0 0 auto !important;
   display: flex !important;
-  align-items: flex-start !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 6px !important;
   margin-bottom: 12px !important;
 }
 
@@ -87,6 +90,12 @@ body[data-reskin-mode="viewer"] {
   gap: 5px !important;
 }
 
+#reskin-root .rv-side-triage-meta {
+  margin-top: 8px !important;
+  display: grid !important;
+  gap: 6px !important;
+}
+
 #reskin-root .rv-side-triage-item {
   border-radius: 10px !important;
 }
@@ -105,36 +114,6 @@ body[data-reskin-mode="viewer"] {
   border-radius: 12px !important;
   background: #101010 !important;
   padding: 12px !important;
-}
-
-#reskin-root .rv-triage-head {
-  display: flex !important;
-  align-items: center !important;
-  justify-content: space-between !important;
-  color: #adadad !important;
-  font-size: 11px !important;
-  text-transform: uppercase !important;
-  letter-spacing: 0.07em !important;
-  margin-bottom: 8px !important;
-}
-
-#reskin-root .rv-triage-start {
-  border: 1px solid #303030 !important;
-  border-radius: 8px !important;
-  background: #141414 !important;
-  color: #e8e8e8 !important;
-  font-size: 11px !important;
-  padding: 4px 8px !important;
-  cursor: pointer !important;
-}
-
-#reskin-root .rv-triage-start:hover {
-  background: #1e1e1e !important;
-}
-
-#reskin-root .rv-triage-start[disabled] {
-  opacity: 0.6 !important;
-  cursor: not-allowed !important;
 }
 
 #reskin-root .rv-triage-list {
@@ -207,7 +186,6 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-settings {
-  margin-top: auto !important;
   width: 100% !important;
   border: 1px solid #303030 !important;
   border-radius: 10px !important;
@@ -218,6 +196,71 @@ body[data-reskin-mode="viewer"] {
   font-weight: 600 !important;
   text-align: left !important;
   cursor: pointer !important;
+}
+
+#reskin-root .rv-sidebar-footer {
+  margin-top: auto !important;
+  display: grid !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-nav-overflow {
+  width: 100% !important;
+  position: relative !important;
+}
+
+#reskin-root .rv-nav-more {
+  position: relative !important;
+  display: flex !important;
+  justify-content: flex-start !important;
+}
+
+#reskin-root .rv-nav-more-trigger {
+  border: 1px solid #2f3138 !important;
+  border-radius: 10px !important;
+  background: #151515 !important;
+  color: #d0d0d0 !important;
+  width: 112px !important;
+  height: 36px !important;
+  cursor: pointer !important;
+  font-size: 18px !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+#reskin-root .rv-nav-more-trigger.is-active {
+  background: #f2f2f2 !important;
+  border-color: #f2f2f2 !important;
+  color: #0c0c0c !important;
+}
+
+#reskin-root .rv-nav-more-menu {
+  position: absolute !important;
+  left: 0 !important;
+  top: calc(100% + 8px) !important;
+  width: 180px !important;
+  max-height: min(280px, calc(100vh - 220px)) !important;
+  overflow-y: auto !important;
+  border: 1px solid #2f333b !important;
+  border-radius: 12px !important;
+  background: #111111 !important;
+  padding: 8px !important;
+  display: grid !important;
+  gap: 4px !important;
+  opacity: 0 !important;
+  transform: translateY(6px) !important;
+  pointer-events: none !important;
+  transition: opacity 120ms ease, transform 120ms ease !important;
+  z-index: 3 !important;
+}
+
+#reskin-root .rv-nav-more:hover .rv-nav-more-menu,
+#reskin-root .rv-nav-more:focus-within .rv-nav-more-menu {
+  opacity: 1 !important;
+  transform: translateY(0) !important;
+  pointer-events: auto !important;
 }
 
 #reskin-root .rv-settings:hover {
@@ -246,32 +289,104 @@ body[data-reskin-mode="viewer"] {
   overflow-y: auto !important;
 }
 
-#reskin-root .rv-ai-panel {
+#reskin-root .rv-ai-chat {
+  height: 100% !important;
   border: 1px solid #252525 !important;
   border-radius: 12px !important;
   background: #101010 !important;
   padding: 12px !important;
+  display: grid !important;
+  grid-template-rows: auto auto minmax(260px, 1fr) !important;
+  gap: 10px !important;
 }
 
-#reskin-root .rv-ai-qa {
-  border: 1px solid #252525 !important;
+#reskin-root .rv-ai-chat-head {
+  display: grid !important;
+  gap: 4px !important;
+}
+
+#reskin-root .rv-chat-transcript {
+  border: 1px solid #242424 !important;
   border-radius: 12px !important;
-  background: #101010 !important;
-  padding: 12px !important;
+  background: #0b0b0b !important;
+  padding: 10px !important;
+  overflow-y: auto !important;
+  display: grid !important;
+  align-content: start !important;
+  gap: 8px !important;
+  min-height: 260px !important;
+}
+
+#reskin-root .rv-chat-empty {
+  color: #8f8f8f !important;
+  font-size: 12px !important;
+}
+
+#reskin-root .rv-chat-msg {
+  display: flex !important;
+}
+
+#reskin-root .rv-chat-msg.is-user {
+  justify-content: flex-end !important;
+}
+
+#reskin-root .rv-chat-msg.is-assistant {
+  justify-content: flex-start !important;
+}
+
+#reskin-root .rv-chat-bubble {
+  max-width: 88% !important;
+  border-radius: 12px !important;
+  padding: 10px 12px !important;
+  font-size: 12px !important;
+  line-height: 1.4 !important;
+  white-space: pre-wrap !important;
+}
+
+#reskin-root .rv-chat-msg.is-user .rv-chat-bubble {
+  background: #f1f1f1 !important;
+  color: #111111 !important;
+}
+
+#reskin-root .rv-chat-msg.is-assistant .rv-chat-bubble {
+  background: #1a1a1a !important;
+  color: #e8e8e8 !important;
+}
+
+#reskin-root .rv-chat-composer {
   display: grid !important;
   gap: 8px !important;
 }
 
 #reskin-root .rv-ai-qa-input {
   width: 100% !important;
-  min-height: 76px !important;
+  min-height: 56px !important;
+  max-height: 110px !important;
   border: 1px solid #2c2c2c !important;
   border-radius: 10px !important;
-  background: #0d0d0d !important;
+  background: #111111 !important;
   color: #f0f0f0 !important;
-  padding: 10px !important;
-  resize: vertical !important;
+  padding: 12px !important;
+  resize: none !important;
   font: inherit !important;
+  line-height: 1.45 !important;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease !important;
+}
+
+#reskin-root .rv-ai-qa-input::placeholder {
+  color: #9a9a9a !important;
+}
+
+#reskin-root .rv-ai-qa-input.is-focused,
+#reskin-root .rv-ai-qa-input:focus {
+  outline: none !important;
+  border-color: #525252 !important;
+  box-shadow: 0 0 0 3px rgba(120, 120, 120, 0.16) !important;
+  background: #161616 !important;
+}
+
+#reskin-root .rv-ai-qa-input.is-has-text {
+  border-color: #565656 !important;
 }
 
 #reskin-root .rv-ai-qa-submit {
@@ -287,17 +402,6 @@ body[data-reskin-mode="viewer"] {
 #reskin-root .rv-ai-qa-submit[disabled] {
   opacity: 0.7 !important;
   cursor: not-allowed !important;
-}
-
-#reskin-root .rv-ai-qa-answer {
-  border: 1px solid #242424 !important;
-  border-radius: 10px !important;
-  background: #0b0b0b !important;
-  color: #d8d8d8 !important;
-  padding: 10px !important;
-  font-size: 12px !important;
-  line-height: 1.35 !important;
-  white-space: pre-wrap !important;
 }
 
 #reskin-root .rv-ai-head {
@@ -322,7 +426,8 @@ body[data-reskin-mode="viewer"] {
   overflow-x: hidden !important;
   overscroll-behavior: contain !important;
   display: grid !important;
-  gap: 10px !important;
+  gap: 14px !important;
+  padding: 6px 4px 10px !important;
   scrollbar-width: thin !important;
   scrollbar-color: #5e5e5e #0c0c0c !important;
 }
@@ -345,18 +450,30 @@ body[data-reskin-mode="viewer"] {
 #reskin-root .rv-item {
   width: 100% !important;
   text-align: left !important;
-  border: none !important;
+  border: 1px solid #2c2c2c !important;
   border-radius: 14px !important;
-  padding: 13px 15px !important;
+  padding: 14px 16px !important;
   background: #111111 !important;
   color: #ffffff !important;
   cursor: pointer !important;
-  transition: background 120ms ease, transform 120ms ease !important;
+  transition: background 120ms ease, transform 120ms ease, border-color 120ms ease !important;
 }
 
 #reskin-root .rv-item:hover {
-  background: #191919 !important;
+  background: #181818 !important;
+  border-color: #3a3a3a !important;
   transform: translateY(-1px) !important;
+}
+
+#reskin-root .rv-list-more {
+  border: 1px solid #303030 !important;
+  border-radius: 10px !important;
+  background: #141414 !important;
+  color: #efefef !important;
+  padding: 10px 12px !important;
+  cursor: pointer !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
 }
 
 #reskin-root .rv-item-top {
@@ -367,9 +484,9 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-sender {
-  font-weight: 700 !important;
-  font-size: 16px !important;
-  color: #ffffff !important;
+  font-weight: 500 !important;
+  font-size: 12px !important;
+  color: #bdbdbd !important;
 }
 
 #reskin-root .rv-date {
@@ -379,14 +496,15 @@ body[data-reskin-mode="viewer"] {
 
 #reskin-root .rv-subject {
   margin-top: 4px !important;
-  font-size: 13px !important;
-  color: #dfdfdf !important;
-  line-height: 1.35 !important;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  color: #f3f3f3 !important;
+  line-height: 1.3 !important;
 }
 
 #reskin-root .rv-triage-row {
   display: flex !important;
-  align-items: center !important;
+  align-items: flex-start !important;
   gap: 8px !important;
   margin-top: 8px !important;
 }
@@ -403,14 +521,15 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-badge.is-critical {
-  border-color: #f0f0f0 !important;
-  background: #f0f0f0 !important;
-  color: #0a0a0a !important;
+  border-color: rgba(232, 122, 122, 0.62) !important;
+  background: rgba(232, 122, 122, 0.2) !important;
+  color: #ffd9d9 !important;
 }
 
 #reskin-root .rv-badge.is-high {
-  border-color: #d7d7d7 !important;
-  color: #ffffff !important;
+  border-color: rgba(220, 184, 118, 0.58) !important;
+  background: rgba(220, 184, 118, 0.14) !important;
+  color: #f5e3bf !important;
 }
 
 #reskin-root .rv-badge.is-medium {
@@ -419,8 +538,9 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-badge.is-low {
-  border-color: #6a6a6a !important;
-  color: #bbbbbb !important;
+  border-color: rgba(125, 180, 138, 0.5) !important;
+  background: rgba(125, 180, 138, 0.12) !important;
+  color: #c5e1cc !important;
 }
 
 #reskin-root .rv-badge.is-fyi {
@@ -433,12 +553,44 @@ body[data-reskin-mode="viewer"] {
   color: #9a9a9a !important;
 }
 
-#reskin-root .rv-snippet {
+#reskin-root .rv-row-text {
+  min-width: 0 !important;
+  flex: 1 !important;
+}
+
+#reskin-root .rv-row-summary {
+  display: block !important;
+  font-size: 12px !important;
+  color: #d3d3d3 !important;
+  line-height: 1.4 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  display: -webkit-box !important;
+  -webkit-box-orient: vertical !important;
+  -webkit-line-clamp: 3 !important;
+  line-clamp: 3 !important;
+  white-space: normal !important;
+}
+
+#reskin-root .rv-row-preview {
+  display: none !important;
   font-size: 12px !important;
   color: #aeaeae !important;
   white-space: nowrap !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
+}
+
+#reskin-root .rv-row-preview.is-fallback {
+  display: block !important;
+}
+
+#reskin-root .rv-item:hover .rv-row-text.has-summary .rv-row-summary {
+  display: none !important;
+}
+
+#reskin-root .rv-item:hover .rv-row-text.has-summary .rv-row-preview {
+  display: block !important;
 }
 
 #reskin-root .rv-empty {
@@ -523,39 +675,77 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-settings-view {
-  background: #111111 !important;
-  border-radius: 14px !important;
-  padding: 16px !important;
+  background: linear-gradient(180deg, #111214 0%, #0e0f11 100%) !important;
+  border: 1px solid #2b2e34 !important;
+  border-radius: 16px !important;
+  padding: 20px !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  display: grid !important;
+  gap: 14px !important;
+  align-content: start !important;
+  box-sizing: border-box !important;
+  overflow-x: hidden !important;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35) !important;
 }
 
 #reskin-root .rv-settings-title {
-  margin: 0 0 8px !important;
-  font-size: 22px !important;
+  margin: 0 !important;
+  font-size: 24px !important;
   color: #f7f7f7 !important;
+  letter-spacing: 0.01em !important;
 }
 
 #reskin-root .rv-settings-copy {
-  margin: 0 0 16px !important;
+  margin: 0 !important;
   font-size: 13px !important;
-  color: #cfcfcf !important;
+  color: #b5bcc7 !important;
+}
+
+#reskin-root .rv-settings-section {
+  display: grid !important;
+  gap: 12px !important;
+  padding-top: 2px !important;
+  min-width: 0 !important;
+}
+
+#reskin-root .rv-settings-section + .rv-settings-section {
+  border-top: 1px solid #2a2f39 !important;
+  padding-top: 14px !important;
+}
+
+#reskin-root .rv-settings-section-title {
+  margin: 0 !important;
+  font-size: 12px !important;
+  color: #a9b2c0 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.08em !important;
+  font-weight: 700 !important;
 }
 
 #reskin-root .rv-settings-grid {
   display: grid !important;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-  gap: 10px !important;
-  margin-bottom: 16px !important;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)) !important;
+  gap: 12px !important;
+  margin-bottom: 0 !important;
+  min-width: 0 !important;
 }
 
 #reskin-root .rv-settings-grid-form {
-  margin-bottom: 10px !important;
+  margin-bottom: 0 !important;
 }
 
 #reskin-root .rv-settings-card {
-  border: 1px solid #2f2f2f !important;
-  border-radius: 10px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  border: 1px solid #2f333d !important;
+  border-radius: 12px !important;
   padding: 12px !important;
-  background: #141414 !important;
+  background: #13161b !important;
+  box-sizing: border-box !important;
+  min-width: 0 !important;
 }
 
 #reskin-root .rv-settings-label {
@@ -574,13 +764,97 @@ body[data-reskin-mode="viewer"] {
 
 #reskin-root .rv-field {
   width: 100% !important;
-  border: 1px solid #343434 !important;
+  border: 1px solid #363a43 !important;
   border-radius: 8px !important;
-  background: #0f0f0f !important;
+  background: #0f1115 !important;
   color: #f0f0f0 !important;
   font-size: 13px !important;
   padding: 9px 10px !important;
   box-sizing: border-box !important;
+  min-width: 0 !important;
+}
+
+#reskin-root .rv-theme-picker {
+  display: inline-flex !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-theme-option {
+  border: 1px solid #353a45 !important;
+  border-radius: 999px !important;
+  background: #11151c !important;
+  color: #b8c1ce !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  padding: 7px 12px !important;
+  cursor: pointer !important;
+  user-select: none !important;
+}
+
+#reskin-root .rv-theme-option input {
+  position: absolute !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+#reskin-root .rv-theme-option:hover {
+  background: #171d26 !important;
+  color: #e7edf6 !important;
+}
+
+#reskin-root .rv-theme-option.is-active {
+  background: #f2f2f2 !important;
+  color: #101010 !important;
+  border-color: #f2f2f2 !important;
+}
+
+#reskin-root .rv-api-permission-inline {
+  border: 1px solid #343944 !important;
+  border-radius: 10px !important;
+  background: #11141a !important;
+  padding: 12px !important;
+  margin-bottom: 0 !important;
+}
+
+#reskin-root .rv-api-permission-inline .rv-settings-copy {
+  margin: 0 0 8px !important;
+}
+
+#reskin-root .rv-api-key-permission {
+  border: 1px solid #3a3a3a !important;
+  border-radius: 9px !important;
+  background: #1f1f1f !important;
+  color: #f0f0f0 !important;
+  cursor: pointer !important;
+  font-size: 12px !important;
+  padding: 8px 10px !important;
+}
+
+#reskin-root .rv-api-key-guide {
+  border: 1px solid #333947 !important;
+  border-radius: 10px !important;
+  background: #11141a !important;
+  padding: 12px !important;
+  margin-bottom: 0 !important;
+}
+
+#reskin-root .rv-api-key-guide-steps {
+  margin: 6px 0 10px 18px !important;
+  color: #d6d6d6 !important;
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+}
+
+#reskin-root .rv-api-key-guide-link {
+  color: #d0d0d0 !important;
+  font-size: 12px !important;
+  text-decoration: none !important;
+}
+
+#reskin-root .rv-api-key-guide-link:hover {
+  text-decoration: underline !important;
 }
 
 #reskin-root .rv-toggle {
@@ -592,41 +866,197 @@ body[data-reskin-mode="viewer"] {
   margin-bottom: 8px !important;
 }
 
-#reskin-root .rv-settings-actions {
+#reskin-root .rv-modal-backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  background: rgba(0, 0, 0, 0.6) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 2147483647 !important;
+}
+
+#reskin-root .rv-modal {
+  width: min(420px, calc(100vw - 24px)) !important;
+  border: 1px solid #303030 !important;
+  border-radius: 12px !important;
+  background: #101010 !important;
+  color: #f2f2f2 !important;
+  padding: 14px !important;
+  box-sizing: border-box !important;
+}
+
+#reskin-root .rv-modal-title {
+  margin: 0 0 8px !important;
+  font-size: 16px !important;
+}
+
+#reskin-root .rv-modal-copy {
+  margin: 0 0 12px !important;
+  color: #c8c8c8 !important;
+  font-size: 13px !important;
+  line-height: 1.4 !important;
+}
+
+#reskin-root .rv-modal-actions {
   display: flex !important;
   gap: 8px !important;
-  margin-top: 10px !important;
-  flex-wrap: wrap !important;
+  justify-content: flex-end !important;
 }
 
-#reskin-root .rv-settings-test,
-#reskin-root .rv-settings-save {
-  border: 1px solid #303030 !important;
-  border-radius: 10px !important;
-  padding: 10px 12px !important;
+#reskin-root .rv-api-permission-allow,
+#reskin-root .rv-api-permission-decline {
+  border: 1px solid #353535 !important;
+  border-radius: 9px !important;
   background: #1b1b1b !important;
   color: #f4f4f4 !important;
   cursor: pointer !important;
+  font-size: 12px !important;
   font-weight: 600 !important;
+  padding: 8px 10px !important;
 }
 
-#reskin-root .rv-settings-test:hover,
-#reskin-root .rv-settings-save:hover {
+#reskin-root .rv-api-permission-allow:hover,
+#reskin-root .rv-api-permission-decline:hover {
   background: #262626 !important;
 }
 
-#reskin-root .rv-settings-back {
-  border: 1px solid #303030 !important;
-  border-radius: 10px !important;
-  padding: 10px 12px !important;
-  background: #1b1b1b !important;
-  color: #f4f4f4 !important;
-  cursor: pointer !important;
-  font-weight: 600 !important;
+body[data-reskin-mode="viewer"][data-reskin-theme="light"] {
+  background: #eef2f6 !important;
+  color: #16202a !important;
 }
 
-#reskin-root .rv-settings-back:hover {
-  background: #262626 !important;
+#reskin-root[data-reskin-theme="light"] {
+  color: #16202a !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-shell {
+  background: #eef2f6 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-sidebar,
+#reskin-root[data-reskin-theme="light"] .rv-right {
+  background: #f7f9fc !important;
+  border-color: #d9e1ea !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-brand,
+#reskin-root[data-reskin-theme="light"] .rv-subject,
+#reskin-root[data-reskin-theme="light"] .rv-settings-title {
+  color: #122033 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-nav-item,
+#reskin-root[data-reskin-theme="light"] .rv-triage-item,
+#reskin-root[data-reskin-theme="light"] .rv-sender,
+#reskin-root[data-reskin-theme="light"] .rv-date,
+#reskin-root[data-reskin-theme="light"] .rv-row-summary,
+#reskin-root[data-reskin-theme="light"] .rv-row-preview,
+#reskin-root[data-reskin-theme="light"] .rv-settings-copy,
+#reskin-root[data-reskin-theme="light"] .rv-ai-copy,
+#reskin-root[data-reskin-theme="light"] .rv-chat-empty {
+  color: #3a4b5d !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-settings-section + .rv-settings-section {
+  border-top-color: #d8e1eb !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-settings-section-title {
+  color: #495d72 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-nav-item:hover,
+#reskin-root[data-reskin-theme="light"] .rv-triage-item:hover,
+#reskin-root[data-reskin-theme="light"] .rv-settings:hover {
+  background: #e8edf3 !important;
+  color: #132236 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-nav-item.is-active,
+#reskin-root[data-reskin-theme="light"] .rv-triage-item.is-active,
+#reskin-root[data-reskin-theme="light"] .rv-settings.is-active {
+  background: #13263d !important;
+  color: #f7fbff !important;
+  border-color: #13263d !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-item,
+#reskin-root[data-reskin-theme="light"] .rv-thread,
+#reskin-root[data-reskin-theme="light"] .rv-empty,
+#reskin-root[data-reskin-theme="light"] .rv-list-more,
+#reskin-root[data-reskin-theme="light"] .rv-ai-chat,
+#reskin-root[data-reskin-theme="light"] .rv-chat-transcript,
+#reskin-root[data-reskin-theme="light"] .rv-settings-view,
+#reskin-root[data-reskin-theme="light"] .rv-settings-card,
+#reskin-root[data-reskin-theme="light"] .rv-api-permission-inline,
+#reskin-root[data-reskin-theme="light"] .rv-api-key-guide,
+#reskin-root[data-reskin-theme="light"] .rv-modal {
+  background: #ffffff !important;
+  border-color: #d5dee8 !important;
+  color: #16202a !important;
+  box-shadow: none !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-item:hover {
+  background: #f5f8fb !important;
+  border-color: #c9d6e3 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-field,
+#reskin-root[data-reskin-theme="light"] .rv-ai-qa-input {
+  background: #ffffff !important;
+  border-color: #cfd9e3 !important;
+  color: #16202a !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-ai-qa-submit,
+#reskin-root[data-reskin-theme="light"] .rv-api-key-permission,
+#reskin-root[data-reskin-theme="light"] .rv-api-permission-allow,
+#reskin-root[data-reskin-theme="light"] .rv-api-permission-decline,
+#reskin-root[data-reskin-theme="light"] .rv-back,
+#reskin-root[data-reskin-theme="light"] .rv-nav-more-trigger {
+  background: #f5f8fb !important;
+  color: #1b2b3d !important;
+  border-color: #cfd9e3 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-theme-option {
+  background: #f5f8fb !important;
+  color: #2b4259 !important;
+  border-color: #cfd9e3 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-theme-option:hover {
+  background: #e9eff6 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-theme-option.is-active {
+  background: #13263d !important;
+  color: #f5f9ff !important;
+  border-color: #13263d !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-chat-msg.is-assistant .rv-chat-bubble {
+  background: #eef3f8 !important;
+  color: #1b2b3d !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-chat-msg.is-user .rv-chat-bubble {
+  background: #13263d !important;
+  color: #f5f9ff !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-thread-html,
+#reskin-root[data-reskin-theme="light"] .rv-thread-plain {
+  background: #f6f9fc !important;
+  color: #1a2838 !important;
+}
+
+#reskin-root[data-reskin-theme="light"] .rv-thread-html,
+#reskin-root[data-reskin-theme="light"] .rv-thread-html * {
+  color: #1a2838 !important;
+  border-color: #cfd9e3 !important;
 }
 
 @media (max-width: 1100px) {
@@ -689,6 +1119,10 @@ body[data-reskin-mode="viewer"] {
     gap: 6px !important;
     overflow-x: auto !important;
     padding-bottom: 4px !important;
+  }
+
+  #reskin-root .rv-side-triage-meta {
+    min-width: 220px !important;
   }
 
   #reskin-root .rv-side-triage-item {

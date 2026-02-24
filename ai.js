@@ -13,8 +13,10 @@
   const DEFAULTS = {
     enabled: true,
     consentTriage: false,
+    theme: "dark",
     provider: "openrouter",
     apiKey: "",
+    apiKeys: [],
     baseURL: "https://openrouter.ai/api/v1",
     model: "openrouter/free",
     batchSize: 25,
@@ -31,6 +33,8 @@
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
+
+  const keyRotationByProvider = new Map();
 
   function logTriageDebug(message, extra) {
     const codeMap = {
@@ -70,6 +74,44 @@
     if (!raw) return "(empty)";
     if (raw.length <= 8) return `${raw.slice(0, 2)}***`;
     return `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+  }
+
+  function parseApiKeys(value) {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => normalize(item || ""))
+        .filter(Boolean);
+    }
+    const single = normalize(value || "");
+    return single ? [single] : [];
+  }
+
+  function validApiKeysForProvider(provider, apiKeys, fallbackApiKey) {
+    const fromRows = parseApiKeys(apiKeys);
+    const single = normalize(fallbackApiKey || "");
+    const combined = [];
+    for (const key of [...fromRows, ...(single ? [single] : [])]) {
+      if (!combined.includes(key)) combined.push(key);
+    }
+    if (provider === "openrouter") {
+      return combined.filter((key) => key.startsWith("sk-or-"));
+    }
+    if (provider === "groq") {
+      return combined;
+    }
+    return [];
+  }
+
+  function rotateKey(provider, validKeys, attemptOffset = 0) {
+    if (!Array.isArray(validKeys) || validKeys.length === 0) return "";
+    const cursor = Number(keyRotationByProvider.get(provider) || 0);
+    const index = (cursor + attemptOffset) % validKeys.length;
+    return validKeys[index] || "";
+  }
+
+  function advanceKeyRotation(provider) {
+    const cursor = Number(keyRotationByProvider.get(provider) || 0);
+    keyRotationByProvider.set(provider, cursor + 1);
   }
 
   async function getStorage() {
@@ -122,6 +164,8 @@
       model: normalize(input.model || defaults.model),
       apiKey: normalize(input.apiKey || "")
     };
+    next.theme = String(next.theme || "dark").toLowerCase() === "light" ? "light" : "dark";
+    next.apiKeys = parseApiKeys(input.apiKeys || next.apiKey);
 
     next.batchSize = clamp(Number(next.batchSize) || DEFAULTS.batchSize, 1, 100);
     next.timeoutMs = clamp(Number(next.timeoutMs) || DEFAULTS.timeoutMs, 5000, 120000);
@@ -148,6 +192,14 @@
       if (!next.model) next.model = defaults.model;
     }
 
+    // Preserve user-entered key rows across provider switches.
+    // Provider-specific filtering happens at request time.
+    const normalizedRows = parseApiKeys(next.apiKeys);
+    next.apiKeys = normalizedRows;
+    if (!next.apiKey && normalizedRows.length > 0) {
+      next.apiKey = normalizedRows[0];
+    }
+
     return next;
   }
 
@@ -172,6 +224,33 @@
         role: "user",
         content:
           "Classify these inbox emails by urgency. Use concise reasons under 100 chars. JSON only.\n" +
+          JSON.stringify(compact)
+      }
+    ];
+  }
+
+  function buildSummaryPrompt(messages) {
+    const compact = messages.map((msg) => ({
+      threadId: normalize(msg.threadId || ""),
+      sender: normalize(msg.sender || ""),
+      subject: normalize(msg.subject || "").slice(0, 220),
+      date: normalize(msg.date || "").slice(0, 120),
+      snippet: normalize(msg.snippet || "").slice(0, 420),
+      body: normalize(msg.bodyText || "").slice(0, 900)
+    }));
+
+    return [
+      {
+        role: "system",
+        content:
+          "You summarize inbox emails. Return strict JSON only: " +
+          "{\"items\":[{\"threadId\":string,\"summary\":string}]}. " +
+          "Each summary must be 5-10 sentences, factual, plain text, no markdown."
+      },
+      {
+        role: "user",
+        content:
+          "Summarize each email into 5-10 sentences. Keep important details and action items. JSON only.\n" +
           JSON.stringify(compact)
       }
     ];
@@ -206,7 +285,9 @@
       }
     }
 
-    const items = Array.isArray(payload && payload.items) ? payload.items : [];
+    const items = Array.isArray(payload && payload.items)
+      ? payload.items
+      : (Array.isArray(payload) ? payload : []);
     return items
       .map((item) => {
         const urgency = normalize(item.urgency).toLowerCase();
@@ -225,6 +306,38 @@
       .filter(Boolean);
   }
 
+  function parseSummaryResult(text) {
+    const raw = normalize(text);
+    if (!raw) return [];
+
+    let payload = null;
+    try {
+      payload = JSON.parse(raw);
+    } catch (firstError) {
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          payload = JSON.parse(raw.slice(start, end + 1));
+        } catch (_) {
+          payload = null;
+        }
+      }
+    }
+
+    const items = Array.isArray(payload && payload.items)
+      ? payload.items
+      : (Array.isArray(payload) ? payload : []);
+    return items
+      .map((item) => {
+        const threadId = normalize(item && item.threadId ? item.threadId : "");
+        const summary = normalize(item && item.summary ? item.summary : "");
+        if (!threadId || !summary) return null;
+        return { threadId, summary };
+      })
+      .filter(Boolean);
+  }
+
   async function requestWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -232,18 +345,24 @@
       const res = await fetch(url, { ...options, signal: controller.signal });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
+        const error = new Error("");
+        error.status = res.status;
+        const retryAfterSeconds = Number(res.headers.get("retry-after") || 0);
+        if (retryAfterSeconds > 0) {
+          error.retryAfterMs = retryAfterSeconds * 1000;
+        }
         const detail = (body.error && body.error.message) || JSON.stringify(body).slice(0, 240);
         if (res.status === 401) {
-          throw new Error(
-            "AI provider rejected credentials (401): " + detail
-          );
+          error.message = "AI provider rejected credentials (401): " + detail;
+          throw error;
         }
         if (res.status === 429) {
-          throw new Error(
-            "Rate limit reached from AI provider (429). Please wait a minute, reduce batch size, or switch provider."
-          );
+          error.message =
+            "Rate limit reached from AI provider (429). Please wait a minute, reduce batch size, or switch provider.";
+          throw error;
         }
-        throw new Error("AI request failed (" + res.status + "): " + detail);
+        error.message = "AI request failed (" + res.status + "): " + detail;
+        throw error;
       }
       return body;
     } finally {
@@ -259,18 +378,13 @@
     if (!settings.enabled || !settings.consentTriage) {
       throw new Error("Enable triage + consent in Settings");
     }
-    if (settings.provider !== "ollama" && !settings.apiKey) {
+    const validKeys = validApiKeysForProvider(settings.provider, settings.apiKeys, settings.apiKey);
+    if (settings.provider !== "ollama" && validKeys.length === 0) {
       throw new Error("Missing API key for selected provider");
-    }
-    if (settings.provider === "openrouter" && !settings.apiKey.startsWith("sk-or-")) {
-      throw new Error("OpenRouter requires an OpenRouter key (starts with 'sk-or-').");
     }
 
     const endpoint = settings.baseURL.replace(/\/$/, "") + "/chat/completions";
     const headers = { "Content-Type": "application/json" };
-    if (settings.provider !== "ollama") {
-      headers.Authorization = "Bearer " + settings.apiKey;
-    }
     if (settings.provider === "openrouter") {
       headers["HTTP-Referer"] = "https://mail.google.com";
       headers["X-Title"] = "Gmail Hard Reskin";
@@ -283,20 +397,39 @@
       messages
     };
 
-    const data = await requestWithTimeout(
-      endpoint,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload)
-      },
-      settings.timeoutMs
-    );
-    const text = data && data.choices && data.choices[0] && data.choices[0].message
-      ? normalize(data.choices[0].message.content || "")
-      : "";
-    if (!text) throw new Error("AI returned an empty response");
-    return text;
+    let attempts = 0;
+    const maxAttempts = Math.max(1, validKeys.length || 1);
+    let lastError = null;
+    while (attempts < maxAttempts) {
+      const key = settings.provider === "ollama" ? "" : rotateKey(settings.provider, validKeys, attempts);
+      if (settings.provider !== "ollama") {
+        headers.Authorization = "Bearer " + key;
+      }
+      try {
+        const data = await requestWithTimeout(
+          endpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload)
+          },
+          settings.timeoutMs
+        );
+        const text = data && data.choices && data.choices[0] && data.choices[0].message
+          ? normalize(data.choices[0].message.content || "")
+          : "";
+        if (!text) throw new Error("AI returned an empty response");
+        advanceKeyRotation(settings.provider);
+        return text;
+      } catch (error) {
+        lastError = error;
+        attempts += 1;
+        if (!error || !error.status || (error.status !== 401 && error.status !== 429)) {
+          break;
+        }
+      }
+    }
+    throw lastError || new Error("AI returned an empty response");
   }
 
   async function triageBatch(messages, overrideSettings) {
@@ -307,11 +440,9 @@
       throw new Error("Triage is disabled in settings");
     }
 
-    if (settings.provider !== "ollama" && !settings.apiKey) {
+    const validKeys = validApiKeysForProvider(settings.provider, settings.apiKeys, settings.apiKey);
+    if (settings.provider !== "ollama" && validKeys.length === 0) {
       throw new Error("Missing API key for selected provider");
-    }
-    if (settings.provider === "openrouter" && !settings.apiKey.startsWith("sk-or-")) {
-      throw new Error("OpenRouter requires an OpenRouter key (starts with 'sk-or-').");
     }
 
     const trimmed = messages.slice(0, settings.batchSize).map((msg) => ({
@@ -322,9 +453,6 @@
 
     const endpoint = settings.baseURL.replace(/\/$/, "") + "/chat/completions";
     const headers = { "Content-Type": "application/json" };
-    if (settings.provider !== "ollama") {
-      headers.Authorization = "Bearer " + settings.apiKey;
-    }
     if (settings.provider === "openrouter") {
       headers["HTTP-Referer"] = "https://mail.google.com";
       headers["X-Title"] = "Gmail Hard Reskin";
@@ -333,14 +461,19 @@
     let useStructuredJSON = true;
 
     let attempt = 0;
+    const maxAttempts = Math.max(settings.retryCount + 1, validKeys.length || 1);
     let lastError = null;
-    while (attempt <= settings.retryCount) {
+    while (attempt < maxAttempts) {
       try {
+        const key = settings.provider === "ollama" ? "" : rotateKey(settings.provider, validKeys, attempt);
+        if (settings.provider !== "ollama") {
+          headers.Authorization = "Bearer " + key;
+        }
         logTriageDebug("Sending triage request", {
           provider: settings.provider,
           model: settings.model,
           endpoint,
-          keyPreview: maskKey(settings.apiKey),
+          keyPreview: maskKey(key || settings.apiKey),
           batchSize: trimmed.length
         });
         const payload = {
@@ -375,13 +508,17 @@
             responsePreview: normalize(text).slice(0, 1200)
           });
         }
+        advanceKeyRotation(settings.provider);
         return parsed;
       } catch (error) {
         lastError = error;
         const message = error && error.message ? String(error.message) : String(error);
+        const status = Number(error && error.status ? error.status : 0);
+        const keyRetryable = status === 401 || status === 429;
+        const retryableByCount = attempt < settings.retryCount;
         logTriageDebug("AI triage request attempt failed", {
           attempt: attempt + 1,
-          maxAttempts: settings.retryCount + 1,
+          maxAttempts,
           provider: settings.provider,
           model: settings.model,
           useStructuredJSON,
@@ -395,13 +532,97 @@
           });
           continue;
         }
-        if (attempt >= settings.retryCount) break;
-        await new Promise((resolve) => setTimeout(resolve, settings.retryBackoffMs * (attempt + 1)));
+        if (!keyRetryable && !retryableByCount) break;
+        if (attempt >= maxAttempts - 1) break;
+        const backoffMs = Number(error && error.retryAfterMs) > 0
+          ? Number(error.retryAfterMs)
+          : settings.retryBackoffMs * (attempt + 1);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
       }
       attempt += 1;
     }
 
     throw lastError || new Error("Triage request failed");
+  }
+
+  async function summarizeMessages(messages, overrideSettings) {
+    if (!Array.isArray(messages) || messages.length === 0) return [];
+
+    const settings = validateSettings(overrideSettings || (await loadSettings()));
+    if (!settings.enabled || !settings.consentTriage) {
+      throw new Error("Summaries are disabled in settings");
+    }
+
+    const validKeys = validApiKeysForProvider(settings.provider, settings.apiKeys, settings.apiKey);
+    if (settings.provider !== "ollama" && validKeys.length === 0) {
+      throw new Error("Missing API key for selected provider");
+    }
+
+    const trimmed = messages.slice(0, 3).map((msg) => ({
+      ...msg,
+      snippet: normalize(msg.snippet || "").slice(0, 420),
+      bodyText: normalize(msg.bodyText || "").slice(0, settings.maxInputChars)
+    }));
+
+    const endpoint = settings.baseURL.replace(/\/$/, "") + "/chat/completions";
+    const headers = { "Content-Type": "application/json" };
+    if (settings.provider === "openrouter") {
+      headers["HTTP-Referer"] = "https://mail.google.com";
+      headers["X-Title"] = "Gmail Hard Reskin";
+    }
+
+    let attempt = 0;
+    const maxAttempts = Math.max(settings.retryCount + 1, validKeys.length || 1);
+    let lastError = null;
+
+    while (attempt < maxAttempts) {
+      try {
+        const key = settings.provider === "ollama" ? "" : rotateKey(settings.provider, validKeys, attempt);
+        if (settings.provider !== "ollama") {
+          headers.Authorization = "Bearer " + key;
+        }
+
+        const payload = {
+          model: settings.model,
+          temperature: 0.2,
+          max_tokens: 1700,
+          response_format: { type: "json_object" },
+          messages: buildSummaryPrompt(trimmed)
+        };
+
+        const data = await requestWithTimeout(
+          endpoint,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload)
+          },
+          settings.timeoutMs
+        );
+
+        const text = data && data.choices && data.choices[0] && data.choices[0].message
+          ? data.choices[0].message.content
+          : "";
+        const parsed = parseSummaryResult(text);
+        advanceKeyRotation(settings.provider);
+        return parsed;
+      } catch (error) {
+        lastError = error;
+        const status = Number(error && error.status ? error.status : 0);
+        const retryableByKey = status === 401 || status === 429;
+        const retryableByStatus = status >= 500 && status < 600;
+        const retryableByCount = attempt < settings.retryCount;
+        if (!retryableByKey && !retryableByStatus && !retryableByCount) break;
+        if (attempt >= maxAttempts - 1) break;
+        const backoffMs = Number(error && error.retryAfterMs) > 0
+          ? Number(error.retryAfterMs)
+          : settings.retryBackoffMs * (attempt + 1);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+      attempt += 1;
+    }
+
+    throw lastError || new Error("Summary request failed");
   }
 
   async function testConnection(overrideSettings) {
@@ -430,6 +651,7 @@
     saveSettings,
     validateSettings,
     triageBatch,
+    summarizeMessages,
     chat,
     testConnection
   };
