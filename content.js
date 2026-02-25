@@ -90,6 +90,7 @@
   const TRIAGE_LEVELS = ["respond", "read", "news", "notImportant", "spam"];
   const OLD_TO_NEW_TRIAGE = { critical: "respond", high: "read", medium: "news", low: "notImportant", fyi: "spam" };
   const TRIAGE_MAP_STORAGE_KEY = "reskin_triage_map_v1";
+  const SYNC_DRAFT_STORAGE_KEY = "reskin_sync_draft_v1";
   const SUMMARY_STORAGE_KEY = "reskin_row_summaries_v1";
   const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
   const SUMMARY_BATCH_SIZE = 3;
@@ -149,6 +150,8 @@
     fullScanStatus: "",
     fullScanCompletedByMailbox: {},
     scannedMailboxMessages: {},
+    inboxHashNudged: false,
+    inboxEmptyRetryScheduled: false,
     listVisibleByMailbox: {},
     listChunkSize: 120,
     aiQuestionText: "",
@@ -168,7 +171,10 @@
     pendingObserverTimer: null,
     lastObserverSignature: "",
     lastSeenHash: "",
-    consentBannerDismissed: false
+    consentBannerDismissed: false,
+    searchQuery: "",
+    servers: [],
+    currentServerId: null
   };
 
   function sleep(ms) {
@@ -415,9 +421,16 @@
   function isThreadHash() {
     const hash = normalize(window.location.hash || "");
     if (!hash) return false;
-    return /#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/?]+)\/[A-Za-z0-9_-]{6,}/i.test(
+    return /#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/?]+)\/[A-Za-z0-9_-]+/i.test(
       hash
     );
+  }
+
+  function threadIdFromHash(hash) {
+    const raw = normalize(hash || window.location.hash || "");
+    if (!raw) return "";
+    const m = raw.match(/#(?:inbox|all|sent|drafts|starred|snoozed|important|scheduled|spam|trash|label\/[^/?]+)\/([A-Za-z0-9_-]+)/i);
+    return m && m[1] ? m[1] : "";
   }
 
   function isAppSettingsHash() {
@@ -581,11 +594,50 @@
       } else {
         logTriageDebug("Loaded local triage map", { keys: Object.keys(map).length });
       }
+      await loadSyncDraft();
     } catch (error) {
       logWarn("Failed to load local triage map", error);
     } finally {
       state.triageMapLoadInFlight = false;
     }
+  }
+
+  let syncDraftPersistTimer = null;
+  async function loadSyncDraft() {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    try {
+      const raw = await chrome.storage.local.get(SYNC_DRAFT_STORAGE_KEY);
+      const payload = raw[SYNC_DRAFT_STORAGE_KEY];
+      if (!payload || typeof payload !== "object") return;
+      const v = Number(payload.v) || 0;
+      if (v < 1) return;
+      if (Array.isArray(payload.servers)) state.servers = payload.servers;
+      if (payload.triage && typeof payload.triage === "object") {
+        const map = normalizePersistedTriageMap(payload.triage);
+        for (const [id, level] of Object.entries(map)) state.triageLocalMap[id] = level;
+      }
+    } catch (error) {
+      logWarn("Failed to load sync draft", error);
+    }
+  }
+
+  function schedulePersistSyncDraft() {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    if (syncDraftPersistTimer) clearTimeout(syncDraftPersistTimer);
+    syncDraftPersistTimer = setTimeout(async () => {
+      syncDraftPersistTimer = null;
+      try {
+        const compactTriage = {};
+        for (const [key, level] of Object.entries(state.triageLocalMap)) {
+          const canonical = canonicalThreadId(key);
+          if (canonical && canonical.startsWith("f:")) compactTriage[canonical] = level;
+        }
+        const payload = { v: 1, triage: compactTriage, servers: state.servers || [] };
+        await chrome.storage.local.set({ [SYNC_DRAFT_STORAGE_KEY]: payload });
+      } catch (error) {
+        logWarn("Failed to persist sync draft", error);
+      }
+    }, 400);
   }
 
   function schedulePersistTriageMap() {
@@ -606,6 +658,7 @@
         logTriageDebug("Persisted local triage map", {
           keys: Object.keys(compact).length
         });
+        schedulePersistSyncDraft();
       } catch (error) {
         logWarn("Failed to persist local triage map", error);
       }
@@ -844,23 +897,62 @@
     return "";
   }
 
+  function threadIdInServer(threadId, server) {
+    if (!server || !Array.isArray(server.threadIds)) return false;
+    const canonical = canonicalThreadId(normalize(threadId || ""));
+    if (!canonical) return false;
+    const set = new Set(server.threadIds.map((id) => canonicalThreadId(normalize(id))));
+    return set.has(canonical) || set.has(threadId) || set.has(normalize(threadId));
+  }
+
+  function getCurrentServerThreadIds() {
+    if (!state.currentServerId) return null;
+    const server = state.servers.find((s) => s.id === state.currentServerId);
+    return server && Array.isArray(server.threadIds) ? server.threadIds : [];
+  }
+
   function renderSidebar(root) {
+    const iconServers = root.querySelector(".rv-icon-servers");
+    if (iconServers instanceof HTMLElement) {
+      const currentId = state.currentServerId || "";
+      const icons = (state.servers || []).map((server) => {
+        const active = state.currentServerId === server.id;
+        const initial = (server.name || "?").trim().charAt(0).toUpperCase();
+        return `<button type="button" class="rv-icon-item rv-server-icon${active ? " is-active" : ""}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.name || "Unnamed")}" data-reskin="true">${escapeHtml(initial)}</button>`;
+      });
+      iconServers.innerHTML = icons.join("");
+    }
+    const iconHome = root.querySelector(".rv-icon-home");
+    if (iconHome instanceof HTMLElement) {
+      iconHome.classList.toggle("is-active", !(state.currentServerId || ""));
+    }
+
+    const searchInput = root.querySelector(".rv-search");
+    if (searchInput instanceof HTMLInputElement && searchInput.getAttribute("data-bound-search") !== "true") {
+      searchInput.value = state.searchQuery || "";
+      searchInput.setAttribute("data-bound-search", "true");
+      searchInput.addEventListener("input", () => {
+        state.searchQuery = normalize(searchInput.value || "");
+        applyReskin();
+      });
+    } else if (searchInput instanceof HTMLInputElement) {
+      if (searchInput.value !== (state.searchQuery || "")) searchInput.value = state.searchQuery || "";
+    }
+
     const nav = root.querySelector(".rv-nav");
-    if (!(nav instanceof HTMLElement)) return;
-    const navOverflow = root.querySelector(".rv-nav-overflow");
-
-    const activeHash = getActiveNavHash();
-    const primaryItems = NAV_ITEMS.filter((item) => PRIMARY_NAV_HASHES.has(item.hash));
-    const secondaryItems = NAV_ITEMS.filter((item) => !PRIMARY_NAV_HASHES.has(item.hash));
-
-    nav.innerHTML = primaryItems.map((item) => {
-      const isActive = item.hash === activeHash;
-      return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
-    }).join("");
-    if (navOverflow instanceof HTMLElement) {
-      const hiddenActive = secondaryItems.some((item) => item.hash === activeHash);
-      navOverflow.innerHTML = secondaryItems.length > 0
-        ? `
+    if (nav instanceof HTMLElement) {
+      const navOverflow = root.querySelector(".rv-nav-overflow");
+      const activeHash = getActiveNavHash();
+      const primaryItems = NAV_ITEMS.filter((item) => PRIMARY_NAV_HASHES.has(item.hash));
+      const secondaryItems = NAV_ITEMS.filter((item) => !PRIMARY_NAV_HASHES.has(item.hash));
+      nav.innerHTML = primaryItems.map((item) => {
+        const isActive = item.hash === activeHash;
+        return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
+      }).join("");
+      if (navOverflow instanceof HTMLElement) {
+        const hiddenActive = secondaryItems.some((item) => item.hash === activeHash);
+        navOverflow.innerHTML = secondaryItems.length > 0
+          ? `
           <div class="rv-nav-more" data-reskin="true">
             <button type="button" class="rv-nav-more-trigger${hiddenActive ? " is-active" : ""}" aria-label="More folders" data-reskin="true">...</button>
             <div class="rv-nav-more-menu" data-reskin="true">
@@ -871,7 +963,8 @@
             </div>
           </div>
         `
-        : "";
+          : "";
+      }
     }
 
     const settings = root.querySelector(".rv-settings");
@@ -879,9 +972,10 @@
       settings.classList.toggle("is-active", state.currentView === "settings");
     }
 
-    const sideTriage = root.querySelector(".rv-side-triage");
+    const sideTriage = root.querySelector(".rv-side-triage, .rv-dm-list-triage");
     const sideTriageList = root.querySelector(".rv-side-triage-list");
-    if (sideTriage instanceof HTMLElement && sideTriageList instanceof HTMLElement) {
+    const triageContainer = sideTriage || root.querySelector(".rv-dm-list-triage");
+    if (triageContainer instanceof HTMLElement) {
       const currentFilter = activeTriageFilter();
       const total = TRIAGE_LEVELS.reduce((sum, level) => sum + (state.triageCounts[level] || 0), 0);
       const rows = [
@@ -894,13 +988,17 @@
           `<button type="button" class="rv-triage-item rv-side-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`
         );
       }
-      sideTriageList.innerHTML = `
-        ${rows.join("")}
+      const meta = `
         <div class="rv-side-triage-meta" data-reskin="true">
           <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || "Auto-triage runs in the background.")}</div>
           <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.fullScanStatus || "Auto-scan loads all inbox pages in the background.")}</div>
         </div>
       `;
+      if (sideTriageList instanceof HTMLElement) {
+        sideTriageList.innerHTML = rows.join("") + meta;
+      } else {
+        triageContainer.innerHTML = `<div class="rv-side-triage-list" data-reskin="true">${rows.join("")}${meta}</div>`;
+      }
     }
   }
 
@@ -1052,6 +1150,11 @@
     }
 
     state.currentView = threadHash ? "thread" : "list";
+    if (state.currentView === "thread") {
+      state.activeThreadId = threadIdFromHash(window.location.hash) || state.activeThreadId;
+    } else {
+      state.activeThreadId = "";
+    }
     if (state.currentView === "list") {
       const currentHash = window.location.hash || "#inbox";
       const parsed = parseListRoute(currentHash);
@@ -1074,22 +1177,28 @@
     root.setAttribute("data-reskin", "true");
     root.innerHTML = `
       <div class="rv-shell" data-reskin="true">
-        <aside class="rv-sidebar" data-reskin="true">
-          <div class="rv-brand" data-reskin="true">Mailita</div>
-          <div class="rv-nav-wrap" data-reskin="true">
-            <nav class="rv-nav" data-reskin="true"></nav>
-            <div class="rv-nav-overflow" data-reskin="true"></div>
+        <aside class="rv-icon-strip" data-reskin="true">
+          <div class="rv-icon-strip-top" data-reskin="true">
+            <button type="button" class="rv-icon-item rv-icon-home" data-server-id="" title="Inbox" data-reskin="true">M</button>
           </div>
-          <section class="rv-side-triage" data-reskin="true">
-            <div class="rv-side-triage-title" data-reskin="true">Triage</div>
-            <div class="rv-side-triage-list" data-reskin="true"></div>
-          </section>
-          <div class="rv-sidebar-footer" data-reskin="true">
-            <button type="button" class="rv-settings" data-reskin="true">Settings</button>
+          <div class="rv-icon-servers" data-reskin="true"></div>
+          <button type="button" class="rv-icon-item rv-icon-new-server" title="New server" data-reskin="true">+</button>
+          <div class="rv-icon-strip-bottom" data-reskin="true">
+            <button type="button" class="rv-icon-item rv-icon-settings rv-settings" title="Settings" data-reskin="true">&#9881;</button>
           </div>
         </aside>
-        <main class="rv-main" data-reskin="true">
+        <aside class="rv-dm-list" data-reskin="true">
+          <div class="rv-dm-list-search-wrap" data-reskin="true">
+            <input type="text" class="rv-search" placeholder="Find or start a conversation" data-reskin="true" />
+          </div>
+          <div class="rv-dm-list-triage rv-side-triage" data-reskin="true"></div>
           <div class="rv-list" data-reskin="true"></div>
+        </aside>
+        <main class="rv-chat-area" data-reskin="true">
+          <div class="rv-chat-placeholder" data-reskin="true">Select a conversation</div>
+          <div class="rv-thread-wrap" data-reskin="true" style="display:none;"></div>
+          <div class="rv-settings-wrap" data-reskin="true" style="display:none;"></div>
+          <div class="rv-list-wrap rv-list-view" data-reskin="true" style="display:none;"></div>
         </main>
         <aside class="rv-right" data-reskin="true"></aside>
       </div>
@@ -1341,6 +1450,90 @@
           const latestRoot = document.getElementById(ROOT_ID);
           if (latestRoot instanceof HTMLElement) applyReskin();
         }, 320);
+        return;
+      }
+
+      const serverItem = target.closest(".rv-server-item, .rv-server-icon, .rv-icon-home");
+      if (serverItem instanceof HTMLElement) {
+        consumeEvent(event);
+        const id = serverItem.getAttribute("data-server-id");
+        state.currentServerId = id === "" || id === null || id === undefined ? null : id;
+        state.settingsPinned = false;
+        state.currentView = "list";
+        state.activeThreadId = "";
+        applyReskin();
+        return;
+      }
+
+      const serverNew = target.closest(".rv-server-new, .rv-icon-new-server");
+      if (serverNew instanceof HTMLElement) {
+        consumeEvent(event);
+        const name = window.prompt("Server name (e.g. Back deck quotes)", "");
+        if (name != null && normalize(name)) {
+          const id = `server-${Date.now()}`;
+          state.servers = state.servers || [];
+          state.servers.push({ id, name: normalize(name), threadIds: [] });
+          state.currentServerId = id;
+          schedulePersistSyncDraft();
+          applyReskin();
+        }
+        return;
+      }
+
+      const serverBtn = target.closest(".rv-item-server-btn");
+      if (serverBtn instanceof HTMLElement) {
+        consumeEvent(event);
+        const threadId = normalize(serverBtn.getAttribute("data-thread-id") || "");
+        if (!threadId) return;
+        const canonical = canonicalThreadId(threadId);
+        let menu = root.querySelector(".rv-server-menu");
+        if (menu instanceof HTMLElement) menu.remove();
+        menu = document.createElement("div");
+        menu.className = "rv-server-menu";
+        menu.setAttribute("data-reskin", "true");
+        const rect = serverBtn.getBoundingClientRect();
+        const rootRect = root.getBoundingClientRect();
+        menu.style.position = "absolute";
+        menu.style.left = `${rect.left - rootRect.left}px`;
+        menu.style.top = `${rect.bottom - rootRect.top + 4}px`;
+        menu.style.minWidth = "160px";
+        const server = state.currentServerId ? state.servers.find((s) => s.id === state.currentServerId) : null;
+        if (server && threadIdInServer(threadId, server)) {
+          menu.innerHTML = `<button type="button" class="rv-server-menu-item" data-action="remove" data-reskin="true">Remove from server</button>`;
+        } else {
+          const addButtons = (state.servers || []).map((s) => `<button type="button" class="rv-server-menu-item" data-action="add" data-server-id="${escapeHtml(s.id)}" data-reskin="true">Add to ${escapeHtml(s.name || "Unnamed")}</button>`).join("");
+          menu.innerHTML = addButtons || `<span class="rv-server-menu-empty" data-reskin="true">No servers. Create one in the sidebar.</span>`;
+        }
+        root.appendChild(menu);
+        const closeMenu = (ev) => {
+          if (ev && ev.target instanceof Node && menu.contains(ev.target)) return;
+          if (menu && menu.parentNode) menu.remove();
+          root.removeEventListener("click", closeMenu);
+        };
+        root.addEventListener("click", closeMenu);
+        setTimeout(() => {
+          menu.querySelectorAll(".rv-server-menu-item").forEach((btn) => {
+            btn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (menu && menu.parentNode) menu.remove();
+              root.removeEventListener("click", closeMenu);
+              const action = btn.getAttribute("data-action");
+              const serverId = btn.getAttribute("data-server-id");
+              if (action === "remove" && server) {
+                server.threadIds = (server.threadIds || []).filter((id) => canonicalThreadId(normalize(id)) !== canonical);
+                schedulePersistSyncDraft();
+              } else if (action === "add" && serverId) {
+                const s = state.servers.find((sv) => sv.id === serverId);
+                if (s && canonical && !(s.threadIds || []).some((id) => canonicalThreadId(normalize(id)) === canonical)) {
+                  s.threadIds = s.threadIds || [];
+                  s.threadIds.push(canonical);
+                  schedulePersistSyncDraft();
+                }
+              }
+              applyReskin();
+            });
+          });
+        }, 0);
         return;
       }
 
@@ -1738,7 +1931,8 @@
       if (strictMailbox && (!href || !hrefMatchesMailbox(href, mailboxKey))) continue;
 
       seen.add(dedupeKey);
-      items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "" });
+      const unread = row && row.classList ? (row.classList.contains("zE") || Boolean(row.querySelector(".zE"))) : false;
+      items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "", unread });
       if (items.length >= limit) break;
     }
 
@@ -1772,7 +1966,8 @@
           if (sender === "Unknown sender" && subject === "No subject captured" && !isUseful(snippet)) continue;
 
           seen.add(dedupeKey);
-          items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "" });
+          const unread = row && row.classList ? (row.classList.contains("zE") || Boolean(row.querySelector(".zE"))) : false;
+          items.push({ threadId, sender, subject, snippet, bodyText: "", date, href, row, triageLevel: "", unread });
           if (items.length >= limit) break;
         }
 
@@ -1814,7 +2009,8 @@
         date: msg.date || "",
         href: msg.href || "",
         row: msg.row || null,
-        triageLevel: msg.triageLevel || ""
+        triageLevel: msg.triageLevel || "",
+        unread: Boolean(msg.unread)
       });
     }
     const merged = Array.from(map.values());
@@ -1880,14 +2076,15 @@
   async function runFullMailboxScan(root) {
     if (state.fullScanRunning) return;
     if (!(root instanceof HTMLElement)) return;
-    if (state.currentView !== "list") return;
+    const mailbox = mailboxCacheKey(activeMailbox());
+    const cacheEmpty = !Array.isArray(state.scannedMailboxMessages[mailbox]) || state.scannedMailboxMessages[mailbox].length === 0;
+    if (state.currentView !== "list" && !cacheEmpty) return;
     if (activeMailbox() !== "inbox") {
       state.fullScanStatus = "Full scan currently supports Inbox only.";
       renderSidebar(root);
       return;
     }
 
-    const mailbox = mailboxCacheKey(activeMailbox());
     state.fullScanRunning = true;
     state.fullScanStatus = "Starting full inbox scan...";
     state.fullScanCompletedByMailbox[mailbox] = false;
@@ -2077,23 +2274,28 @@
   }
 
   function renderThread(root) {
-    const list = root.querySelector(".rv-list");
-    if (!(list instanceof HTMLElement)) return;
+    const wrap = root.querySelector(".rv-thread-wrap");
+    if (!(wrap instanceof HTMLElement)) return;
+    const placeholder = root.querySelector(".rv-chat-placeholder");
+    if (placeholder instanceof HTMLElement) placeholder.style.display = "none";
+    wrap.style.display = "";
     const thread = extractOpenThreadData();
 
-    list.innerHTML = `
+    wrap.innerHTML = `
       <section class="rv-thread" data-reskin="true">
         <button type="button" class="rv-back" data-reskin="true">Back to inbox</button>
-        <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(thread.subject)}</h2>
-        <div class="rv-thread-meta" data-reskin="true">
-          <span class="rv-thread-sender" data-reskin="true">${escapeHtml(thread.sender)}</span>
-          <span class="rv-thread-date" data-reskin="true">${escapeHtml(thread.date)}</span>
+        <div class="rv-thread-header" data-reskin="true">
+          <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(thread.subject)}</h2>
+          <div class="rv-thread-meta" data-reskin="true">
+            <span class="rv-thread-sender" data-reskin="true">${escapeHtml(thread.sender)}</span>
+            <span class="rv-thread-date" data-reskin="true">${escapeHtml(thread.date)}</span>
+          </div>
         </div>
         <article class="rv-thread-body" data-reskin="true"></article>
       </section>
     `;
 
-    const body = list.querySelector(".rv-thread-body");
+    const body = wrap.querySelector(".rv-thread-body");
     if (body instanceof HTMLElement) {
       if (thread.bodyHtml) {
         body.innerHTML = `<div class="rv-thread-html" data-reskin="true">${thread.bodyHtml}</div>`;
@@ -2101,7 +2303,6 @@
         body.innerHTML = `<pre class="rv-thread-plain" data-reskin="true">${escapeHtml(thread.bodyText)}</pre>`;
       }
     }
-
   }
 
   async function runTriageForInbox(options = {}) {
@@ -2377,20 +2578,27 @@
 
     renderSidebar(root);
     renderRightRail(root);
+    const placeholder = root.querySelector(".rv-chat-placeholder");
+    const threadWrap = root.querySelector(".rv-thread-wrap");
+    const settingsWrap = root.querySelector(".rv-settings-wrap");
+    if (placeholder) placeholder.style.display = state.currentView === "list" ? "" : "none";
+    if (threadWrap) threadWrap.style.display = state.currentView === "thread" ? "" : "none";
+    if (settingsWrap) settingsWrap.style.display = state.currentView === "settings" ? "" : "none";
     if (state.currentView === "settings") {
       renderSettings(root);
       return;
     }
+    /* Always update the list column (left) so it shows current messages even when a thread is open. */
+    renderList(root);
     if (state.currentView === "thread") {
       renderThread(root);
       return;
     }
-    renderList(root);
   }
 
   function renderSettings(root) {
-    const list = root.querySelector(".rv-list");
-    if (!(list instanceof HTMLElement)) return;
+    const wrap = root.querySelector(".rv-settings-wrap");
+    if (!(wrap instanceof HTMLElement)) return;
 
     const settings = state.settingsCache || {
       provider: "openrouter",
@@ -2412,8 +2620,8 @@
         if (state.currentView !== "settings") return;
         const latestRoot = document.getElementById(ROOT_ID);
         if (!(latestRoot instanceof HTMLElement)) return;
-        const latestList = latestRoot.querySelector(".rv-list");
-        if (!(latestList instanceof HTMLElement)) return;
+        const latestWrap = latestRoot.querySelector(".rv-settings-wrap");
+        if (!(latestWrap instanceof HTMLElement)) return;
         renderSettings(latestRoot);
       });
     }
@@ -2424,7 +2632,7 @@
     const needsApiKey = providerNeedsApiKey(selectedProvider);
     const apiGuide = buildApiKeyGuide(selectedProvider);
 
-    list.innerHTML = `
+    wrap.innerHTML = `
       <section class="rv-settings-view" data-reskin="true">
         <h2 class="rv-settings-title" data-reskin="true">Mailita Settings</h2>
         <p class="rv-settings-copy" data-reskin="true">Inbox-only triage with autosave. Already-labeled emails are never re-triaged.</p>
@@ -2522,7 +2730,6 @@
 
     if (route.mailbox === "inbox" && !state.settingsCache && !state.settingsLoadInFlight && window.ReskinAI) {
       loadSettingsCached().then(() => applyReskin());
-      return;
     }
 
     const mailbox = mailboxCacheKey(route.mailbox);
@@ -2542,11 +2749,24 @@
       : { respond: 0, read: 0, news: 0, notImportant: 0, spam: 0 };
 
     let messages = allMessages;
+    if (state.currentServerId && route.mailbox === "inbox") {
+      const server = state.servers.find((s) => s.id === state.currentServerId);
+      if (server) messages = messages.filter((msg) => threadIdInServer(msg.threadId, server));
+    }
     const filterLevel = route.mailbox === "inbox"
       ? normalize(state.triageFilter || route.triage || "").toLowerCase()
       : "";
     if (route.mailbox === "inbox" && TRIAGE_LEVELS.includes(filterLevel)) {
-      messages = allMessages.filter((msg) => msg.triageLevel === filterLevel);
+      messages = messages.filter((msg) => msg.triageLevel === filterLevel);
+    }
+    const q = normalize(state.searchQuery || "").toLowerCase();
+    if (q) {
+      messages = messages.filter((msg) => {
+        const s = normalize(msg.sender || "").toLowerCase();
+        const subj = normalize(msg.subject || "").toLowerCase();
+        const snip = normalize(msg.snippet || "").toLowerCase();
+        return s.includes(q) || subj.includes(q) || snip.includes(q);
+      });
     }
 
     const visibleLimit = Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize);
@@ -2610,12 +2830,34 @@
         ? `No ${triageLabelText(filterLevel)} inbox messages captured yet.`
         : "No messages captured yet.";
       list.appendChild(empty);
+      if (route.mailbox === "inbox" && !state.fullScanRunning && !state.fullScanCompletedByMailbox[mailbox]) {
+        state.fullScanStatus = "Loading inbox…";
+        renderSidebar(root);
+        setTimeout(() => runFullMailboxScan(root), 400);
+      }
+      if (route.mailbox === "inbox" && state.currentView === "list" && !state.inboxHashNudged) {
+        const hash = (window.location.hash || "").trim() || "#inbox";
+        if (hash !== "#inbox" && hash.startsWith("#inbox")) {
+          state.inboxHashNudged = true;
+          state.lastListHash = "#inbox";
+          window.location.hash = "#inbox";
+          setTimeout(() => applyReskin(), 600);
+        }
+      }
+      if (route.mailbox === "inbox" && !state.inboxEmptyRetryScheduled) {
+        state.inboxEmptyRetryScheduled = true;
+        setTimeout(() => {
+          state.lastListSignature = "";
+          applyReskin();
+        }, 900);
+      }
     } else {
       for (const msg of visibleMessages) {
         const item = document.createElement("button");
         item.type = "button";
-        item.className = "rv-item";
+        item.className = "rv-item" + (msg.unread ? " is-unread" : "") + (state.activeThreadId === msg.threadId ? " is-active" : "");
         item.setAttribute("data-reskin", "true");
+        if (msg.unread) item.setAttribute("title", "Unread");
 
         const level = msg.triageLevel;
         const badgeClass = level ? `is-${level}` : "is-untriaged";
@@ -2635,7 +2877,10 @@
         item.innerHTML = `
           <div class="rv-item-top" data-reskin="true">
             <span class="rv-subject" data-reskin="true">${escapeHtml(msg.subject)}</span>
-            <span class="rv-date" data-reskin="true">${escapeHtml(msg.date || "")}</span>
+            <span class="rv-item-top-right" data-reskin="true">
+              <span class="rv-date" data-reskin="true">${escapeHtml(msg.date || "")}</span>
+              <button type="button" class="rv-item-server-btn" aria-label="Add or remove from server" data-reskin="true" data-thread-id="${escapeHtml(msg.threadId || "")}">...</button>
+            </span>
           </div>
           <div class="rv-sender" data-reskin="true">${escapeHtml(msg.sender)}</div>
           <div class="rv-triage-row" data-reskin="true">
@@ -2649,13 +2894,25 @@
           state.lockListView = false;
           state.currentView = "thread";
           state.activeThreadId = msg.threadId;
-          renderThread(root);
+          const threadHash = msg.href && msg.href.includes("#")
+            ? msg.href.slice(msg.href.indexOf("#"))
+            : (msg.threadId ? `#inbox/${msg.threadId}` : "");
+          if (threadHash && isThreadHash(threadHash)) {
+            state.lastListHash = "#inbox";
+            window.location.hash = threadHash;
+          } else if (msg.threadId) {
+            state.lastListHash = "#inbox";
+            window.location.hash = `#inbox/${msg.threadId}`;
+          }
+          renderList(root);
+          renderCurrentView(root);
           const ok = openThread(msg.threadId, msg.href, msg.row);
           if (!ok) {
             logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
             state.currentView = "list";
             state.activeThreadId = "";
             renderList(root);
+            renderCurrentView(root);
             return;
           }
           setTimeout(() => {

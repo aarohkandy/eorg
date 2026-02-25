@@ -32,14 +32,185 @@ body[data-reskin-mode="viewer"] {
   box-sizing: border-box !important;
 }
 
+/* 4-column layout: icon strip | dm list | chat area | right */
 #reskin-root .rv-shell {
   display: grid !important;
-  grid-template-columns: 230px minmax(0, 1fr) 280px !important;
+  grid-template-columns: 72px minmax(180px, 240px) minmax(200px, 1fr) minmax(220px, 280px) !important;
   height: 100% !important;
   min-width: 0 !important;
   border-radius: 0 !important;
   overflow: hidden !important;
   background: #0a0a0a !important;
+}
+
+#reskin-root .rv-icon-strip {
+  background: #0d0d0d !important;
+  border-right: 1px solid #1f1f1f !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  padding: 12px 0 !important;
+  gap: 8px !important;
+  flex-shrink: 0 !important;
+  min-width: 72px !important;
+}
+
+#reskin-root .rv-icon-strip-top {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-icon-servers {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 8px !important;
+  overflow-y: auto !important;
+}
+
+#reskin-root .rv-icon-strip-bottom {
+  flex: 0 0 auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-icon-item {
+  width: 48px !important;
+  height: 48px !important;
+  border-radius: 50% !important;
+  border: none !important;
+  background: #1a1a1a !important;
+  color: #ffffff !important;
+  font-size: 18px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: border-radius 120ms ease, background 120ms ease, color 120ms ease !important;
+}
+
+#reskin-root .rv-icon-item:hover {
+  background: #5865f2 !important;
+  border-radius: 16px !important;
+}
+
+#reskin-root .rv-icon-item.is-active {
+  background: #5865f2 !important;
+  border-radius: 16px !important;
+  color: #ffffff !important;
+}
+
+#reskin-root .rv-dm-list {
+  background: #0d0d0d !important;
+  display: flex !important;
+  flex-direction: column !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  border-right: 1px solid #1f1f1f !important;
+  flex: 0 0 auto !important;
+}
+
+#reskin-root .rv-dm-list-search-wrap {
+  flex: 0 0 auto !important;
+  padding: 10px 12px !important;
+}
+
+#reskin-root .rv-dm-list-search-wrap .rv-search {
+  border-radius: 8px !important;
+  padding: 10px 12px !important;
+  font-size: 14px !important;
+  background: #111111 !important;
+  border: 1px solid #2c2c2c !important;
+  color: #f0f0f0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+}
+
+#reskin-root .rv-dm-list-search-wrap .rv-search::placeholder {
+  color: #8a8a8a !important;
+}
+
+#reskin-root .rv-dm-list-triage {
+  flex: 0 0 auto !important;
+  padding: 8px 12px !important;
+  border-bottom: 1px solid #1f1f1f !important;
+}
+
+#reskin-root .rv-dm-list-triage .rv-side-triage-list {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+}
+
+#reskin-root .rv-dm-list-triage .rv-triage-item {
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+}
+
+#reskin-root .rv-dm-list-triage .rv-side-triage-meta {
+  width: 100% !important;
+  flex-basis: 100% !important;
+  margin-top: 6px !important;
+}
+
+#reskin-root .rv-dm-list-triage .rv-triage-item.is-active {
+  background: #5865f2 !important;
+  color: #ffffff !important;
+}
+
+#reskin-root .rv-dm-list-triage .rv-triage-status {
+  color: #9a9a9a !important;
+}
+
+#reskin-root .rv-dm-list .rv-list {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  padding: 8px 0 !important;
+}
+
+#reskin-root .rv-chat-area {
+  background: #0a0a0a !important;
+  display: flex !important;
+  flex-direction: column !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  position: relative !important;
+  flex: 1 1 0 !important;
+}
+
+#reskin-root .rv-chat-placeholder {
+  position: absolute !important;
+  inset: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #8a8a8a !important;
+  font-size: 16px !important;
+  font-weight: 500 !important;
+}
+
+#reskin-root .rv-thread-wrap {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow: auto !important;
+  padding: 16px !important;
+}
+
+#reskin-root .rv-settings-wrap {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow: auto !important;
+  padding: 16px !important;
 }
 
 #reskin-root .rv-sidebar {
@@ -286,9 +457,98 @@ body[data-reskin-mode="viewer"] {
   flex-direction: column !important;
 }
 
+#reskin-root .rv-main-top {
+  flex: 0 0 auto !important;
+  margin-bottom: 10px !important;
+}
+
+#reskin-root .rv-search {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  padding: 10px 14px !important;
+  font-size: 14px !important;
+  border: 1px solid #2c2c2c !important;
+  border-radius: 10px !important;
+  background: #111111 !important;
+  color: #f0f0f0 !important;
+}
+
+#reskin-root .rv-search::placeholder {
+  color: #8a8a8a !important;
+}
+
+#reskin-root .rv-search:focus {
+  outline: none !important;
+  border-color: #404050 !important;
+}
+
+#reskin-root .rv-servers {
+  margin-bottom: 12px !important;
+  padding-bottom: 10px !important;
+  border-bottom: 1px solid #1f1f1f !important;
+}
+
+#reskin-root .rv-servers-title {
+  font-size: 11px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.07em !important;
+  color: #9d9d9d !important;
+  margin: 0 0 8px !important;
+}
+
+#reskin-root .rv-servers-list {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+}
+
+#reskin-root .rv-server-item {
+  width: 100% !important;
+  text-align: left !important;
+  padding: 8px 10px !important;
+  border: none !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  color: #c0c0c0 !important;
+  font-size: 13px !important;
+  cursor: pointer !important;
+}
+
+#reskin-root .rv-server-item:hover {
+  background: #1a1a1a !important;
+  color: #e8e8e8 !important;
+}
+
+#reskin-root .rv-server-item.is-active {
+  background: #252530 !important;
+  color: #ffffff !important;
+}
+
+#reskin-root .rv-server-new {
+  width: 100% !important;
+  text-align: left !important;
+  margin-top: 6px !important;
+  padding: 8px 10px !important;
+  border: 1px dashed #404050 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  color: #909090 !important;
+  font-size: 12px !important;
+  cursor: pointer !important;
+}
+
+#reskin-root .rv-server-new:hover {
+  border-color: #606070 !important;
+  color: #b0b0b0 !important;
+}
+
 #reskin-root .rv-right {
   background: #0d0d0d !important;
   border-left: 1px solid #1f1f1f !important;
+  flex: 0 0 auto !important;
+  min-width: 0 !important;
   padding: 14px 12px !important;
   display: flex !important;
   flex-direction: column !important;
@@ -482,6 +742,64 @@ body[data-reskin-mode="viewer"] {
   transform: translateY(-1px) !important;
 }
 
+#reskin-root .rv-item.is-unread {
+  border-left: 3px solid #4a7cd6 !important;
+  background: #14181f !important;
+}
+
+#reskin-root .rv-item.is-unread:hover {
+  background: #1a2028 !important;
+}
+
+#reskin-root .rv-dm-list .rv-item {
+  border-radius: 4px !important;
+  padding: 8px 12px !important;
+  margin: 0 8px 8px !important;
+  border: none !important;
+  background: transparent !important;
+  min-width: 0 !important;
+  text-align: left !important;
+}
+
+#reskin-root .rv-dm-list .rv-item .rv-subject,
+#reskin-root .rv-dm-list .rv-item .rv-sender {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  min-width: 0 !important;
+}
+
+#reskin-root .rv-dm-list .rv-item .rv-item-top {
+  min-width: 0 !important;
+}
+
+#reskin-root .rv-dm-list .rv-item .rv-subject {
+  font-size: 14px !important;
+}
+
+#reskin-root .rv-dm-list .rv-item:hover {
+  background: #1a1a1a !important;
+  transform: none !important;
+}
+
+#reskin-root .rv-dm-list .rv-item.is-active {
+  background: #1a1a1a !important;
+  border-left: 3px solid #5865f2 !important;
+  margin-left: 5px !important;
+}
+
+/* Blue bar = unread (same as main list); hover shows "Unread" via title */
+#reskin-root .rv-dm-list .rv-item.is-unread {
+  border-left: 3px solid #4a7cd6 !important;
+  margin-left: 5px !important;
+  background: transparent !important;
+}
+
+#reskin-root .rv-dm-list .rv-item.is-unread:hover,
+#reskin-root .rv-dm-list .rv-item.is-unread.is-active {
+  background: #1a1a1a !important;
+}
+
 #reskin-root .rv-list-more {
   border: 1px solid #303030 !important;
   border-radius: 10px !important;
@@ -498,6 +816,61 @@ body[data-reskin-mode="viewer"] {
   align-items: center !important;
   justify-content: space-between !important;
   gap: 10px !important;
+}
+
+#reskin-root .rv-item-top-right {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-item-server-btn {
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  border: 1px solid #353535 !important;
+  border-radius: 6px !important;
+  background: #1a1a1a !important;
+  color: #a0a0a0 !important;
+  cursor: pointer !important;
+}
+
+#reskin-root .rv-item-server-btn:hover {
+  background: #252525 !important;
+  color: #c0c0c0 !important;
+}
+
+#reskin-root .rv-server-menu {
+  position: absolute !important;
+  z-index: 1000 !important;
+  padding: 6px !important;
+  border: 1px solid #303030 !important;
+  border-radius: 10px !important;
+  background: #181818 !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4) !important;
+}
+
+#reskin-root .rv-server-menu-item {
+  display: block !important;
+  width: 100% !important;
+  text-align: left !important;
+  padding: 8px 12px !important;
+  border: none !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  color: #e0e0e0 !important;
+  font-size: 13px !important;
+  cursor: pointer !important;
+}
+
+#reskin-root .rv-server-menu-item:hover {
+  background: #252525 !important;
+}
+
+#reskin-root .rv-server-menu-empty {
+  display: block !important;
+  padding: 8px 12px !important;
+  font-size: 12px !important;
+  color: #909090 !important;
 }
 
 #reskin-root .rv-sender {
@@ -1214,7 +1587,26 @@ body[data-reskin-mode="viewer"][data-reskin-theme="light"] {
 
   #reskin-root .rv-shell {
     grid-template-columns: 1fr !important;
-    grid-template-rows: auto 1fr auto !important;
+    grid-template-rows: auto auto 1fr auto !important;
+  }
+
+  #reskin-root .rv-icon-strip {
+    flex-direction: row !important;
+    border-right: none !important;
+    border-bottom: 1px solid #1f1f1f !important;
+    padding: 8px !important;
+    justify-content: center !important;
+    gap: 8px !important;
+  }
+
+  #reskin-root .rv-icon-servers {
+    flex-direction: row !important;
+  }
+
+  #reskin-root .rv-dm-list {
+    border-right: none !important;
+    border-bottom: 1px solid #1f1f1f !important;
+    max-height: 200px !important;
   }
 
   #reskin-root .rv-sidebar {
