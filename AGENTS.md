@@ -44,3 +44,36 @@ PRs should include:
 - linked issue/task (if available)
 - test evidence (commands run and results)
 - screenshots/log excerpts for UI or workflow changes
+
+## Cursor Cloud specific instructions
+
+### Overview
+This is a Chrome Manifest V3 extension ("Gmail Hard Reskin" / "Mailita") that overlays Gmail with a custom UI. There is no backend — it is purely client-side.
+
+### Key commands
+All npm scripts are in `package.json`:
+- `npm run dev` — WXT dev server with hot-reload (opens a Chrome window with the extension loaded)
+- `npm run build` — production build to `.output/chrome-mv3/`
+- `npm run typecheck` — TypeScript type-check (`tsc --noEmit`); has pre-existing errors because `tsconfig.json` does not extend `.wxt/tsconfig.json`
+- `npm run test:headless` — runs both Playwright harnesses (Python-based, requires `.venv`)
+
+### Python venv for headless tests
+The Playwright test harnesses require a Python venv at `.venv/`. To recreate:
+```
+python3 -m venv .venv
+.venv/bin/pip install playwright
+.venv/bin/playwright install --with-deps chromium
+```
+The system package `python3.12-venv` must be installed first (`sudo apt-get install -y python3.12-venv`).
+
+### Manual testing
+To test the extension manually in Chrome:
+1. Load unpacked from the repo root (`/workspace`) at `chrome://extensions`
+2. Navigate to `https://mail.google.com/mail/u/0/#inbox` (requires a logged-in Gmail account)
+3. The extension's custom "Mailita" overlay should mount automatically
+
+### Known caveats
+- `npm run typecheck` fails with pre-existing errors (`defineBackground`, `defineContentScript` not found, `extensionApi` unknown). The project `tsconfig.json` does not reference WXT's generated types in `.wxt/tsconfig.json`.
+- The chat headless test (`run_chat_harness.py`) has a pre-existing timeout failure; the triage harness passes.
+- `npm run dev` launches a Chrome window via WXT — this works in the cloud VM's desktop environment.
+- Gmail login credentials are needed to exercise the extension end-to-end in the browser.
