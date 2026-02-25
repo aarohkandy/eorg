@@ -87,7 +87,8 @@
   ];
   const PRIMARY_NAV_HASHES = new Set(["#inbox", "#sent", "#drafts"]);
 
-  const TRIAGE_LEVELS = ["critical", "high", "medium", "low", "fyi"];
+  const TRIAGE_LEVELS = ["respond", "read", "news", "notImportant", "spam"];
+  const OLD_TO_NEW_TRIAGE = { critical: "respond", high: "read", medium: "news", low: "notImportant", fyi: "spam" };
   const TRIAGE_MAP_STORAGE_KEY = "reskin_triage_map_v1";
   const SUMMARY_STORAGE_KEY = "reskin_row_summaries_v1";
   const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -124,7 +125,7 @@
     lastSource: "",
     loggedOnce: new Set(),
     triageFilter: "",
-    triageCounts: { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 },
+    triageCounts: { respond: 0, read: 0, news: 0, notImportant: 0, spam: 0 },
     triageStatus: "",
     triageRunning: false,
     triageQueueKey: "",
@@ -166,7 +167,8 @@
     lastObserverRenderAt: 0,
     pendingObserverTimer: null,
     lastObserverSignature: "",
-    lastSeenHash: ""
+    lastSeenHash: "",
+    consentBannerDismissed: false
   };
 
   function sleep(ms) {
@@ -539,7 +541,8 @@
     const out = {};
     for (const [threadId, level] of Object.entries(input)) {
       const id = normalize(threadId || "");
-      const urgency = normalize(level || "").toLowerCase();
+      const rawUrgency = normalize(level || "").toLowerCase();
+      const urgency = OLD_TO_NEW_TRIAGE[rawUrgency] || rawUrgency;
       if (!id || !TRIAGE_LEVELS.includes(urgency)) continue;
       out[id] = urgency;
       const canonical = canonicalThreadId(id);
@@ -562,12 +565,22 @@
     state.triageMapLoadInFlight = true;
     try {
       const raw = await chrome.storage.local.get(TRIAGE_MAP_STORAGE_KEY);
-      const map = normalizePersistedTriageMap(raw[TRIAGE_MAP_STORAGE_KEY]);
+      const input = raw[TRIAGE_MAP_STORAGE_KEY];
+      const map = normalizePersistedTriageMap(input);
       state.triageLocalMap = map;
       state.triageMapLoaded = true;
-      logTriageDebug("Loaded local triage map", {
-        keys: Object.keys(map).length
-      });
+      const hadOldKeys = input && typeof input === "object" && Object.values(input).some((v) => OLD_TO_NEW_TRIAGE[normalize(v || "").toLowerCase()]);
+      if (hadOldKeys && Object.keys(map).length > 0) {
+        const compact = {};
+        for (const [key, level] of Object.entries(map)) {
+          const canonical = canonicalThreadId(key);
+          if (canonical && canonical.startsWith("f:")) compact[canonical] = level;
+        }
+        await chrome.storage.local.set({ [TRIAGE_MAP_STORAGE_KEY]: compact });
+        logTriageDebug("Migrated triage map to new level keys and persisted", { keys: Object.keys(compact).length });
+      } else {
+        logTriageDebug("Loaded local triage map", { keys: Object.keys(map).length });
+      }
     } catch (error) {
       logWarn("Failed to load local triage map", error);
     } finally {
@@ -1131,12 +1144,15 @@
       view.querySelector('[name="theme"]')?.value ||
       THEME_DARK
     );
+    const consentCheckbox = view.querySelector('[name="consentTriage"]');
+    const consentTriage = consentCheckbox instanceof HTMLInputElement && consentCheckbox.checked;
     const payload = {
       provider,
       apiKey,
       apiKeys: apiKey ? [apiKey] : [],
       theme: selectedTheme,
-      model: defaultModelForProvider(provider)
+      model: defaultModelForProvider(provider),
+      consentTriage: Boolean(consentTriage)
     };
 
     try {
@@ -2447,6 +2463,17 @@
         </section>
 
         <section class="rv-settings-section" data-reskin="true">
+          <div class="rv-settings-section-title" data-reskin="true">Triage</div>
+          <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
+            <label class="rv-settings-card rv-settings-consent" data-reskin="true">
+              <input type="checkbox" name="consentTriage" class="rv-field" data-reskin="true" ${settings.consentTriage ? "checked" : ""} />
+              <span class="rv-settings-label" data-reskin="true">I consent to AI triage</span>
+            </label>
+          </div>
+          <p class="rv-settings-copy" data-reskin="true">Allow sending inbox content to your chosen AI provider to label categories (Respond, Should read, News, Not important, Spam). Required for triage and Ask Inbox.</p>
+        </section>
+
+        <section class="rv-settings-section" data-reskin="true">
           <div class="rv-settings-section-title" data-reskin="true">Appearance</div>
           <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
             <div class="rv-settings-card" data-reskin="true">
@@ -2493,6 +2520,11 @@
       state.triageFilter = route.triage;
     }
 
+    if (route.mailbox === "inbox" && !state.settingsCache && !state.settingsLoadInFlight && window.ReskinAI) {
+      loadSettingsCached().then(() => applyReskin());
+      return;
+    }
+
     const mailbox = mailboxCacheKey(route.mailbox);
     const result = collectMessages();
     const liveMessages = result.items || [];
@@ -2507,7 +2539,7 @@
 
     state.triageCounts = window.ReskinTriage && typeof window.ReskinTriage.countLevels === "function"
       ? window.ReskinTriage.countLevels(allMessages)
-      : { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 };
+      : { respond: 0, read: 0, news: 0, notImportant: 0, spam: 0 };
 
     let messages = allMessages;
     const filterLevel = route.mailbox === "inbox"
@@ -2525,6 +2557,40 @@
     state.lastListSignature = listSignature;
 
     list.innerHTML = "";
+
+    const showConsentBanner = route.mailbox === "inbox" && state.settingsCache && !state.settingsCache.consentTriage && !state.consentBannerDismissed;
+    if (showConsentBanner) {
+      const banner = document.createElement("div");
+      banner.className = "rv-consent-banner";
+      banner.setAttribute("data-reskin", "true");
+      banner.innerHTML = `
+        <div class="rv-consent-banner-inner" data-reskin="true">
+          <p class="rv-consent-banner-title" data-reskin="true">AI triage is off</p>
+          <p class="rv-consent-banner-copy" data-reskin="true">Triage and Ask Inbox need your consent to send inbox content to your chosen AI provider. Enable it in Settings to run priority labels and Q&amp;A.</p>
+          <div class="rv-consent-banner-actions" data-reskin="true">
+            <button type="button" class="rv-consent-banner-open-settings" data-reskin="true">Open Settings</button>
+            <button type="button" class="rv-consent-banner-dismiss" data-reskin="true">Dismiss</button>
+          </div>
+        </div>
+      `;
+      list.appendChild(banner);
+      const openBtn = banner.querySelector(".rv-consent-banner-open-settings");
+      const dismissBtn = banner.querySelector(".rv-consent-banner-dismiss");
+      if (openBtn) {
+        openBtn.addEventListener("click", () => {
+          state.settingsPinned = true;
+          state.currentView = "settings";
+          window.location.hash = "#app-settings";
+          applyReskin();
+        });
+      }
+      if (dismissBtn) {
+        dismissBtn.addEventListener("click", () => {
+          state.consentBannerDismissed = true;
+          applyReskin();
+        });
+      }
+    }
 
     if (state.lastSource !== result.source) {
       state.lastSource = result.source;

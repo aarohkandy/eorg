@@ -2,7 +2,7 @@
   "use strict";
 
   const SETTINGS_KEY = "reskin_ai_settings_v1";
-  const LEVELS = ["critical", "high", "medium", "low", "fyi"];
+  const LEVELS = ["respond", "read", "news", "notImportant", "spam"];
   const GROQ_FREE_MODELS = [
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
@@ -218,12 +218,13 @@
       {
         role: "system",
         content:
-          "You triage inbox messages. Return strict JSON only: {\"items\":[{\"threadId\":string,\"urgency\":\"critical\"|\"high\"|\"medium\"|\"low\"|\"fyi\",\"score\":0-100,\"reason\":string}]}."
+          "You triage inbox messages into five categories. Return strict JSON only: {\"items\":[{\"threadId\":string,\"urgency\":\"respond\"|\"read\"|\"news\"|\"notImportant\"|\"spam\",\"score\":0-100,\"reason\":string}]}. " +
+          "respond = needs a reply; read = important to read; news = newsletters/updates (tech or regular); notImportant = low priority; spam = junk."
       },
       {
         role: "user",
         content:
-          "Classify these inbox emails by urgency. Use concise reasons under 100 chars. JSON only.\n" +
+          "Classify each email into one category: respond, read, news, notImportant, or spam. Use concise reasons under 100 chars. JSON only.\n" +
           JSON.stringify(compact)
       }
     ];

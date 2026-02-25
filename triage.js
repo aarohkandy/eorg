@@ -2,11 +2,11 @@
   "use strict";
 
   const LEVEL_CONFIG = {
-    critical: { label: "Critical", gmailLabel: "Triage/Critical" },
-    high: { label: "High", gmailLabel: "Triage/High" },
-    medium: { label: "Medium", gmailLabel: "Triage/Medium" },
-    low: { label: "Low", gmailLabel: "Triage/Low" },
-    fyi: { label: "FYI", gmailLabel: "Triage/FYI" }
+    respond: { label: "Respond", gmailLabel: "Triage/Respond" },
+    read: { label: "Should read", gmailLabel: "Triage/Should read" },
+    news: { label: "News", gmailLabel: "Triage/News" },
+    notImportant: { label: "Not important", gmailLabel: "Triage/Not important" },
+    spam: { label: "Spam", gmailLabel: "Triage/Spam" }
   };
 
   const LEVELS = Object.keys(LEVEL_CONFIG);
@@ -98,11 +98,16 @@
   function levelFromText(text) {
     const value = normalize(text).toLowerCase();
     if (!value) return "";
-    if (value.includes("triage/critical")) return "critical";
-    if (value.includes("triage/high")) return "high";
-    if (value.includes("triage/medium")) return "medium";
-    if (value.includes("triage/low")) return "low";
-    if (value.includes("triage/fyi")) return "fyi";
+    if (value.includes("triage/respond")) return "respond";
+    if (value.includes("triage/should read")) return "read";
+    if (value.includes("triage/news")) return "news";
+    if (value.includes("triage/not important")) return "notImportant";
+    if (value.includes("triage/spam")) return "spam";
+    if (value.includes("triage/critical")) return "respond";
+    if (value.includes("triage/high")) return "read";
+    if (value.includes("triage/medium")) return "news";
+    if (value.includes("triage/low")) return "notImportant";
+    if (value.includes("triage/fyi")) return "spam";
     return "";
   }
 
@@ -783,7 +788,7 @@
   }
 
   function countLevels(messages) {
-    const counts = { critical: 0, high: 0, medium: 0, low: 0, fyi: 0 };
+    const counts = { respond: 0, read: 0, news: 0, notImportant: 0, spam: 0 };
     for (const msg of messages || []) {
       const level = normalize(msg && msg.triageLevel).toLowerCase();
       if (counts[level] >= 0) counts[level] += 1;

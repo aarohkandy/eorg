@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.0 - 2026-02-25
+
+- **pre-discord state**: Snapshot before Discord-related experiment. Safe restore point.
+- Version bump rule: each change appends 0.0.1 unless another value is specified.
+
 ## v1.0.0 - 2026-02-24
 
 - Promoted the extension/package release line to `1.0.0`.

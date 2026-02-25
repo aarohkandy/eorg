@@ -22,7 +22,7 @@ async def main() -> int:
             if (!window.ReskinTriage) return { ok: false, reason: "missing-module" };
             const ok = await window.ReskinTriage.applyLabelToMessage(
               { threadId: "#thread-f:123", href: "#thread-f:123", row: null },
-              "critical"
+              "respond"
             );
             const row = document.querySelector('[role="row"][data-thread-id="thread-f:123"]');
             const marker = row ? row.querySelector('.label-marker') : null;
@@ -51,7 +51,7 @@ async def main() -> int:
           async () => {
             const ok = await window.ReskinTriage.applyLabelToMessage(
               { threadId: "f:123", href: "", row: null },
-              "critical"
+              "respond"
             );
             const row = document.querySelector('[role="row"][data-thread-id="thread-f:123"]');
             const marker = row ? row.querySelector('.label-marker') : null;
@@ -68,8 +68,8 @@ async def main() -> int:
 
     print("RESULT_WITH_HREF", result_with_href)
     print("RESULT_WITHOUT_HREF", result_without_href)
-    ok_with = result_with_href.get("ok") and result_with_href.get("marker", "").lower() == "triage/critical"
-    ok_without = result_without_href.get("ok") and result_without_href.get("marker", "").lower() == "triage/critical"
+    ok_with = result_with_href.get("ok") and result_with_href.get("marker", "").lower() == "triage/respond"
+    ok_without = result_without_href.get("ok") and result_without_href.get("marker", "").lower() == "triage/respond"
     return 0 if ok_with and ok_without else 1
 
 
