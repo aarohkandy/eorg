@@ -20,6 +20,7 @@
       "js": [
         "ai.js",
         "triage.js",
+        "compose.js",
         "content.js"
       ],
       "run_at": "document_idle"

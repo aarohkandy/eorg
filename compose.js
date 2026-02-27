@@ -30,14 +30,23 @@
   // Targets compose body by role/contenteditable semantics because these are stable compared to classes.
   const BODY_FIELD_SELECTORS = [
     'div[aria-label="Message Body"][contenteditable="true"]',
-    'div[g_editable="true"][role="textbox"]'
+    'div[contenteditable="true"][aria-label="Message Body"]',
+    'div[g_editable="true"][role="textbox"]',
+    'div[role="textbox"][contenteditable="true"]',
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"]'
   ];
 
   // Targets native Gmail send controls by aria/tooltip behavior to trigger official send logic safely.
   const SEND_BUTTON_SELECTORS = [
     'div[role="button"][data-tooltip^="Send"]',
+    'div[role="button"][data-tooltip="Send"]',
     'div[role="button"][aria-label^="Send"]',
-    'button[aria-label^="Send"]'
+    'div[role="button"][aria-label="Send"]',
+    'button[aria-label^="Send"]',
+    'button[aria-label="Send"]',
+    '[data-tooltip="Send"]',
+    '[aria-label="Send"]'
   ];
 
   // Selects first available element from fallbacks and logs if Gmail structure differs.
@@ -154,5 +163,134 @@
     return true;
   }
 
-  window.ReskinCompose = { sendThroughGmail };
+  const REPLY_BUTTON_SELECTORS = [
+    '[data-tooltip="Reply"]',
+    '[aria-label="Reply"]',
+    'div[role="button"][data-tooltip^="Reply"]',
+    'span[role="button"][data-tooltip^="Reply"]',
+    'div[role="button"][aria-label="Reply"]',
+    '.ams.bkH',
+    '[data-tooltip="Reply to all"]',
+    'span[role="button"][aria-label="Reply"]'
+  ];
+
+  function findReplyButton() {
+    const main = document.querySelector('[role="main"]') || document.body;
+    for (const sel of REPLY_BUTTON_SELECTORS) {
+      const buttons = Array.from(main.querySelectorAll(sel));
+      const btn = buttons[buttons.length - 1];
+      if (btn) return btn;
+    }
+    return null;
+  }
+
+  function findBodyInRoot(root) {
+    for (const sel of BODY_FIELD_SELECTORS) {
+      const el = root.querySelector(sel);
+      if (el && el.offsetParent !== null) return el;
+    }
+    return null;
+  }
+
+  function waitForReplyCompose(timeoutMs = 10000) {
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const tryResolve = () => {
+        const main = document.querySelector('[role="main"]') || document.body;
+        let body = findBodyInRoot(main);
+        if (body) { cleanup(); resolve(body); return true; }
+        const iframes = document.querySelectorAll('iframe');
+        for (const frame of iframes) {
+          try {
+            const doc = frame.contentDocument;
+            if (doc && doc.body) {
+              body = findBodyInRoot(doc);
+              if (body) { cleanup(); resolve(body); return true; }
+            }
+          } catch (_) { /* cross-origin */ }
+        }
+        return false;
+      };
+      const interval = setInterval(() => {
+        if (tryResolve()) return;
+        if (Date.now() - startedAt > timeoutMs) { cleanup(); resolve(null); }
+      }, 200);
+      const observer = new MutationObserver(() => {
+        if (tryResolve()) return;
+        if (Date.now() - startedAt > timeoutMs) { cleanup(); resolve(null); }
+      });
+      const cleanup = () => { clearInterval(interval); observer.disconnect(); };
+      observer.observe(document.body, { childList: true, subtree: true });
+      tryResolve();
+    });
+  }
+
+  function findSendInRoot(root) {
+    for (const sel of SEND_BUTTON_SELECTORS) {
+      const el = root.querySelector(sel);
+      if (el && el.offsetParent !== null) return el;
+    }
+    const buttons = root.querySelectorAll('div[role="button"], button');
+    for (const el of buttons) {
+      const label = (el.getAttribute("aria-label") || el.getAttribute("data-tooltip") || el.textContent || "").trim();
+      if (/^Send$/i.test(label)) return el;
+    }
+    return null;
+  }
+
+  function sendViaKeyboard() {
+    const main = document.querySelector('[role="main"]') || document.body;
+    const bodyField = findBodyInRoot(main);
+    if (bodyField) {
+      bodyField.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+      bodyField.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", ctrlKey: true, bubbles: true }));
+      return true;
+    }
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+    document.body.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", ctrlKey: true, bubbles: true }));
+    return true;
+  }
+
+  async function replyToThread(body) {
+    const replyBtn = findReplyButton();
+    if (!replyBtn) {
+      console.warn("[reskin] Reply button not found. Tried:", REPLY_BUTTON_SELECTORS);
+      return false;
+    }
+    console.log("[reskin] Reply button found, clicking.");
+    replyBtn.click();
+    const bodyField = await waitForReplyCompose();
+    if (!bodyField) {
+      console.warn("[reskin] Reply compose area did not appear within timeout. Tried main + iframes.");
+      return false;
+    }
+    console.log("[reskin] Reply body field found, filling.");
+    bodyField.focus();
+    setContentEditableValue(bodyField, body || "");
+    await new Promise((r) => setTimeout(r, 400));
+    const main = document.querySelector('[role="main"]') || document.body;
+    let sendButton = findSendInRoot(main);
+    if (!sendButton) {
+      const iframes = document.querySelectorAll('iframe');
+      for (const frame of iframes) {
+        try {
+          const doc = frame.contentDocument;
+          if (doc && doc.body) {
+            sendButton = findSendInRoot(doc);
+            if (sendButton) break;
+          }
+        } catch (_) { }
+      }
+    }
+    if (sendButton) {
+      console.log("[reskin] Send button found, clicking.");
+      sendButton.click();
+      return true;
+    }
+    console.log("[reskin] Send button not found, trying Ctrl+Enter.");
+    sendViaKeyboard();
+    return true;
+  }
+
+  window.ReskinCompose = { sendThroughGmail, replyToThread };
 })();

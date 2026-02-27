@@ -1,6 +1,7 @@
 (() => {
   "use strict";
 
+  const DEBUG_THREAD_EXTRACT = false;
   const STYLE_ID = "reskin-stylesheet";
   const ROOT_ID = "reskin-root";
   const MODE_ATTR = "data-reskin-mode";
@@ -92,6 +93,11 @@
   const TRIAGE_MAP_STORAGE_KEY = "reskin_triage_map_v1";
   const SYNC_DRAFT_STORAGE_KEY = "reskin_sync_draft_v1";
   const SUMMARY_STORAGE_KEY = "reskin_row_summaries_v1";
+  const COL_WIDTHS_STORAGE_KEY = "reskin_column_widths_v1";
+  const DEFAULT_COL_WIDTHS = { col1: 160, col2: 260, col3: 0, col4: 260 };
+  const MIN_COL_PX = 100;
+  const MAX_COL_PX = 600;
+  const RESIZE_GRIP_PX = 6;
   const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
   const SUMMARY_BATCH_SIZE = 3;
 
@@ -137,6 +143,7 @@
     triageMapLoaded: false,
     triageMapLoadInFlight: false,
     triageMapPersistTimer: null,
+    initialCriticalApplied: false,
     summaryByThreadId: {},
     summaryMetaByThreadId: {},
     summaryStatusByThreadId: {},
@@ -173,6 +180,14 @@
     lastSeenHash: "",
     consentBannerDismissed: false,
     searchQuery: "",
+    activeContactKey: "",
+    contactThreadIds: [],
+    mergedMessages: [],
+    currentThreadIdForReply: "",
+    contactChatLoading: false,
+    contactDisplayName: "",
+    threadExtractRetry: 0,
+    snippetByThreadId: {},
     servers: [],
     currentServerId: null
   };
@@ -209,7 +224,7 @@
       "Skipping duplicate triage queue": "C08",
       "Skipped triage run because another run is already in progress": "C09"
     };
-    const enabledCodes = new Set(["C00", "C05", "C06", "C07"]);
+    const enabledCodes = new Set(["C05", "C07"]);
     const now = Date.now();
     if (!logTriageDebug._last) logTriageDebug._last = new Map();
     const key = codeMap[message] || message;
@@ -492,8 +507,11 @@
 
   function navigateToList(targetHash, nativeLabel = "", options = {}) {
     const nextHash = sanitizeListHash(targetHash);
+    const sx = window.scrollX, sy = window.scrollY;
     window.location.hash = nextHash;
     if (nativeLabel && options.native !== false) clickNativeMailboxLink(nativeLabel);
+    window.scrollTo(sx, sy);
+    requestAnimationFrame(() => window.scrollTo(0, 0));
   }
 
   function openSettingsView(root) {
@@ -912,19 +930,18 @@
   }
 
   function renderSidebar(root) {
-    const iconServers = root.querySelector(".rv-icon-servers");
-    if (iconServers instanceof HTMLElement) {
-      const currentId = state.currentServerId || "";
-      const icons = (state.servers || []).map((server) => {
-        const active = state.currentServerId === server.id;
-        const initial = (server.name || "?").trim().charAt(0).toUpperCase();
-        return `<button type="button" class="rv-icon-item rv-server-icon${active ? " is-active" : ""}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.name || "Unnamed")}" data-reskin="true">${escapeHtml(initial)}</button>`;
-      });
-      iconServers.innerHTML = icons.join("");
-    }
-    const iconHome = root.querySelector(".rv-icon-home");
+    const iconHome = root.querySelector(".rv-categories .rv-icon-home");
     if (iconHome instanceof HTMLElement) {
       iconHome.classList.toggle("is-active", !(state.currentServerId || ""));
+    }
+    const serversList = root.querySelector(".rv-servers-list");
+    if (serversList instanceof HTMLElement) {
+      const items = (state.servers || []).map((server) => {
+        const active = state.currentServerId === server.id;
+        const initial = (server.name || "?").trim().charAt(0).toUpperCase();
+        return `<button type="button" class="rv-server-item rv-server-icon${active ? " is-active" : ""}" data-server-id="${escapeHtml(server.id)}" title="${escapeHtml(server.name || "Unnamed")}" data-reskin="true">${escapeHtml(initial)} ${escapeHtml(server.name || "Unnamed")}</button>`;
+      });
+      serversList.innerHTML = items.join("");
     }
 
     const searchInput = root.querySelector(".rv-search");
@@ -939,32 +956,13 @@
       if (searchInput.value !== (state.searchQuery || "")) searchInput.value = state.searchQuery || "";
     }
 
-    const nav = root.querySelector(".rv-nav");
-    if (nav instanceof HTMLElement) {
-      const navOverflow = root.querySelector(".rv-nav-overflow");
+    const categoriesNav = root.querySelector(".rv-categories-nav");
+    if (categoriesNav instanceof HTMLElement) {
       const activeHash = getActiveNavHash();
-      const primaryItems = NAV_ITEMS.filter((item) => PRIMARY_NAV_HASHES.has(item.hash));
-      const secondaryItems = NAV_ITEMS.filter((item) => !PRIMARY_NAV_HASHES.has(item.hash));
-      nav.innerHTML = primaryItems.map((item) => {
+      categoriesNav.innerHTML = NAV_ITEMS.filter((item) => PRIMARY_NAV_HASHES.has(item.hash)).map((item) => {
         const isActive = item.hash === activeHash;
         return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
       }).join("");
-      if (navOverflow instanceof HTMLElement) {
-        const hiddenActive = secondaryItems.some((item) => item.hash === activeHash);
-        navOverflow.innerHTML = secondaryItems.length > 0
-          ? `
-          <div class="rv-nav-more" data-reskin="true">
-            <button type="button" class="rv-nav-more-trigger${hiddenActive ? " is-active" : ""}" aria-label="More folders" data-reskin="true">...</button>
-            <div class="rv-nav-more-menu" data-reskin="true">
-              ${secondaryItems.map((item) => {
-                const isActive = item.hash === activeHash;
-                return `<button type="button" class="rv-nav-item${isActive ? " is-active" : ""}" data-target-hash="${item.hash}" data-native-label="${escapeHtml(item.nativeLabel)}" data-reskin="true">${item.label}</button>`;
-              }).join("")}
-            </div>
-          </div>
-        `
-          : "";
-      }
     }
 
     const settings = root.querySelector(".rv-settings");
@@ -972,33 +970,28 @@
       settings.classList.toggle("is-active", state.currentView === "settings");
     }
 
-    const sideTriage = root.querySelector(".rv-side-triage, .rv-dm-list-triage");
     const sideTriageList = root.querySelector(".rv-side-triage-list");
-    const triageContainer = sideTriage || root.querySelector(".rv-dm-list-triage");
-    if (triageContainer instanceof HTMLElement) {
+    const sideTriageMeta = root.querySelector(".rv-side-triage-meta");
+    if (sideTriageList instanceof HTMLElement) {
       const currentFilter = activeTriageFilter();
       const total = TRIAGE_LEVELS.reduce((sum, level) => sum + (state.triageCounts[level] || 0), 0);
       const rows = [
-        `<button type="button" class="rv-triage-item rv-side-triage-item${!currentFilter ? " is-active" : ""}" data-triage-level="all" data-reskin="true"><span data-reskin="true">All</span><span class="rv-triage-count" data-reskin="true">${total}</span></button>`
+        `<button type="button" class="rv-triage-item rv-side-triage-item${!currentFilter ? " is-active" : ""}" data-triage-level="all" data-reskin="true"><span class="rv-triage-label" data-reskin="true">All</span><span class="rv-triage-count" data-reskin="true">${total}</span></button>`
       ];
       for (const level of TRIAGE_LEVELS) {
         const count = state.triageCounts[level] || 0;
         const active = currentFilter === level;
         rows.push(
-          `<button type="button" class="rv-triage-item rv-side-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`
+          `<button type="button" class="rv-triage-item rv-side-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span class="rv-triage-label" data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`
         );
       }
-      const meta = `
-        <div class="rv-side-triage-meta" data-reskin="true">
-          <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || "Auto-triage runs in the background.")}</div>
-          <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.fullScanStatus || "Auto-scan loads all inbox pages in the background.")}</div>
-        </div>
+      sideTriageList.innerHTML = rows.join("");
+    }
+    if (sideTriageMeta instanceof HTMLElement) {
+      sideTriageMeta.innerHTML = `
+        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || "Auto-triage runs in the background.")}</div>
+        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.fullScanStatus || "Auto-scan loads all inbox pages in the background.")}</div>
       `;
-      if (sideTriageList instanceof HTMLElement) {
-        sideTriageList.innerHTML = rows.join("") + meta;
-      } else {
-        triageContainer.innerHTML = `<div class="rv-side-triage-list" data-reskin="true">${rows.join("")}${meta}</div>`;
-      }
     }
   }
 
@@ -1149,6 +1142,10 @@
       }
     }
 
+    if (state.currentView === "thread" && state.activeThreadId && !threadHash) {
+      return;
+    }
+
     state.currentView = threadHash ? "thread" : "list";
     if (state.currentView === "thread") {
       state.activeThreadId = threadIdFromHash(window.location.hash) || state.activeThreadId;
@@ -1163,8 +1160,58 @@
         state.triageFilter = "";
       } else if (hashHasTriageParam(currentHash)) {
         state.triageFilter = parsed.triage;
+        state.initialCriticalApplied = true;
+      } else if (!state.initialCriticalApplied) {
+        state.initialCriticalApplied = true;
+        state.triageFilter = "critical";
+        state.lastListHash = "#inbox?triage=critical";
+        if (window.location.hash !== "#inbox?triage=critical") {
+          window.location.hash = "#inbox?triage=critical";
+        }
       }
     }
+  }
+
+  function getColumnWidths() {
+    try {
+      const raw = typeof localStorage !== "undefined" ? localStorage.getItem(COL_WIDTHS_STORAGE_KEY) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          return {
+            col1: Math.min(MAX_COL_PX, Math.max(MIN_COL_PX, Number(parsed.col1) || DEFAULT_COL_WIDTHS.col1)),
+            col2: Math.min(MAX_COL_PX, Math.max(MIN_COL_PX, Number(parsed.col2) || DEFAULT_COL_WIDTHS.col2)),
+            col3: Math.min(MAX_COL_PX, Math.max(MIN_COL_PX, Number(parsed.col3) || DEFAULT_COL_WIDTHS.col3)),
+            col4: Math.min(MAX_COL_PX, Math.max(MIN_COL_PX, Number(parsed.col4) || DEFAULT_COL_WIDTHS.col4))
+          };
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return { ...DEFAULT_COL_WIDTHS };
+  }
+
+  function saveColumnWidths(widths) {
+    try {
+      const payload = JSON.stringify({
+        col1: widths.col1,
+        col2: widths.col2,
+        col3: widths.col3,
+        col4: widths.col4
+      });
+      if (typeof localStorage !== "undefined") localStorage.setItem(COL_WIDTHS_STORAGE_KEY, payload);
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ [COL_WIDTHS_STORAGE_KEY]: payload }).catch(() => {});
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function applyColumnWidths(root, optionalWidths) {
+    const shell = root && root.querySelector ? root.querySelector(".rv-shell") : null;
+    if (!(shell instanceof HTMLElement)) return;
+    const w = optionalWidths && typeof optionalWidths === "object" ? optionalWidths : getColumnWidths();
+    shell.style.setProperty("--rv-col-1", `${w.col1}px`);
+    shell.style.setProperty("--rv-col-2", `${w.col2}px`);
+    shell.style.setProperty("--rv-col-4", `${w.col4}px`);
   }
 
   function ensureRoot() {
@@ -1177,34 +1224,43 @@
     root.setAttribute("data-reskin", "true");
     root.innerHTML = `
       <div class="rv-shell" data-reskin="true">
-        <aside class="rv-icon-strip" data-reskin="true">
-          <div class="rv-icon-strip-top" data-reskin="true">
-            <button type="button" class="rv-icon-item rv-icon-home" data-server-id="" title="Inbox" data-reskin="true">M</button>
+        <aside class="rv-categories" data-reskin="true">
+          <div class="rv-brand" data-reskin="true">Mailita</div>
+          <div class="rv-categories-servers" data-reskin="true">
+            <button type="button" class="rv-icon-home" data-server-id="" title="Inbox" data-reskin="true">Inbox</button>
+            <div class="rv-servers-list" data-reskin="true"></div>
+            <button type="button" class="rv-server-new" data-reskin="true" title="New server">+ New server</button>
           </div>
-          <div class="rv-icon-servers" data-reskin="true"></div>
-          <button type="button" class="rv-icon-item rv-icon-new-server" title="New server" data-reskin="true">+</button>
-          <div class="rv-icon-strip-bottom" data-reskin="true">
-            <button type="button" class="rv-icon-item rv-icon-settings rv-settings" title="Settings" data-reskin="true">&#9881;</button>
+          <div class="rv-categories-nav" data-reskin="true"></div>
+          <div class="rv-side-triage" data-reskin="true">
+            <div class="rv-side-triage-list" data-reskin="true"></div>
+            <div class="rv-side-triage-meta" data-reskin="true"></div>
+          </div>
+          <div class="rv-categories-footer" data-reskin="true">
+            <button type="button" class="rv-settings" data-reskin="true">Settings</button>
           </div>
         </aside>
-        <aside class="rv-dm-list" data-reskin="true">
-          <div class="rv-dm-list-search-wrap" data-reskin="true">
-            <input type="text" class="rv-search" placeholder="Find or start a conversation" data-reskin="true" />
+        <div class="rv-resize-grip" data-resize="1" data-reskin="true" title="Drag to resize"></div>
+        <aside class="rv-mail-col" data-reskin="true">
+          <div class="rv-mail-col-search" data-reskin="true">
+            <input type="text" class="rv-search" placeholder="Search mail" data-reskin="true" />
           </div>
-          <div class="rv-dm-list-triage rv-side-triage" data-reskin="true"></div>
           <div class="rv-list" data-reskin="true"></div>
         </aside>
+        <div class="rv-resize-grip" data-resize="2" data-reskin="true" title="Drag to resize"></div>
         <main class="rv-chat-area" data-reskin="true">
           <div class="rv-chat-placeholder" data-reskin="true">Select a conversation</div>
           <div class="rv-thread-wrap" data-reskin="true" style="display:none;"></div>
           <div class="rv-settings-wrap" data-reskin="true" style="display:none;"></div>
           <div class="rv-list-wrap rv-list-view" data-reskin="true" style="display:none;"></div>
         </main>
+        <div class="rv-resize-grip" data-resize="3" data-reskin="true" title="Drag to resize"></div>
         <aside class="rv-right" data-reskin="true"></aside>
       </div>
     `;
 
     document.body.appendChild(root);
+    applyColumnWidths(root);
     bindRootEvents(root);
     const settingsButton = root.querySelector(".rv-settings");
     if (settingsButton instanceof HTMLElement && settingsButton.getAttribute("data-bound-direct") !== "true") {
@@ -1366,6 +1422,39 @@
   function bindRootEvents(root) {
     if (root.getAttribute("data-bound") === "true") return;
 
+    root.addEventListener("mousedown", (event) => {
+      const grip = event.target.closest(".rv-resize-grip");
+      if (!(grip instanceof HTMLElement)) return;
+      const which = parseInt(grip.getAttribute("data-resize") || "0", 10);
+      if (!which || which < 1 || which > 4) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startWidths = getColumnWidths();
+      let currentWidths = { ...startWidths };
+      const colKey = `col${which}`;
+
+      function onMove(e) {
+        const delta = e.clientX - startX;
+        const next = Math.min(MAX_COL_PX, Math.max(MIN_COL_PX, (startWidths[colKey] || 0) + delta));
+        currentWidths = { ...currentWidths, [colKey]: next };
+        applyColumnWidths(root, currentWidths);
+      }
+
+      function onUp() {
+        saveColumnWidths(currentWidths);
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.removeProperty("cursor");
+        document.body.style.removeProperty("user-select");
+      }
+
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    }, true);
+
     root.addEventListener("click", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -1373,19 +1462,6 @@
       if (target.closest(".rv-settings")) {
         consumeEvent(event);
         openSettingsView(root);
-        return;
-      }
-
-      if (target.closest(".rv-back")) {
-        consumeEvent(event);
-        state.settingsPinned = false;
-        state.currentView = "list";
-        state.activeThreadId = "";
-        state.lockListView = false;
-        const targetHash = sanitizeListHash(state.lastListHash || "#inbox");
-        state.lastListHash = targetHash;
-        navigateToList(targetHash, "", { native: false });
-        renderCurrentView(root);
         return;
       }
 
@@ -1411,9 +1487,63 @@
         return;
       }
 
+      if (target.closest(".rv-settings-view")) return;
+
+      if (target.closest(".rv-back")) {
+        consumeEvent(event);
+        state.settingsPinned = false;
+        state.currentView = "list";
+        state.activeThreadId = "";
+        state.lockListView = false;
+        state.mergedMessages = [];
+        state.contactThreadIds = [];
+        state.contactDisplayName = "";
+        state.currentThreadIdForReply = "";
+        state.activeContactKey = "";
+        state.contactChatLoading = false;
+        state.threadExtractRetry = 0;
+        const targetHash = sanitizeListHash(state.lastListHash || "#inbox");
+        state.lastListHash = targetHash;
+        navigateToList(targetHash, "", { native: false });
+        renderCurrentView(root);
+        return;
+      }
+
       if (target.closest(".rv-ai-qa-submit")) {
         consumeEvent(event);
         askInboxQuestion(root);
+        return;
+      }
+
+      if (target.closest(".rv-thread-send")) {
+        consumeEvent(event);
+        const input = root.querySelector(".rv-thread-input");
+        if (!(input instanceof HTMLInputElement)) return;
+        const text = (input.value || "").trim();
+        if (!text) return;
+        if (!window.ReskinCompose || typeof window.ReskinCompose.replyToThread !== "function") {
+          logWarn("ReskinCompose.replyToThread not available");
+          return;
+        }
+        input.disabled = true;
+        const sendBtn = root.querySelector(".rv-thread-send");
+        if (sendBtn instanceof HTMLElement) { sendBtn.textContent = "Sending..."; sendBtn.setAttribute("disabled", "true"); }
+        window.ReskinCompose.replyToThread(text).then((ok) => {
+          if (ok) {
+            input.value = "";
+            setTimeout(() => {
+              const latestRoot = document.getElementById(ROOT_ID);
+              if (latestRoot instanceof HTMLElement) renderThread(latestRoot);
+            }, 2000);
+          } else {
+            logWarn("Reply failed — Gmail reply UI not found");
+          }
+        }).catch((err) => {
+          logWarn("Reply error", err);
+        }).finally(() => {
+          input.disabled = false;
+          if (sendBtn instanceof HTMLElement) { sendBtn.textContent = "Send"; sendBtn.removeAttribute("disabled"); }
+        });
         return;
       }
 
@@ -1426,7 +1556,7 @@
         }
       }
 
-      const triageItem = target.closest(".rv-side-triage .rv-triage-item");
+      const triageItem = target.closest(".rv-triage-item");
       if (triageItem instanceof HTMLElement) {
         consumeEvent(event);
         if (state.currentView === "settings") saveSettingsFromDom(root);
@@ -1435,7 +1565,8 @@
         state.currentView = "list";
         state.activeThreadId = "";
         state.lockListView = false;
-        const level = normalize(triageItem.getAttribute("data-triage-level") || "").toLowerCase();
+        const rawLevel = normalize(triageItem.getAttribute("data-triage-level") || "");
+        const level = TRIAGE_LEVELS.find((l) => l.toLowerCase() === rawLevel.toLowerCase()) || rawLevel;
         const nextHash = level === "all" ? "#inbox" : `#inbox?triage=${level}`;
         if (level !== "all" && !TRIAGE_LEVELS.includes(level)) return;
         state.lastListHash = "#inbox";
@@ -1900,7 +2031,7 @@
     return isUseful(value) ? value : "No subject captured";
   }
 
-  function collectMessages(limit = 60) {
+  function collectMessages(limit = 200) {
     const mainRoot = getGmailMainRoot();
     const queryRoot = mainRoot instanceof HTMLElement ? mainRoot : document;
     const linkSelectors = mainRoot instanceof HTMLElement ? SCOPED_LINK_SELECTORS : LINK_SELECTORS;
@@ -2237,71 +2368,829 @@
     return false;
   }
 
+  const BODY_SELECTORS = '.a3s.aiL, .a3s, .ii.gt, .ii, div.ii, div[dir="ltr"], div[dir="auto"], div.ii.gt, [role="textbox"], [class*="a3s"], [class*=" ii "]';
+
   function extractOpenThreadData() {
-    const main = document.querySelector('[role="main"]') || document.body;
+    let main = document.querySelector('[role="main"]') || document.body;
     if (!(main instanceof HTMLElement)) {
-      return { subject: "", sender: "", date: "", body: "" };
+      return { subject: "", messages: [] };
     }
+    let threadExtractFailureStats = null;
 
     const subjectCandidates = Array.from(main.querySelectorAll("h1, h2, [role='heading']"))
       .map((node) => normalize(node.textContent))
       .filter((text) => isUseful(text) && !looksLikeDateOrTime(text));
-    const subject = subjectCandidates[0] || "No subject captured";
+    const subject = subjectCandidates[0] || "No subject";
 
-    const senderNode = main.querySelector('h3 span[email], .gD[email], span[email], [email], [data-hovercard-id]');
-    const sender = senderNode instanceof HTMLElement ? normalize(senderNode.innerText || senderNode.textContent) : "";
+    const messages = [];
+    function extractSender(scope) {
+      const selectors = [
+        '.gD[email]', 'span[email]', '[email]',
+        '[data-hovercard-id]', 'h3 span[dir="auto"]',
+        'h3 span', '.go', 'h4', 'span.gD'
+      ];
+      for (const sel of selectors) {
+        const node = scope.querySelector(sel);
+        if (!(node instanceof HTMLElement)) continue;
+        const emailAttr = node.getAttribute("email") || node.getAttribute("data-hovercard-id") || "";
+        const text = normalize(node.innerText || node.textContent);
+        if (emailAttr && isUseful(emailAttr)) {
+          return text && isUseful(text) ? `${text} <${emailAttr}>` : emailAttr;
+        }
+        if (text && isUseful(text)) return text;
+      }
+      return "";
+    }
 
-    const dateCandidates = Array.from(main.querySelectorAll("span.g3[title], time, span[title], div[title]"))
-      .map((node) => normalize(node.getAttribute("title") || node.innerText || node.textContent))
-      .filter((text) => looksLikeDateOrTime(text) || /\b\d{4}\b/.test(text));
-    const date = dateCandidates[0] || "";
+    function extractDate(scope) {
+      const selectors = ["span.g3[title]", "time", "span[title]", 'td.gH span[title]'];
+      for (const sel of selectors) {
+        const node = scope.querySelector(sel);
+        if (!(node instanceof HTMLElement)) continue;
+        const title = normalize(node.getAttribute("title") || "");
+        if (title && (looksLikeDateOrTime(title) || /\b\d{4}\b/.test(title))) return title;
+        const text = normalize(node.innerText || node.textContent);
+        if (text && (looksLikeDateOrTime(text) || /\b\d{4}\b/.test(text))) return text;
+      }
+      return "";
+    }
 
-    const bodyNodes = Array.from(
-      main.querySelectorAll('.a3s.aiL, .a3s, [data-message-id] .ii.gt, [role="listitem"] div[dir="ltr"], [role="listitem"] div[dir="auto"]')
-    ).filter((node) => node instanceof HTMLElement);
-    bodyNodes.sort((a, b) => normalize(b.innerText || "").length - normalize(a.innerText || "").length);
-    const bodyNode = bodyNodes[0] || null;
-    const bodyHtml = bodyNode instanceof HTMLElement ? bodyNode.innerHTML : "";
-    const bodyText = bodyNode instanceof HTMLElement ? normalize(bodyNode.innerText || bodyNode.textContent) : "";
+    let topContainers;
+    if (state.currentView === "thread" && document.body) {
+      topContainers = document.body.querySelectorAll('[data-message-id]');
+      if (topContainers.length === 0) topContainers = main.querySelectorAll('[data-message-id]');
+    } else {
+      topContainers = main.querySelectorAll('[data-message-id]');
+      if (topContainers.length === 0 && document.body && document.body !== main) {
+        topContainers = document.body.querySelectorAll('[data-message-id]');
+      }
+    }
+    const seenBodies = new Set();
+    const usedNodes = new Set();
+    if (DEBUG_THREAD_EXTRACT) {
+      console.log(`[reskin] === THREAD EXTRACT: [data-message-id] count = ${topContainers.length} ===`);
+    }
+    for (const container of Array.from(topContainers)) {
+      if (!(container instanceof HTMLElement)) continue;
+      if (usedNodes.has(container)) continue;
+      const scope = container;
+      const mid = scope.getAttribute("data-message-id") || "(none)";
+      const sender = extractSender(scope);
+      const date = extractDate(scope);
+      let bodyNode = scope.querySelector(BODY_SELECTORS);
+      let bodyHtml = bodyNode instanceof HTMLElement ? bodyNode.innerHTML : "";
+      let bodyText = bodyNode instanceof HTMLElement ? normalize(bodyNode.innerText || bodyNode.textContent) : "";
+      if ((!bodyText || !bodyHtml) && bodyText.length < 3) {
+        const iframes = scope.querySelectorAll("iframe");
+        for (const ifr of iframes) {
+          try {
+            const doc = ifr.contentDocument;
+            if (!doc || doc === document) continue;
+            const innerBody = doc.querySelector(BODY_SELECTORS);
+            if (innerBody instanceof HTMLElement) {
+              const txt = normalize(innerBody.innerText || innerBody.textContent);
+              if (txt && txt.length > bodyText.length) {
+                bodyNode = innerBody;
+                bodyHtml = innerBody.innerHTML;
+                bodyText = txt;
+                break;
+              }
+            }
+          } catch (_) { /* cross-origin */ }
+        }
+      }
+      const bodyFound = !!(bodyText || bodyHtml);
+      if (DEBUG_THREAD_EXTRACT) {
+        const preview = (bodyText || "").substring(0, 50).replace(/\n/g, " ");
+        console.log(`[reskin] [data-message-id] mid=${mid} bodyFound=${bodyFound} sender=${(sender || "").substring(0, 30)} bodyPreview=${preview || "(empty)"}`);
+      }
+      if (!bodyText && !bodyHtml) {
+        const snippet = normalize(scope.innerText || scope.textContent).slice(0, 300);
+        if (!snippet && !isUseful(sender) && !date) continue;
+        bodyText = snippet || "No content";
+      }
+      const dedupKey = (bodyText || "").replace(/\s+/g, "").substring(0, 300).toLowerCase();
+      const uniqueKey = dedupKey || `${mid}-${date}-${(sender || "").slice(0, 20)}`;
+      if (seenBodies.has(uniqueKey)) continue;
+      seenBodies.add(uniqueKey);
+      usedNodes.add(container);
+      messages.push({
+        sender: isUseful(sender) ? sender : "Unknown sender",
+        date: date || "",
+        bodyHtml: bodyHtml || "",
+        bodyText: bodyText || "No content"
+      });
+    }
+    if (DEBUG_THREAD_EXTRACT) {
+      console.log(`[reskin] After [data-message-id] phase: messages.length = ${messages.length}`);
+    }
+    if (messages.length === 0 && state.currentView === "thread") {
+      for (const ifr of document.querySelectorAll("iframe")) {
+        try {
+          const doc = ifr.contentDocument;
+          if (!doc || doc === document) continue;
+          const iframeBody = doc.body;
+          if (!(iframeBody instanceof HTMLElement)) continue;
+          const iframeContainers = iframeBody.querySelectorAll('[data-message-id]');
+          if (iframeContainers.length === 0) continue;
+          for (const container of Array.from(iframeContainers)) {
+            if (!(container instanceof HTMLElement)) continue;
+            const scope = container;
+            const mid = scope.getAttribute("data-message-id") || "(none)";
+            const sender = extractSender(scope);
+            const date = extractDate(scope);
+            let bodyNode = scope.querySelector(BODY_SELECTORS);
+            let bodyHtml = bodyNode instanceof HTMLElement ? bodyNode.innerHTML : "";
+            let bodyText = bodyNode instanceof HTMLElement ? normalize(bodyNode.innerText || bodyNode.textContent) : "";
+            if ((!bodyText || bodyText.length < 3) && !bodyHtml) {
+              for (const innerIfr of scope.querySelectorAll("iframe")) {
+                try {
+                  const idoc = innerIfr.contentDocument;
+                  if (!idoc || idoc === document) continue;
+                  const innerBody = idoc.querySelector(BODY_SELECTORS);
+                  if (innerBody instanceof HTMLElement) {
+                    const txt = normalize(innerBody.innerText || innerBody.textContent);
+                    if (txt && txt.length > bodyText.length) {
+                      bodyNode = innerBody;
+                      bodyHtml = innerBody.innerHTML;
+                      bodyText = txt;
+                      break;
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+            if (!bodyText && !bodyHtml) {
+              const snippet = normalize(scope.innerText || scope.textContent).slice(0, 300);
+              if (!snippet && !isUseful(sender) && !date) continue;
+              bodyText = snippet || "No content";
+            }
+            const dedupKey = (bodyText || "").replace(/\s+/g, "").substring(0, 300).toLowerCase();
+            const uniqueKey = dedupKey || `ifr-${mid}-${date}-${(sender || "").slice(0, 20)}`;
+            if (seenBodies.has(uniqueKey)) continue;
+            seenBodies.add(uniqueKey);
+            messages.push({
+              sender: isUseful(sender) ? sender : "Unknown sender",
+              date: date || "",
+              bodyHtml: bodyHtml || "",
+              bodyText: bodyText || "No content"
+            });
+          }
+          if (messages.length > 0) break;
+        } catch (_) { /* cross-origin */ }
+      }
+    }
+    const runFallback = messages.length === 0 || state.currentView === "thread";
+    if (runFallback) {
+      let fallbackContainers;
+      if (state.currentView === "thread" && document.body) {
+        fallbackContainers = document.body.querySelectorAll('.kv, .gs, [role="listitem"]');
+        if (fallbackContainers.length === 0) fallbackContainers = main.querySelectorAll('.kv, .gs, [role="listitem"]');
+      } else {
+        fallbackContainers = main.querySelectorAll('.kv, .gs, [role="listitem"]');
+        if (fallbackContainers.length === 0 && document.body && document.body !== main) {
+          fallbackContainers = document.body.querySelectorAll('.kv, .gs, [role="listitem"]');
+        }
+      }
+      if (DEBUG_THREAD_EXTRACT) {
+        console.log(`[reskin] Fallback phase: .kv, .gs, [role="listitem"] count = ${fallbackContainers.length}`);
+      }
+      for (const container of Array.from(fallbackContainers)) {
+        if (!(container instanceof HTMLElement)) continue;
+        let dominated = false;
+        for (const other of Array.from(fallbackContainers)) {
+          if (other !== container && other instanceof HTMLElement && other.contains(container)) { dominated = true; break; }
+        }
+        if (dominated) continue;
+        const scope = container;
+        const sender = extractSender(scope);
+        const date = extractDate(scope);
+        let bodyNode = scope.querySelector(BODY_SELECTORS);
+        let bodyHtml = bodyNode instanceof HTMLElement ? bodyNode.innerHTML : "";
+        let bodyText = bodyNode instanceof HTMLElement ? normalize(bodyNode.innerText || bodyNode.textContent) : "";
+        if ((!bodyText || bodyText.length < 3) && !bodyHtml) {
+          for (const ifr of scope.querySelectorAll("iframe")) {
+            try {
+              const doc = ifr.contentDocument;
+              if (!doc || doc === document) continue;
+              const innerBody = doc.querySelector(BODY_SELECTORS);
+              if (innerBody instanceof HTMLElement) {
+                const txt = normalize(innerBody.innerText || innerBody.textContent);
+                if (txt && txt.length > (bodyText || "").length) {
+                  bodyNode = innerBody;
+                  bodyHtml = innerBody.innerHTML;
+                  bodyText = txt;
+                  break;
+                }
+              }
+            } catch (_) { /* cross-origin */ }
+          }
+        }
+        if (DEBUG_THREAD_EXTRACT) {
+          const preview = (bodyText || "").substring(0, 50).replace(/\n/g, " ");
+          console.log(`[reskin] fallback container tag=${scope.tagName} cls=${(scope.className || "").substring(0, 40)} bodyFound=${!!(bodyText || bodyHtml)} bodyPreview=${preview || "(empty)"}`);
+        }
+        if (!bodyText && !bodyHtml) {
+          const snippet = normalize(scope.innerText || scope.textContent).slice(0, 300);
+          if (!snippet && !isUseful(sender) && !date) continue;
+          bodyText = snippet || "No content";
+        }
+        const dedupKey = (bodyText || "").replace(/\s+/g, "").substring(0, 300).toLowerCase();
+        const uniqueKey = dedupKey || `fb-${date}-${(sender || "").slice(0, 20)}-${scope.className || ""}`;
+        if (seenBodies.has(uniqueKey)) continue;
+        seenBodies.add(uniqueKey);
+        messages.push({
+          sender: isUseful(sender) ? sender : "Unknown sender",
+          date: date || "",
+          bodyHtml: bodyHtml || "",
+          bodyText: bodyText || "No content"
+        });
+      }
+      if (DEBUG_THREAD_EXTRACT) {
+        console.log(`[reskin] After fallback phase: messages.length = ${messages.length}`);
+      }
+    }
+
+    if (messages.length === 0) {
+      if (DEBUG_THREAD_EXTRACT) {
+        console.log(`[reskin] Using single-message fallback (main-level body search)`);
+        const mainHtmlLen = main.innerHTML ? main.innerHTML.length : 0;
+        const mainChildren = Array.from(main.children).slice(0, 12).map((c) => `${c.tagName}.${(c.className || "").toString().slice(0, 40)}`);
+        console.log(`[reskin] Thread DOM diagnostic: main.innerHTML.length=${mainHtmlLen}, main.children(up to 12)=${mainChildren.join(" | ")}`);
+        const iframes = document.querySelectorAll("iframe");
+        iframes.forEach((ifr, i) => {
+          let src = (ifr.src || "").slice(0, 60);
+          let docOk = false;
+          let queryLen = 0;
+          let bestTextLen = 0;
+          try {
+            const doc = ifr.contentDocument;
+            docOk = !!doc && doc !== document;
+            if (docOk) {
+              const nodes = doc.querySelectorAll(".a3s, .ii");
+              queryLen = nodes.length;
+              for (const n of Array.from(nodes).slice(0, 5)) {
+                const len = normalize(n.innerText || n.textContent).length;
+                if (len > bestTextLen) bestTextLen = len;
+              }
+            }
+          } catch (_) { /* ignore */ }
+          console.log(`[reskin] iframe[${i}] src=${src} contentDocumentOk=${docOk} .a3s/.ii count=${queryLen} bestTextLen=${bestTextLen}`);
+        });
+        const broad = Array.from(main.querySelectorAll('div[class*="ii"], div[class*="a3s"]')).slice(0, 8);
+        broad.forEach((el, i) => {
+          const len = normalize(el.innerText || el.textContent).length;
+          const cls = (el.className || "").toString().slice(0, 30);
+          console.log(`[reskin] main broad[${i}] class=${cls} textLen=${len}`);
+        });
+      }
+      const sender = extractSender(main);
+      const dateCandidates = Array.from(main.querySelectorAll("span.g3[title], time, span[title], div[title]"))
+        .map((node) => normalize(node.getAttribute("title") || node.innerText || node.textContent))
+        .filter((text) => looksLikeDateOrTime(text) || /\b\d{4}\b/.test(text));
+      const date = dateCandidates[0] || "";
+      const bodySelectors = `${BODY_SELECTORS}, [data-message-id] .ii.gt, [data-message-id] .a3s, [role="listitem"] div[dir="ltr"], [role="listitem"] div[dir="auto"]`;
+      let bodyNode = null;
+      let bodyHtml = "";
+      let bodyText = "";
+      let bodyNodesCount = 0;
+      if (state.currentView === "thread") {
+        const allIframeNodes = [];
+        const iframes = Array.from(document.querySelectorAll("iframe")).filter((f) => f && f.contentDocument);
+        for (const ifr of iframes) {
+          try {
+            const doc = ifr.contentDocument;
+            if (!doc || doc === document) continue;
+            const nodes = Array.from(doc.querySelectorAll(bodySelectors)).filter((n) => n instanceof HTMLElement);
+            allIframeNodes.push(...nodes);
+            if (nodes.length === 0 && doc.body) {
+              const divs = Array.from(doc.body.querySelectorAll("div")).filter((d) => d instanceof HTMLElement);
+              let bestDiv = null;
+              let bestLen = 0;
+              for (const d of divs) {
+                const t = normalize(d.innerText || d.textContent);
+                if (t.length > bestLen && t.length >= 20 && !d.querySelector("script")) {
+                  bestLen = t.length;
+                  bestDiv = d;
+                }
+              }
+              if (bestDiv && bestLen > (bodyText || "").length) {
+                allIframeNodes.push(bestDiv);
+              }
+            }
+          } catch (_) { /* cross-origin or detached */ }
+        }
+        allIframeNodes.sort((a, b) => normalize(b.innerText || "").length - normalize(a.innerText || "").length);
+        const best = allIframeNodes[0];
+        if (best instanceof HTMLElement && normalize(best.innerText || best.textContent).length >= 3) {
+          bodyNode = best;
+          bodyHtml = best.innerHTML;
+          bodyText = normalize(best.innerText || best.textContent);
+          if (DEBUG_THREAD_EXTRACT) {
+            console.log(`[reskin] Thread-view body from iframe, length=${bodyText.length}`);
+          }
+        }
+      }
+      if (!bodyText || bodyText.length < 3) {
+        let bodyNodes = Array.from(main.querySelectorAll(bodySelectors)).filter((node) => node instanceof HTMLElement);
+        if (bodyNodes.length === 0 && document.body && document.body !== main) {
+          bodyNodes = Array.from(document.body.querySelectorAll(bodySelectors)).filter((node) => node instanceof HTMLElement);
+        }
+        bodyNodesCount = bodyNodes.length;
+        bodyNodes.sort((a, b) => normalize(b.innerText || "").length - normalize(a.innerText || "").length);
+        const bestMain = bodyNodes[0];
+        if (bestMain instanceof HTMLElement && normalize(bestMain.innerText || bestMain.textContent).length >= 3) {
+          bodyNode = bestMain;
+          bodyHtml = bestMain.innerHTML;
+          bodyText = normalize(bestMain.innerText || bestMain.textContent);
+        }
+      }
+      if (!bodyText || bodyText.length < 3) {
+        const iframes = Array.from(document.querySelectorAll("iframe")).filter((f) => f && f.contentDocument);
+        for (const ifr of iframes) {
+          try {
+            const doc = ifr.contentDocument;
+            if (!doc || doc === document) continue;
+            let nodes = Array.from(doc.querySelectorAll(bodySelectors)).filter((node) => node instanceof HTMLElement);
+            if (nodes.length === 0 && doc.body) {
+              const divs = Array.from(doc.body.querySelectorAll("div")).filter((d) => d instanceof HTMLElement);
+              let bestDiv = null;
+              let bestLen = 0;
+              for (const d of divs) {
+                const t = normalize(d.innerText || d.textContent);
+                if (t.length > bestLen && t.length >= 20 && !d.querySelector("script")) {
+                  bestLen = t.length;
+                  bestDiv = d;
+                }
+              }
+              if (bestDiv) nodes = [bestDiv];
+            }
+            nodes.sort((a, b) => normalize(b.innerText || "").length - normalize(a.innerText || "").length);
+            const best = nodes[0];
+            if (best instanceof HTMLElement) {
+              const txt = normalize(best.innerText || best.textContent);
+              if (txt && txt.length > (bodyText || "").length) {
+                bodyNode = best;
+                bodyHtml = best.innerHTML;
+                bodyText = txt;
+                if (DEBUG_THREAD_EXTRACT) {
+                  console.log(`[reskin] Single-message body from iframe, length=${bodyText.length}`);
+                }
+                break;
+              }
+            }
+          } catch (_) { /* cross-origin or detached */ }
+        }
+      }
+      if (DEBUG_THREAD_EXTRACT && (!bodyText || bodyText.length < 3)) {
+        console.log(`[reskin] Single-message fallback: bodyNodes=${bodyNodesCount}, bodyTextLen=${(bodyText || "").length}, iframesChecked=${document.querySelectorAll("iframe").length}`);
+      }
+      const finalBodyText = bodyText || "Message body not captured yet.";
+      if (finalBodyText === "Message body not captured yet.") {
+        threadExtractFailureStats = {
+          dataMessageId: topContainers.length,
+          bodyNodes: bodyNodesCount,
+          iframes: document.querySelectorAll("iframe").length
+        };
+      }
+      messages.push({
+        sender: isUseful(sender) ? sender : "Unknown sender",
+        date,
+        bodyHtml: finalBodyText.length >= 3 ? bodyHtml : "",
+        bodyText: finalBodyText
+      });
+    }
+
+    // Final dedup: one message per unique body content so identical text (e.g. same bubble repeated in DOM) shows once.
+    // For empty/placeholder body, use date+sender so we keep every message in the thread.
+    const dedupByContent = [];
+    const seenBodyKeys = new Set();
+    for (const m of messages) {
+      const raw = (m.bodyText || "").trim();
+      const bodyKey = raw && raw !== "No content" && raw !== "Message body not captured yet."
+        ? raw.replace(/\s+/g, "").substring(0, 300).toLowerCase()
+        : `\0${m.date}-${(m.sender || "").slice(0, 40)}`;
+      if (seenBodyKeys.has(bodyKey)) continue;
+      seenBodyKeys.add(bodyKey);
+      dedupByContent.push(m);
+    }
+    const finalMessages = dedupByContent.length ? dedupByContent : messages;
+
+    if (DEBUG_THREAD_EXTRACT) {
+      console.log(`[reskin] Final messages (after content dedup): ${finalMessages.length} (was ${messages.length})`);
+      finalMessages.forEach((m, i) => {
+        const preview = (m.bodyText || "").substring(0, 50).replace(/\n/g, " ");
+        console.log(`[reskin]   [${i}] sender=${(m.sender || "").substring(0, 35)} body=${preview || "(empty)"}`);
+      });
+      console.log(`[reskin] === END THREAD EXTRACT ===`);
+    }
+    if (finalMessages.length === 1 && (finalMessages[0].bodyText || "").trim() === "Message body not captured yet." && threadExtractFailureStats) {
+      const now = Date.now();
+      const lastLog = state.lastThreadBodyFailLogAt || 0;
+      if (now - lastLog > 5000) {
+        state.lastThreadBodyFailLogAt = now;
+        const s = threadExtractFailureStats;
+        logWarn(
+          `Thread body not captured — [data-message-id]=${s.dataMessageId}, bodyNodes=${s.bodyNodes}, bodyTextLen=0, iframes=${s.iframes}. Set DEBUG_THREAD_EXTRACT=true in content.js for full diagnostics.`
+        );
+      }
+    }
 
     return {
-      subject: cleanSubject(subject, sender, date),
-      sender: isUseful(sender) ? sender : "Unknown sender",
-      date,
-      bodyHtml,
-      bodyText: bodyText || "Message body not captured yet."
+      subject: cleanSubject(subject, finalMessages[0] && finalMessages[0].sender, finalMessages[0] && finalMessages[0].date),
+      messages: finalMessages
     };
   }
+
+  function initialForSender(sender) {
+    const s = normalize(sender || "").trim();
+    const match = s.match(/\b([A-Za-z])/);
+    return match ? match[1].toUpperCase() : "?";
+  }
+
+  function contactKeyFromMessage(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    const s = normalize(msg.sender || "").trim();
+    const emailMatch = s.match(/<([^>]+)>/);
+    if (emailMatch) return emailMatch[1].toLowerCase().trim();
+    if (s.length > 0) return s.toLowerCase();
+    return "";
+  }
+
+  function senderDisplayName(raw) {
+    const s = (raw || "").trim();
+    const m = s.match(/^(.+?)\s*<[^>]+>$/);
+    return m ? m[1].trim() : (s || "");
+  }
+
+  function groupMessagesByContact(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return [];
+    const byKey = new Map();
+    for (const msg of messages) {
+      const key = contactKeyFromMessage(msg);
+      if (!key) continue;
+      if (!byKey.has(key)) {
+        const name = senderDisplayName(msg.sender) || key;
+        byKey.set(key, { contactKey: key, contactName: name, threadIds: [], items: [] });
+      }
+      const g = byKey.get(key);
+      if (!g.threadIds.includes(msg.threadId)) {
+        g.threadIds.push(msg.threadId);
+        g.items.push(msg);
+      }
+    }
+    const groups = Array.from(byKey.values());
+    for (const g of groups) {
+      g.items.sort((a, b) => {
+        const da = normalize(a.date || "").toLowerCase();
+        const db = normalize(b.date || "").toLowerCase();
+        return db.localeCompare(da);
+      });
+      g.threadIds = g.items.map((m) => m.threadId).filter(Boolean);
+      g.latestItem = g.items[0] || null;
+    }
+    return groups;
+  }
+
+  function loadContactChat(group, root) {
+    if (!group || !Array.isArray(group.threadIds) || group.threadIds.length === 0) return;
+    state.contactChatLoading = true;
+    state.contactThreadIds = group.threadIds.slice();
+    state.contactDisplayName = group.contactName || (group.latestItem && senderDisplayName(group.latestItem.sender)) || "Chat";
+    state.activeContactKey = group.contactKey || "";
+    state.currentView = "thread";
+    state.activeThreadId = group.threadIds[0] || "";
+    state.mergedMessages = [];
+    state.currentThreadIdForReply = "";
+    state.lastListHash = "#inbox";
+    window.location.hash = `#inbox/${group.threadIds[0]}`;
+    renderList(root);
+    renderCurrentView(root);
+
+    const accumulated = [];
+    let index = 0;
+
+    function next() {
+      if (index >= group.threadIds.length) {
+        const seenKey = new Set();
+        const merged = [];
+        for (const m of accumulated) {
+          const bodyKey = (m.bodyText || "").replace(/\s+/g, "").substring(0, 300).toLowerCase();
+          const threadIdPart = m._threadId || "";
+          const datePart = (m.date || "").trim().slice(0, 50);
+          const key = `${threadIdPart}-${datePart}-${bodyKey || "\0empty"}`;
+          if (seenKey.has(key)) continue;
+          seenKey.add(key);
+          const { _threadId, ...rest } = m;
+          merged.push(rest);
+        }
+        merged.sort((a, b) => {
+          const da = (a.date || "").trim().toLowerCase();
+          const db = (b.date || "").trim().toLowerCase();
+          return da.localeCompare(db);
+        });
+        state.mergedMessages = merged;
+        state.currentThreadIdForReply = group.threadIds[0] || "";
+        state.contactChatLoading = false;
+        window.location.hash = `#inbox/${group.threadIds[0]}`;
+        const latestRoot = document.getElementById(ROOT_ID);
+        if (latestRoot instanceof HTMLElement) {
+          renderCurrentView(latestRoot);
+          renderThread(latestRoot);
+        }
+        return;
+      }
+      const threadId = group.threadIds[index];
+      window.location.hash = `#inbox/${threadId}`;
+      index += 1;
+      setTimeout(() => {
+        const data = extractOpenThreadData();
+        if (Array.isArray(data.messages)) {
+          for (const m of data.messages) {
+            accumulated.push({ ...m, _threadId: threadId });
+          }
+        }
+        next();
+      }, 800);
+    }
+
+    setTimeout(next, 800);
+  }
+
+  function stripGmailHtmlToClean(html) {
+    const temp = document.createElement("div");
+    temp.innerHTML = html || "";
+    temp.querySelectorAll("style, script, link, meta, head, title, iframe, object, embed, video, audio, canvas, svg, form").forEach((el) => el.remove());
+
+    temp.querySelectorAll("img").forEach((img) => {
+      const src = (img.getAttribute("src") || "").toLowerCase();
+      const w = parseInt(img.getAttribute("width") || "999", 10);
+      const h = parseInt(img.getAttribute("height") || "999", 10);
+      if (w <= 3 || h <= 3 || src.includes("spacer") || src.includes("pixel") || src.includes("track") || src.startsWith("data:")) {
+        img.remove();
+        return;
+      }
+      const alt = (img.getAttribute("alt") || "").trim();
+      if (alt && alt.length > 1) {
+        const span = document.createElement("span");
+        span.textContent = `[${alt}]`;
+        img.replaceWith(span);
+      }
+    });
+
+    temp.querySelectorAll(".gmail_quote, blockquote").forEach((el) => {
+      const text = (el.textContent || "").trim();
+      if (!text) { el.remove(); return; }
+      const marker = document.createElement("div");
+      marker.className = "rv-quoted-block";
+      marker.setAttribute("data-reskin", "true");
+      marker.textContent = text.substring(0, 200) + (text.length > 200 ? "..." : "");
+      el.replaceWith(marker);
+    });
+
+    temp.querySelectorAll("*").forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const tag = el.tagName.toLowerCase();
+      if (tag !== "a") {
+        el.removeAttribute("style");
+        el.removeAttribute("class");
+        el.removeAttribute("bgcolor");
+        el.removeAttribute("background");
+        el.removeAttribute("color");
+        el.removeAttribute("width");
+        el.removeAttribute("height");
+        el.removeAttribute("align");
+        el.removeAttribute("valign");
+        el.removeAttribute("cellpadding");
+        el.removeAttribute("cellspacing");
+        el.removeAttribute("border");
+        el.removeAttribute("face");
+        el.removeAttribute("size");
+      }
+    });
+
+    const tables = temp.querySelectorAll("table");
+    tables.forEach((table) => {
+      const rows = Array.from(table.querySelectorAll("tr"));
+      const lines = [];
+      rows.forEach((row) => {
+        const cells = Array.from(row.querySelectorAll("td, th"));
+        const parts = cells.map((c) => {
+          const links = Array.from(c.querySelectorAll("a[href]"));
+          if (links.length) {
+            return links.map((a) => {
+              const text = (a.textContent || "").trim();
+              const href = a.getAttribute("href") || "";
+              return text ? `<a href="${escapeHtml(href)}">${escapeHtml(text)}</a>` : "";
+            }).filter(Boolean).join(" ");
+          }
+          return (c.textContent || "").trim();
+        }).filter(Boolean);
+        if (parts.length) lines.push(parts.join("  "));
+      });
+      if (lines.length) {
+        const div = document.createElement("div");
+        div.innerHTML = lines.join("<br>");
+        table.replaceWith(div);
+      } else {
+        const text = (table.textContent || "").trim();
+        if (text) {
+          const div = document.createElement("div");
+          div.textContent = text;
+          table.replaceWith(div);
+        } else {
+          table.remove();
+        }
+      }
+    });
+
+    let result = temp.innerHTML;
+    result = result.replace(/<(div|p|br|hr)\s*\/?>\s*<\/(div|p)>\s*/gi, "");
+    result = result.replace(/(<br\s*\/?>){3,}/gi, "<br><br>");
+    return result;
+  }
+
+  function sanitizeForShadow(html) {
+    const temp = document.createElement("div");
+    temp.innerHTML = html || "";
+    temp.querySelectorAll("script, meta, link[rel='stylesheet']").forEach((el) => el.remove());
+    temp.querySelectorAll("img").forEach((img) => {
+      const src = (img.getAttribute("src") || "").toLowerCase();
+      const w = parseInt(img.getAttribute("width") || "999", 10);
+      const h = parseInt(img.getAttribute("height") || "999", 10);
+      if (w <= 2 || h <= 2 || src.includes("spacer") || src.includes("pixel") || src.includes("track")) {
+        img.remove();
+      }
+    });
+    return temp.innerHTML;
+  }
+
+  const SHADOW_EMBED_STYLE = `
+    :host { display: inline-block; max-width: 100%; pointer-events: auto; }
+    .rv-embed-inner {
+      background: #111;
+      color: #ddd;
+      padding: 10px 14px;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      overflow-x: auto;
+      word-break: break-word;
+      pointer-events: auto;
+    }
+    .rv-embed-inner a { color: #00a8fc; pointer-events: auto; }
+    .rv-embed-inner img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+    }
+    .rv-embed-inner table {
+      border-collapse: collapse;
+      max-width: 100%;
+    }
+    .rv-embed-inner blockquote,
+    .rv-embed-inner .gmail_quote {
+      border-left: 3px solid #4e5058;
+      padding-left: 12px;
+      margin: 8px 0;
+      color: #999;
+    }
+  `;
 
   function renderThread(root) {
     const wrap = root.querySelector(".rv-thread-wrap");
     if (!(wrap instanceof HTMLElement)) return;
     const placeholder = root.querySelector(".rv-chat-placeholder");
-    if (placeholder instanceof HTMLElement) placeholder.style.display = "none";
+    if (placeholder instanceof HTMLElement) placeholder.classList.add("is-hidden");
     wrap.style.display = "";
-    const thread = extractOpenThreadData();
 
-    wrap.innerHTML = `
-      <section class="rv-thread" data-reskin="true">
-        <button type="button" class="rv-back" data-reskin="true">Back to inbox</button>
-        <div class="rv-thread-header" data-reskin="true">
-          <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(thread.subject)}</h2>
-          <div class="rv-thread-meta" data-reskin="true">
-            <span class="rv-thread-sender" data-reskin="true">${escapeHtml(thread.sender)}</span>
-            <span class="rv-thread-date" data-reskin="true">${escapeHtml(thread.date)}</span>
+    if (state.contactChatLoading) {
+      wrap.innerHTML = `
+        <section class="rv-thread rv-thread-chat" data-reskin="true">
+          <div class="rv-thread-chat-header" data-reskin="true">
+            <button type="button" class="rv-back" data-reskin="true">\u2190 Back</button>
+            <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(state.contactDisplayName || "Chat")}</h2>
+          </div>
+          <div class="rv-thread-messages" data-reskin="true" style="display:flex;align-items:center;justify-content:center;padding:40px;">
+            <p class="rv-thread-empty" data-reskin="true" style="color:#949ba4;">Loading conversation…</p>
+          </div>
+        </section>
+      `;
+      return;
+    }
+
+    let thread;
+    let messages;
+    if (Array.isArray(state.mergedMessages) && state.mergedMessages.length > 0) {
+      thread = { subject: `Chat with ${state.contactDisplayName || "contact"}` };
+      messages = state.mergedMessages;
+    } else {
+      thread = extractOpenThreadData();
+      messages = Array.isArray(thread.messages) ? thread.messages : [];
+      messages.sort((a, b) => {
+        const da = (a.date || "").trim().toLowerCase();
+        const db = (b.date || "").trim().toLowerCase();
+        return da.localeCompare(db);
+      });
+      const bodyMissing = messages.length === 1 && (messages[0].bodyText || "").trim() === "Message body not captured yet.";
+      if (bodyMissing && state.threadExtractRetry < 3) {
+        state.threadExtractRetry += 1;
+        setTimeout(() => {
+          const latestRoot = document.getElementById(ROOT_ID);
+          if (latestRoot instanceof HTMLElement && state.currentView === "thread") {
+            renderThread(latestRoot);
+          }
+        }, 1100);
+      } else if (!bodyMissing) {
+        state.threadExtractRetry = 0;
+      }
+    }
+    const headerTitle =
+      (Array.isArray(messages) && messages.length > 0 && senderDisplayName(messages[0].sender))
+        ? `Chat with ${senderDisplayName(messages[0].sender)}`
+        : (thread.subject || "Chat");
+    const placeholderBody = "Message body not captured yet.";
+    if (messages.length === 1 && (messages[0].bodyText || "").trim() === placeholderBody && state.activeThreadId && state.snippetByThreadId && state.snippetByThreadId[state.activeThreadId]) {
+      const snippet = normalize(state.snippetByThreadId[state.activeThreadId]);
+      if (snippet) {
+        messages[0].bodyText = snippet;
+        messages[0].bodyHtml = "";
+      }
+    }
+    if (DEBUG_THREAD_EXTRACT) {
+      console.log(`[reskin] renderThread: displaying ${messages.length} message(s) in thread view`);
+    }
+
+    const senderName = (raw) => {
+      const s = (raw || "").trim();
+      const m = s.match(/^(.+?)\s*<[^>]+>$/);
+      return m ? m[1].trim() : s;
+    };
+
+    const messageRows = messages.map((msg, idx) => {
+      const initial = initialForSender(msg.sender);
+      const name = senderName(msg.sender);
+      const separator = idx > 0 ? '<div class="rv-thread-msg-sep" data-reskin="true"></div>' : "";
+      const useEmbed = msg.bodyHtml && (msg.bodyText || "").trim() !== placeholderBody;
+      const bodySlot = useEmbed
+        ? `<div class="rv-thread-msg-embed" data-reskin="true" data-msg-idx="${idx}"></div>`
+        : `<div class="rv-thread-msg-body rv-thread-msg-plain" data-reskin="true">${escapeHtml(msg.bodyText || "")}</div>`;
+      return `${separator}
+        <div class="rv-thread-msg" data-reskin="true">
+          <div class="rv-thread-msg-avatar" data-reskin="true" title="${escapeHtml(msg.sender)}">${escapeHtml(initial)}</div>
+          <div class="rv-thread-msg-content" data-reskin="true">
+            <div class="rv-thread-msg-head" data-reskin="true">
+              <span class="rv-thread-msg-sender" data-reskin="true">${escapeHtml(name)}</span>
+              <span class="rv-thread-msg-date" data-reskin="true">${escapeHtml(msg.date)}</span>
+            </div>
+            ${bodySlot}
           </div>
         </div>
-        <article class="rv-thread-body" data-reskin="true"></article>
+      `;
+    }).join("");
+
+    wrap.innerHTML = `
+      <section class="rv-thread rv-thread-chat" data-reskin="true">
+        <div class="rv-thread-chat-header" data-reskin="true">
+          <button type="button" class="rv-back" data-reskin="true">\u2190 Back</button>
+          <h2 class="rv-thread-subject" data-reskin="true">${escapeHtml(headerTitle)}</h2>
+        </div>
+        <div class="rv-thread-messages" data-reskin="true">
+          ${messageRows || '<div class="rv-thread-empty" data-reskin="true">No messages in this thread.</div>'}
+        </div>
+        <div class="rv-thread-input-bar" data-reskin="true">
+          <input type="text" class="rv-thread-input" placeholder="Type a message..." data-reskin="true" />
+          <button type="button" class="rv-thread-send" data-reskin="true">Send</button>
+        </div>
       </section>
     `;
 
-    const body = wrap.querySelector(".rv-thread-body");
-    if (body instanceof HTMLElement) {
-      if (thread.bodyHtml) {
-        body.innerHTML = `<div class="rv-thread-html" data-reskin="true">${thread.bodyHtml}</div>`;
-      } else {
-        body.innerHTML = `<pre class="rv-thread-plain" data-reskin="true">${escapeHtml(thread.bodyText)}</pre>`;
-      }
+    const embeds = wrap.querySelectorAll(".rv-thread-msg-embed");
+    embeds.forEach((el) => {
+      const idx = parseInt(el.getAttribute("data-msg-idx") || "0", 10);
+      const msg = messages[idx];
+      if (!msg || !msg.bodyHtml) return;
+      const shadow = el.attachShadow({ mode: "open" });
+      const sanitized = sanitizeForShadow(msg.bodyHtml);
+      shadow.innerHTML = `<style>${SHADOW_EMBED_STYLE}</style><div class="rv-embed-inner">${sanitized}</div>`;
+    });
+
+    const threadInput = wrap.querySelector(".rv-thread-input");
+    if (threadInput instanceof HTMLInputElement) {
+      threadInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          const sendBtn = wrap.querySelector(".rv-thread-send");
+          if (sendBtn instanceof HTMLElement) sendBtn.click();
+        }
+      });
+    }
+
+    const msgContainer = wrap.querySelector(".rv-thread-messages");
+    if (msgContainer instanceof HTMLElement) {
+      requestAnimationFrame(() => {
+        msgContainer.scrollTop = msgContainer.scrollHeight;
+      });
     }
   }
 
@@ -2581,7 +3470,7 @@
     const placeholder = root.querySelector(".rv-chat-placeholder");
     const threadWrap = root.querySelector(".rv-thread-wrap");
     const settingsWrap = root.querySelector(".rv-settings-wrap");
-    if (placeholder) placeholder.style.display = state.currentView === "list" ? "" : "none";
+    if (placeholder) placeholder.classList.toggle("is-hidden", state.currentView !== "list");
     if (threadWrap) threadWrap.style.display = state.currentView === "thread" ? "" : "none";
     if (settingsWrap) settingsWrap.style.display = state.currentView === "settings" ? "" : "none";
     if (state.currentView === "settings") {
@@ -2772,9 +3661,13 @@
     const visibleLimit = Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize);
     const visibleMessages = messages.slice(0, Math.max(state.listChunkSize, visibleLimit));
 
-    const listSignature = `${route.hash}|${visibleMessages.map((m) => `${m.threadId}:${m.triageLevel || "u"}`).join(",")}`;
-    if (state.lastListSignature === listSignature && !interactionsLocked()) return;
+    const listSignature = `${route.hash}|${visibleMessages.length}|${visibleMessages.map((m) => `${m.threadId}:${m.triageLevel || "u"}`).join(",")}`;
+    if (state.lastListSignature === listSignature && !interactionsLocked() && visibleMessages.length > 0) return;
     state.lastListSignature = listSignature;
+    state.snippetByThreadId = state.snippetByThreadId || {};
+    for (const m of visibleMessages) {
+      if (m.threadId) state.snippetByThreadId[m.threadId] = m.snippet || "";
+    }
 
     list.innerHTML = "";
 
@@ -2852,78 +3745,128 @@
         }, 900);
       }
     } else {
-      for (const msg of visibleMessages) {
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = "rv-item" + (msg.unread ? " is-unread" : "") + (state.activeThreadId === msg.threadId ? " is-active" : "");
-        item.setAttribute("data-reskin", "true");
-        if (msg.unread) item.setAttribute("title", "Unread");
+      const groups = groupMessagesByContact(visibleMessages);
+      const useGroups = groups.length > 0;
+      const displayItems = useGroups ? groups.map((g) => ({ type: "contact", group: g })) : visibleMessages.map((msg) => ({ type: "single", msg }));
 
-        const level = msg.triageLevel;
-        const badgeClass = level ? `is-${level}` : "is-untriaged";
-        const badgeText = level ? triageLabelText(level) : "Untriaged";
-        const summaryText = getSummaryForMessage(msg);
-        const previewText = normalize(msg.snippet || "") || "No preview available yet.";
-        const hasSummary = Boolean(summaryText);
-        const summaryHtml = hasSummary
-          ? `<div class="rv-row-text has-summary" data-reskin="true">
-              <span class="rv-row-summary" data-reskin="true">${escapeHtml(summaryText)}</span>
-              <span class="rv-row-preview" data-reskin="true">${escapeHtml(previewText)}</span>
-            </div>`
-          : `<div class="rv-row-text no-summary" data-reskin="true">
-              <span class="rv-row-preview is-fallback" data-reskin="true">${escapeHtml(previewText)}</span>
-            </div>`;
+      for (const entry of displayItems) {
+        if (entry.type === "contact") {
+          const g = entry.group;
+          const latest = g.latestItem;
+          if (!latest) continue;
+          const item = document.createElement("button");
+          item.type = "button";
+          const anyUnread = g.items.some((m) => m.unread);
+          const isActive = g.threadIds.includes(state.activeThreadId);
+          item.className = "rv-item" + (anyUnread ? " is-unread" : "") + (isActive ? " is-active" : "");
+          item.setAttribute("data-reskin", "true");
+          const level = latest.triageLevel || (g.items.some((m) => m.triageLevel === "respond") ? "respond" : "");
+          const badgeClass = level ? `is-${level}` : "is-untriaged";
+          const badgeText = level ? triageLabelText(level) : "Untriaged";
+          const summaryText = getSummaryForMessage(latest);
+          const previewText = normalize(latest.snippet || "") || "No preview";
+          const hasSummary = Boolean(summaryText);
+          const displayName = g.contactName + (g.threadIds.length > 1 ? ` (${g.threadIds.length})` : "");
+          const initial = initialForSender(latest.sender);
+          const previewLine = hasSummary ? summaryText : previewText;
 
-        item.innerHTML = `
-          <div class="rv-item-top" data-reskin="true">
-            <span class="rv-subject" data-reskin="true">${escapeHtml(msg.subject)}</span>
-            <span class="rv-item-top-right" data-reskin="true">
-              <span class="rv-date" data-reskin="true">${escapeHtml(msg.date || "")}</span>
-              <button type="button" class="rv-item-server-btn" aria-label="Add or remove from server" data-reskin="true" data-thread-id="${escapeHtml(msg.threadId || "")}">...</button>
-            </span>
-          </div>
-          <div class="rv-sender" data-reskin="true">${escapeHtml(msg.sender)}</div>
-          <div class="rv-triage-row" data-reskin="true">
-            <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
-            ${summaryHtml}
-          </div>
-        `;
+          item.innerHTML = `
+            <div class="rv-item-avatar" data-reskin="true" title="${escapeHtml(g.contactName)}">${escapeHtml(initial)}</div>
+            <div class="rv-item-content" data-reskin="true">
+              <div class="rv-item-top" data-reskin="true">
+                <span class="rv-item-name" data-reskin="true">${escapeHtml(displayName)}</span>
+                <span class="rv-item-meta" data-reskin="true">
+                  <span class="rv-date" data-reskin="true">${escapeHtml(latest.date || "")}</span>
+                  <button type="button" class="rv-item-server-btn" aria-label="Add or remove from server" data-reskin="true" data-thread-id="${escapeHtml(latest.threadId || "")}">⋯</button>
+                </span>
+              </div>
+              <div class="rv-item-preview" data-reskin="true">${escapeHtml(previewLine.slice(0, 120))}${previewLine.length > 120 ? "…" : ""}</div>
+              <div class="rv-triage-row" data-reskin="true">
+                <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
+              </div>
+            </div>
+          `;
 
-        item.addEventListener("click", () => {
-          lockInteractions(900);
-          state.lockListView = false;
-          state.currentView = "thread";
-          state.activeThreadId = msg.threadId;
-          const threadHash = msg.href && msg.href.includes("#")
-            ? msg.href.slice(msg.href.indexOf("#"))
-            : (msg.threadId ? `#inbox/${msg.threadId}` : "");
-          if (threadHash && isThreadHash(threadHash)) {
-            state.lastListHash = "#inbox";
-            window.location.hash = threadHash;
-          } else if (msg.threadId) {
-            state.lastListHash = "#inbox";
-            window.location.hash = `#inbox/${msg.threadId}`;
-          }
-          renderList(root);
-          renderCurrentView(root);
-          const ok = openThread(msg.threadId, msg.href, msg.row);
-          if (!ok) {
-            logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
-            state.currentView = "list";
-            state.activeThreadId = "";
+          item.setAttribute("data-contact-key", g.contactKey || "");
+          item.addEventListener("click", (e) => {
+            if (e.target.closest(".rv-item-server-btn")) return;
+            lockInteractions(900);
+            state.lockListView = false;
+            loadContactChat(g, root);
+          });
+          list.appendChild(item);
+        } else {
+          const msg = entry.msg;
+          const item = document.createElement("button");
+          item.type = "button";
+          item.className = "rv-item" + (msg.unread ? " is-unread" : "") + (state.activeThreadId === msg.threadId ? " is-active" : "");
+          item.setAttribute("data-reskin", "true");
+          if (msg.unread) item.setAttribute("title", "Unread");
+
+          const level = msg.triageLevel;
+          const badgeClass = level ? `is-${level}` : "is-untriaged";
+          const badgeText = level ? triageLabelText(level) : "Untriaged";
+          const summaryText = getSummaryForMessage(msg);
+          const previewText = normalize(msg.snippet || "") || "No preview";
+          const hasSummary = Boolean(summaryText);
+          const displayName = senderDisplayName(msg.sender) || normalize(msg.subject || "") || "No subject";
+          const initial = initialForSender(msg.sender);
+          const previewLine = hasSummary ? summaryText : previewText;
+
+          item.innerHTML = `
+            <div class="rv-item-avatar" data-reskin="true" title="${escapeHtml(msg.sender)}">${escapeHtml(initial)}</div>
+            <div class="rv-item-content" data-reskin="true">
+              <div class="rv-item-top" data-reskin="true">
+                <span class="rv-item-name" data-reskin="true">${escapeHtml(displayName)}</span>
+                <span class="rv-item-meta" data-reskin="true">
+                  <span class="rv-date" data-reskin="true">${escapeHtml(msg.date || "")}</span>
+                  <button type="button" class="rv-item-server-btn" aria-label="Add or remove from server" data-reskin="true" data-thread-id="${escapeHtml(msg.threadId || "")}">⋯</button>
+                </span>
+              </div>
+              <div class="rv-item-preview" data-reskin="true">${escapeHtml(previewLine.slice(0, 120))}${previewLine.length > 120 ? "…" : ""}</div>
+              <div class="rv-triage-row" data-reskin="true">
+                <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
+              </div>
+            </div>
+          `;
+
+          item.addEventListener("click", (e) => {
+            if (e.target.closest(".rv-item-server-btn")) return;
+            lockInteractions(900);
+            state.lockListView = false;
+            state.currentView = "thread";
+            state.activeThreadId = msg.threadId;
+            const threadHash = msg.href && msg.href.includes("#")
+              ? msg.href.slice(msg.href.indexOf("#"))
+              : (msg.threadId ? `#inbox/${msg.threadId}` : "");
+            if (threadHash && isThreadHash(threadHash)) {
+              state.lastListHash = "#inbox";
+              window.location.hash = threadHash;
+            } else if (msg.threadId) {
+              state.lastListHash = "#inbox";
+              window.location.hash = `#inbox/${msg.threadId}`;
+            }
             renderList(root);
             renderCurrentView(root);
-            return;
-          }
-          setTimeout(() => {
-            const latestRoot = document.getElementById(ROOT_ID);
-            if (!(latestRoot instanceof HTMLElement)) return;
-            if (state.currentView !== "thread") return;
-            renderThread(latestRoot);
-          }, 220);
-        });
+            const ok = openThread(msg.threadId, msg.href, msg.row);
+            if (!ok) {
+              logWarn("Failed to open thread from custom view.", { threadId: msg.threadId });
+              state.currentView = "list";
+              state.activeThreadId = "";
+              renderList(root);
+              renderCurrentView(root);
+              return;
+            }
+            setTimeout(() => {
+              const latestRoot = document.getElementById(ROOT_ID);
+              if (!(latestRoot instanceof HTMLElement)) return;
+              if (state.currentView !== "thread") return;
+              renderThread(latestRoot);
+            }, 800);
+          });
 
-        list.appendChild(item);
+          list.appendChild(item);
+        }
       }
 
       queueSummariesForMessages(visibleMessages.slice(0, 30));
@@ -3072,7 +4015,10 @@
       }
 
       const elapsed = Date.now() - state.lastObserverRenderAt;
-      if (elapsed >= Math.max(OBSERVER_MIN_RENDER_GAP_MS, LIST_REFRESH_INTERVAL_MS)) {
+      const listIsEmpty = state.currentView === "list" && state.lastListSignature && state.lastListSignature.indexOf("|0|") !== -1;
+      const renderGap = listIsEmpty ? 1500 : Math.max(OBSERVER_MIN_RENDER_GAP_MS, LIST_REFRESH_INTERVAL_MS);
+      if (elapsed >= renderGap) {
+        if (listIsEmpty) state.lastObserverSignature = "";
         renderFromObserver();
       }
     }, UI_POLL_INTERVAL_MS);
@@ -3100,7 +4046,6 @@
           loadPersistedSummaries().catch((error) => logWarn("Row summary cache bootstrap failed", error));
           applyReskin();
           startObserver();
-          logOnce("observer-started", "info", "Low-power UI poller started (900ms interval).");
         });
     }, 200);
   }
