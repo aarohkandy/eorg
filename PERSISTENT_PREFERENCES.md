@@ -3,7 +3,7 @@
 This file stores repeated user preferences that should be applied at the start of each session.
 
 ## Preference Version
-Current version: `0.2.6`
+Current version: `0.2.7`
 
 Versioning rules:
 - For each normal update to this file, increment by `0.0.1`.
@@ -14,7 +14,7 @@ Versioning rules:
 - If a request is a repeated preference, record it here so the user does not have to repeat it.
 - Keep entries concise and actionable.
 - **Version bumps:** When changing version/status in this project, increment by `0.0.1` unless the user explicitly says otherwise (e.g. `0.1` or `1.0`).
-- **Thread reply (Send):** Both the Send button and Enter in the thread input must submit the reply. There is a single handler: `submitThreadReply(root)` in content.js. Do not add a second code path for "send on Enter" or "send on button" — wire both to this function. Gmail sending is in compose.js `replyToThread()`. See `docs/thread-reply.md` for flow and how to test.
+- **Thread reply (Send):** Both the Send button and Enter in the thread input must submit via `submitThreadReply(root)` in content.js. Gmail send automation returns structured status from `compose.js` `replyToThread(body, opts)` as `{ ok, stage, reason? }`; keep this contract and preserve input text on failure.
 
 ## Change Log
 - `0.0.1` Initial file created with user-defined versioning policy.
@@ -43,3 +43,4 @@ Versioning rules:
 - `0.2.4` Send button sends Gmail reply: wired compose.js, replyToThread via native Gmail reply UI, Enter key support
 - `0.2.5` Fix triple-duplicate messages: dedup by whitespace-stripped body text, query [data-message-id] first then fallback
 - `0.2.6` Thread reply: single submitThreadReply() for Send + Enter; added docs/thread-reply.md for flow and testing
+- `0.2.7` Harden reply send flow: structured reply result, send verification, hash/hydration lock during send, and actionable failure stage labels

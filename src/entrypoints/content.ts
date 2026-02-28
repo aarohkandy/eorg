@@ -1,6 +1,7 @@
 import '../../inboxsdk.js';
 import '../../ai.js';
 import '../../triage.js';
+import '../../compose.js';
 import '../../content.js';
 
 export default defineContentScript({

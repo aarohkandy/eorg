@@ -53,13 +53,73 @@ async def main() -> int:
         await page.wait_for_selector("#reskin-root .rv-ai-qa-input", timeout=10000)
         await page.fill("#reskin-root .rv-ai-qa-input", "what happened yesterday")
         await page.click("#reskin-root .rv-ai-qa-submit")
-        await page.wait_for_timeout(900)
-        answer = await page.text_content("#reskin-root .rv-ai-qa-answer")
+        await page.wait_for_function(
+            """
+            () => {
+              const nodes = Array.from(document.querySelectorAll('#reskin-root .rv-chat-msg.is-assistant .rv-chat-bubble'));
+              if (!nodes.length) return false;
+              const text = (nodes[nodes.length - 1].textContent || '').trim();
+              return text.length > 0 && !/^Thinking\\.{0,3}$/i.test(text);
+            }
+            """,
+            timeout=12000,
+        )
+        answer = await page.evaluate(
+            """
+            () => {
+              const nodes = Array.from(document.querySelectorAll('#reskin-root .rv-chat-msg.is-assistant .rv-chat-bubble'));
+              if (!nodes.length) return '';
+              return (nodes[nodes.length - 1].textContent || '').trim();
+            }
+            """
+        )
+
+        await page.evaluate(
+            """
+            () => {
+              const main = document.querySelector('main[role="main"]');
+              if (!(main instanceof HTMLElement)) return;
+              main.innerHTML = `
+                <section class="h7">
+                  <div data-message-id="msg-a">
+                    <span class="gD" email="alerts@example.com">alerts@example.com</span>
+                    <span class="g3" title="Feb 25, 2026, 4:51 PM">Feb 25</span>
+                    <div class="a3s aiL">same-body-text</div>
+                  </div>
+                  <div data-message-id="msg-b">
+                    <span class="gD" email="alerts@example.com">alerts@example.com</span>
+                    <span class="g3" title="Feb 25, 2026, 4:52 PM">Feb 25</span>
+                    <div class="a3s aiL">same-body-text</div>
+                  </div>
+                </section>
+              `;
+              window.location.hash = '#thread-f:111';
+            }
+            """
+        )
+        await page.wait_for_selector("#reskin-root .rv-thread-msg", timeout=10000)
+        dedup_result = await page.evaluate(
+            """
+            () => {
+              const bodies = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg .rv-thread-msg-body'))
+                .map((node) => ((node && node.textContent) || '').trim())
+                .filter(Boolean);
+              return {
+                count: bodies.length,
+                sameBodyCount: bodies.filter((text) => text === 'same-body-text').length,
+                bodies
+              };
+            }
+            """
+        )
         await browser.close()
 
     answer = (answer or "").strip()
     print("ANSWER", answer)
-    return 0 if "Yesterday:" in answer else 1
+    print("DEDUP_RESULT", dedup_result)
+    ok_answer = "Yesterday:" in answer
+    ok_dedup = dedup_result.get("sameBodyCount", 0) >= 2
+    return 0 if ok_answer and ok_dedup else 1
 
 
 if __name__ == "__main__":

@@ -1360,7 +1360,7 @@ body[data-reskin-mode="viewer"] {
   padding: 16px 16px 8px !important;
   display: flex !important;
   flex-direction: column !important;
-  gap: 0 !important;
+  gap: 10px !important;
   pointer-events: auto !important;
 }
 
@@ -1371,21 +1371,21 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-thread-msg-sep {
-  border-top: 1px dashed #4e5058 !important;
-  margin: 12px 0 !important;
-  flex: 0 0 auto !important;
+  display: none !important;
 }
 
 #reskin-root .rv-thread-msg {
   display: flex !important;
   align-items: flex-start !important;
   gap: 12px !important;
-  padding: 8px 4px !important;
-  border-radius: 4px !important;
+  width: 100% !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  justify-content: flex-start !important;
 }
 
 #reskin-root .rv-thread-msg:hover {
-  background: #111111 !important;
+  background: transparent !important;
 }
 
 #reskin-root .rv-thread-input-bar {
@@ -1450,8 +1450,10 @@ body[data-reskin-mode="viewer"] {
 }
 
 #reskin-root .rv-thread-msg-content {
-  flex: 1 1 auto !important;
+  flex: 0 1 72% !important;
   min-width: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
 }
 
 #reskin-root .rv-thread-msg-head {
@@ -1470,6 +1472,37 @@ body[data-reskin-mode="viewer"] {
 #reskin-root .rv-thread-msg-date {
   font-size: 12px !important;
   color: #949ba4 !important;
+}
+
+#reskin-root .rv-thread-msg-status {
+  font-size: 11px !important;
+  color: #949ba4 !important;
+}
+
+#reskin-root .rv-thread-msg--failed .rv-thread-msg-status {
+  color: #ff8b8b !important;
+}
+
+#reskin-root .rv-thread-msg--incoming {
+  justify-content: flex-start !important;
+}
+
+#reskin-root .rv-thread-msg--outgoing {
+  justify-content: flex-end !important;
+  flex-direction: row-reverse !important;
+  gap: 8px !important;
+}
+
+#reskin-root .rv-thread-msg--outgoing .rv-thread-msg-avatar {
+  display: none !important;
+}
+
+#reskin-root .rv-thread-msg--outgoing .rv-thread-msg-content {
+  align-items: flex-end !important;
+}
+
+#reskin-root .rv-thread-msg--outgoing .rv-thread-msg-head {
+  justify-content: flex-end !important;
 }
 
 /* Shadow DOM embed card: wraps original email HTML in an isolated container */
@@ -1501,6 +1534,18 @@ body[data-reskin-mode="viewer"] {
   max-width: 520px !important;
   width: fit-content !important;
   display: inline-block !important;
+}
+
+#reskin-root .rv-thread-msg--incoming .rv-thread-msg-body.rv-thread-msg-plain {
+  background: #15171a !important;
+  border-color: #2a2d31 !important;
+  color: #eceff1 !important;
+}
+
+#reskin-root .rv-thread-msg--outgoing .rv-thread-msg-body.rv-thread-msg-plain {
+  background: #1b66ff !important;
+  border-color: #1b66ff !important;
+  color: #ffffff !important;
 }
 
 #reskin-root .rv-thread-meta {

@@ -10,8 +10,10 @@
     "zip": "wxt zip",
     "typecheck": "tsc --noEmit",
     "test:headless": "bash tests/headless/run_all.sh",
-    "test:triage": ".venv/bin/python tests/headless/run_triage_harness.py",
-    "test:chat": ".venv/bin/python tests/headless/run_chat_harness.py"
+    "test:triage": ".venv/bin/python3 tests/headless/run_triage_harness.py",
+    "test:chat": ".venv/bin/python3 tests/headless/run_chat_harness.py",
+    "test:compose": ".venv/bin/python3 tests/headless/run_compose_harness.py",
+    "test:reply": ".venv/bin/python3 tests/headless/run_reply_harness.py"
   },
   "devDependencies": {
     "@inboxsdk/core": "2.2.11",

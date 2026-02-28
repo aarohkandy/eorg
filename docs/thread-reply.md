@@ -2,7 +2,7 @@
 
 ## One sentence
 
-**Send button and Enter in the thread input both call `submitThreadReply(root)` in content.js, which uses `ReskinCompose.replyToThread(text)` in compose.js to send via Gmail’s UI.**
+**Send button and Enter in the thread input both call `submitThreadReply(root)` in content.js, which first forces native thread context, then calls `ReskinCompose.replyToThread(text, { threadId, mailbox, threadHintHref, forceThreadContext, timeoutMs })` in compose.js and expects `{ ok, stage, reason? }`.**
 
 ## Code locations
 
@@ -12,22 +12,23 @@
 | Single submit handler | content.js | `submitThreadReply(root)` — call this for both Send click and Enter |
 | Send click | content.js | Root click handler: `target.closest(".rv-thread-send")` → `submitThreadReply(root)` |
 | Enter key | content.js | In `renderThread()`, threadInput keydown Enter → `submitThreadReply(root)` (no duplicate logic) |
-| Gmail: Reply + fill + Send | compose.js | `replyToThread(body)` — finds Reply, fills body, finds Send or Ctrl+Enter |
+| Gmail: Reply + fill + Send | compose.js | `replyToThread(body, opts)` — staged reply acquisition + structural send targeting + send verification |
 
 ## When changing “send” behavior
 
 1. **UI only (e.g. add a shortcut):** In content.js, add another path that calls `submitThreadReply(root)`. Do not duplicate the actual send logic.
-2. **Gmail side (reply not sending):** In compose.js, adjust `replyToThread`, `findReplyButton`, `waitForReplyCompose`, `findSendInRoot`, or `sendViaKeyboard`. Gmail’s DOM changes; selectors are in constants at the top of compose.js.
+2. **Gmail side (reply not sending):** In compose.js, adjust staged acquisition (`findExistingReplyCompose`, `openReplyByContainer`, `findReplyButton` fallback), send detection (`findSendInRoot`), or verification (`waitForSendCompletion`).
 
 ## How to test quickly
 
 1. **In browser:** Reload the extension, open Gmail, open a thread in the reskin, type in the input, then:
    - Click **Send** → reply should send.
    - Clear, type again, press **Enter** → same behavior.
+   - If Gmail cannot send, input text should remain and button should show a short retry label with failure stage.
 2. **With Cursor + Browser MCP:** Use the cursor-ide-browser MCP: navigate to Gmail, open a thread, use `browser_type` in the input, then `browser_snapshot` to find the Send button and simulate click or keydown to verify both paths.
 
 ## Why this helps
 
 - One handler (`submitThreadReply`) so “send on button” and “send on Enter” can’t get out of sync.
 - PERSISTENT_PREFERENCES and this doc tell the AI to wire both to that handler instead of adding a second implementation.
-- When it still doesn’t work, the failure is usually in compose.js (Gmail DOM/selectors), not in the UI wiring.
+- Failures now return `stage`/`reason` for targeted diagnosis instead of generic “reply failed.”

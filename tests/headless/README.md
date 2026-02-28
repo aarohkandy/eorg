@@ -13,8 +13,10 @@ python3 -m venv .venv
 ## Run
 
 ```bash
-.venv/bin/python tests/headless/run_triage_harness.py
-.venv/bin/python tests/headless/run_chat_harness.py
+.venv/bin/python3 tests/headless/run_triage_harness.py
+.venv/bin/python3 tests/headless/run_chat_harness.py
+.venv/bin/python3 tests/headless/run_compose_harness.py
+.venv/bin/python3 tests/headless/run_reply_harness.py
 ```
 
-Both scripts exit with code `0` on success.
+All scripts exit with code `0` on success.
