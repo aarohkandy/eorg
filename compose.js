@@ -219,6 +219,9 @@
         threadId: "",
         mailbox: "",
         threadHintHref: "",
+        conversationKey: "",
+        contactEmail: "",
+        activeAccountEmail: "",
         forceThreadContext: true,
         timeoutMs: DEFAULT_REPLY_TIMEOUT_MS
       };
@@ -228,6 +231,9 @@
       threadId: String(opts.threadId || ""),
       mailbox: String(opts.mailbox || ""),
       threadHintHref: String(opts.threadHintHref || ""),
+      conversationKey: String(opts.conversationKey || ""),
+      contactEmail: String(opts.contactEmail || ""),
+      activeAccountEmail: String(opts.activeAccountEmail || ""),
       forceThreadContext: opts.forceThreadContext === false ? false : true,
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(30000, Math.max(2000, timeoutMs)) : DEFAULT_REPLY_TIMEOUT_MS
     };
@@ -897,9 +903,47 @@
     return true;
   }
 
-  async function waitForSendCompletion(composeRoot, replyContainer, timeoutMs = DEFAULT_SEND_VERIFY_TIMEOUT_MS) {
+  function normalizedEvidenceText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function findVisibleSendIndicator() {
+    const nodes = Array.from(document.querySelectorAll('[role="alert"], [aria-live], .bAq, .vh, .aT'));
+    for (const node of nodes) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (!isVisible(node)) continue;
+      const text = normalizedEvidenceText(node.textContent || node.innerText || "");
+      if (!text) continue;
+      if (text.includes("message sent")) return "toast-message-sent";
+      if (text.includes("sent")) return "toast-sent";
+    }
+    return "";
+  }
+
+  function bodyFieldShowsSendEvidence(bodyField, originalText) {
+    if (!(bodyField instanceof HTMLElement)) return "";
+    const original = normalizedEvidenceText(originalText || "");
+    if (!original) return "";
+    const current = normalizedEvidenceText(bodyField.innerText || bodyField.textContent || "");
+    if (!current) return "body-cleared";
+    const anchor = shortText(original, 34);
+    if (!anchor) return "";
+    if (!current.includes(anchor) && current.length <= Math.max(24, Math.floor(original.length * 0.38))) {
+      return "body-changed";
+    }
+    return "";
+  }
+
+  async function waitForSendCompletion(
+    composeRoot,
+    replyContainer,
+    timeoutMs = DEFAULT_SEND_VERIFY_TIMEOUT_MS,
+    options = {}
+  ) {
     return new Promise((resolve) => {
       const startedAt = Date.now();
+      const bodyField = options && options.bodyField instanceof HTMLElement ? options.bodyField : null;
+      const originalText = options && typeof options.originalText === "string" ? options.originalText : "";
       const isClosed = () => {
         if (!(composeRoot instanceof HTMLElement)) return true;
         if (!composeRoot.isConnected) return true;
@@ -910,7 +954,19 @@
       const tryResolve = () => {
         if (isClosed()) {
           cleanup();
-          resolve(true);
+          resolve({ ok: true, reason: "compose-closed" });
+          return true;
+        }
+        const sendIndicator = findVisibleSendIndicator();
+        if (sendIndicator) {
+          cleanup();
+          resolve({ ok: true, reason: sendIndicator });
+          return true;
+        }
+        const bodyEvidence = bodyFieldShowsSendEvidence(bodyField, originalText);
+        if (bodyEvidence) {
+          cleanup();
+          resolve({ ok: true, reason: bodyEvidence });
           return true;
         }
         return false;
@@ -919,14 +975,14 @@
         if (tryResolve()) return;
         if (Date.now() - startedAt > timeoutMs) {
           cleanup();
-          resolve(false);
+          resolve({ ok: false, reason: "timeout" });
         }
       }, 120);
       const observer = new MutationObserver(() => {
         if (tryResolve()) return;
         if (Date.now() - startedAt > timeoutMs) {
           cleanup();
-          resolve(false);
+          resolve({ ok: false, reason: "timeout" });
         }
       });
       const cleanup = () => {
@@ -977,6 +1033,9 @@
         threadId: shortText(options.threadId || "", 80),
         mailbox: shortText(options.mailbox || "", 40),
         threadHintHref: shortText(options.threadHintHref || "", 120),
+        conversationKey: shortText(options.conversationKey || "", 120),
+        contactEmail: shortText(options.contactEmail || "", 120),
+        activeAccountEmail: shortText(options.activeAccountEmail || "", 120),
         forceThreadContext: options.forceThreadContext !== false,
         timeoutMs: options.timeoutMs
       },
@@ -1125,11 +1184,21 @@
       if (!sendButton) {
         sendViaKeyboard(bodyField);
         debug.send.keyboardAttempted = true;
-        const keyboardOnlyVerified = await waitForSendCompletion(acquired.root, acquired.replyContainer, 2200);
-        debug.send.keyboardOnlyVerified = keyboardOnlyVerified;
-        if (keyboardOnlyVerified) {
-          return finish(asResult(true, "sendVerifiedKeyboardOnly"), {
-            sendMethod: "keyboardOnly"
+        const keyboardOnlyResult = await waitForSendCompletion(
+          acquired.root,
+          acquired.replyContainer,
+          2200,
+          { bodyField, originalText: text }
+        );
+        debug.send.keyboardOnlyVerified = Boolean(keyboardOnlyResult && keyboardOnlyResult.ok);
+        debug.send.keyboardOnlyReason = shortText(keyboardOnlyResult && keyboardOnlyResult.reason ? keyboardOnlyResult.reason : "", 40);
+        if (keyboardOnlyResult && keyboardOnlyResult.ok) {
+          const keyboardOnlyStage = keyboardOnlyResult.reason === "compose-closed"
+            ? "sendVerifiedKeyboardOnly"
+            : "sendLikelyKeyboardOnly";
+          return finish(asResult(true, keyboardOnlyStage), {
+            sendMethod: "keyboardOnly",
+            sendEvidence: keyboardOnlyResult.reason || ""
           });
         }
         return finish(asResult(false, "sendButton", "send-button-not-found"), {
@@ -1140,21 +1209,42 @@
 
       dispatchMouseSequence(sendButton);
       debug.send.sendMethod = "button";
-      const verified = await waitForSendCompletion(acquired.root, acquired.replyContainer, Math.min(options.timeoutMs, DEFAULT_SEND_VERIFY_TIMEOUT_MS));
-      debug.send.buttonVerified = verified;
-      if (verified) {
-        return finish(asResult(true, "sendVerified"), {
-          sendMethod: "button"
+      const buttonResult = await waitForSendCompletion(
+        acquired.root,
+        acquired.replyContainer,
+        Math.min(options.timeoutMs, DEFAULT_SEND_VERIFY_TIMEOUT_MS),
+        { bodyField, originalText: text }
+      );
+      debug.send.buttonVerified = Boolean(buttonResult && buttonResult.ok);
+      debug.send.buttonVerifyReason = shortText(buttonResult && buttonResult.reason ? buttonResult.reason : "", 40);
+      if (buttonResult && buttonResult.ok) {
+        const buttonStage = buttonResult.reason === "compose-closed" ? "sendVerified" : "sendLikely";
+        return finish(asResult(true, buttonStage), {
+          sendMethod: "button",
+          sendEvidence: buttonResult.reason || ""
         });
       }
 
       sendViaKeyboard(bodyField);
       debug.send.keyboardFallbackAttempted = true;
-      const keyboardVerified = await waitForSendCompletion(acquired.root, acquired.replyContainer, 1800);
-      debug.send.keyboardFallbackVerified = keyboardVerified;
-      if (keyboardVerified) {
-        return finish(asResult(true, "sendVerifiedKeyboard"), {
-          sendMethod: "button+keyboardFallback"
+      const keyboardFallbackResult = await waitForSendCompletion(
+        acquired.root,
+        acquired.replyContainer,
+        1800,
+        { bodyField, originalText: text }
+      );
+      debug.send.keyboardFallbackVerified = Boolean(keyboardFallbackResult && keyboardFallbackResult.ok);
+      debug.send.keyboardFallbackReason = shortText(
+        keyboardFallbackResult && keyboardFallbackResult.reason ? keyboardFallbackResult.reason : "",
+        40
+      );
+      if (keyboardFallbackResult && keyboardFallbackResult.ok) {
+        const keyboardStage = keyboardFallbackResult.reason === "compose-closed"
+          ? "sendVerifiedKeyboard"
+          : "sendLikelyKeyboard";
+        return finish(asResult(true, keyboardStage), {
+          sendMethod: "button+keyboardFallback",
+          sendEvidence: keyboardFallbackResult.reason || ""
         });
       }
 

@@ -1,5 +1,10 @@
 # Thread reply (Send) — where it lives and how to test
 
+## Scope note (2026-02-28)
+
+The thread-first timeline update is read/render focused. Send behavior is intentionally unchanged in this
+pass: bottom input Send and Enter still use the same existing send pipeline below.
+
 ## One sentence
 
 **Send button and Enter in the thread input both call `submitThreadReply(root)` in content.js, which first forces native thread context, then calls `ReskinCompose.replyToThread(text, { threadId, mailbox, threadHintHref, forceThreadContext, timeoutMs })` in compose.js and expects `{ ok, stage, reason? }`.**

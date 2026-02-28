@@ -1452,6 +1452,7 @@ body[data-reskin-mode="viewer"] {
 #reskin-root .rv-thread-msg-content {
   flex: 0 1 72% !important;
   min-width: 0 !important;
+  max-width: min(78%, 760px) !important;
   display: flex !important;
   flex-direction: column !important;
 }
@@ -1505,6 +1506,14 @@ body[data-reskin-mode="viewer"] {
   justify-content: flex-end !important;
 }
 
+#reskin-root .rv-thread-msg--optimistic .rv-thread-msg-body.rv-thread-msg-plain {
+  opacity: 0.88 !important;
+}
+
+#reskin-root .rv-thread-msg--failed .rv-thread-msg-body.rv-thread-msg-plain {
+  border-color: #8b3d3d !important;
+}
+
 /* Shadow DOM embed card: wraps original email HTML in an isolated container */
 #reskin-root .rv-thread-msg-embed {
   border: 1px solid #2a2a2a !important;
@@ -1546,6 +1555,20 @@ body[data-reskin-mode="viewer"] {
   background: #1b66ff !important;
   border-color: #1b66ff !important;
   color: #ffffff !important;
+}
+
+@media (max-width: 900px) {
+  #reskin-root .rv-thread-messages {
+    padding: 12px 10px 8px !important;
+  }
+
+  #reskin-root .rv-thread-msg-content {
+    max-width: 88% !important;
+  }
+
+  #reskin-root .rv-thread-input-bar {
+    padding: 10px 10px !important;
+  }
 }
 
 #reskin-root .rv-thread-meta {

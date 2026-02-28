@@ -17,7 +17,7 @@ A Manifest V3 Chrome extension that overlays Gmail with a custom full-screen vie
 - `ai.js`: Provider settings and AI request pipeline (Groq/OpenRouter/Ollama).
 - `triage.js`: Gmail label apply + fallback logic and triage label detection.
 - `styles.css`: Full visual reskin and layout styling.
-- `compose.js`: Compose/send automation helper module (currently not wired in `manifest.json`).
+- `compose.js`: Compose/send automation helper module used by thread reply send flow.
 - `threads.js`: Alternate thread extraction helper module (currently not wired in `manifest.json`).
 - `tests/headless/`: Playwright harnesses for triage and Ask Inbox regression tests.
 - `docs/tooling.md`: WXT/Playwright integration notes.
@@ -40,6 +40,14 @@ A Manifest V3 Chrome extension that overlays Gmail with a custom full-screen vie
 
 Use DevTools Console on Gmail and filter by `[reskin]`.
 
+Page-console bridge (works from normal DevTools page context):
+
+- `await window.ReskinChatDebug.enable()`
+- `await window.ReskinChatDebug.dumpState()`
+- `await window.ReskinChatDebug.dumpMailboxCache()`
+- `await window.ReskinChatDebug.dumpAccountState()`
+- `await window.ReskinChatDebug.dumpReplyDebug()`
+
 Expected lifecycle logs:
 
 - `Waiting for Gmail landmarks...`
@@ -47,6 +55,10 @@ Expected lifecycle logs:
 - `Extractor source: rows|links|rows+links`
 - `Rendered N messages`
 - `Mutation observer started (debounced 75ms).`
+- `thread-extract:source` and `thread-render:timeline` while opening a thread
+
+`InboxSDK` injection errors can appear in console on some Gmail builds. They are non-fatal for timeline
+rendering: the extension automatically falls back to DOM extraction (`inboxsdk:fallback-dom`).
 
 If you see `No messages captured. Gmail selectors did not match this view.`:
 
@@ -66,7 +78,7 @@ If you see `No messages captured. Gmail selectors did not match this view.`:
 
 - Gmail DOM changes can still break extraction and require selector updates.
 - The extension currently targets Chromium-based browsers.
-- `compose.js` and `threads.js` are helper modules and not part of current runtime unless added to `manifest.json`.
+- `threads.js` is a helper module and not part of current runtime unless added to `manifest.json`.
 
 ## Security and Privacy
 

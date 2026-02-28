@@ -18,6 +18,7 @@
         "styles.css"
       ],
       "js": [
+        "inboxsdk.js",
         "ai.js",
         "triage.js",
         "compose.js",
@@ -29,7 +30,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "styles.css"
+        "styles.css",
+        "page-debug-bridge.js"
       ],
       "matches": [
         "https://mail.google.com/*"
