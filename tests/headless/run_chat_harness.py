@@ -70,6 +70,17 @@ async def main() -> int:
             }
             """
         )
+        startup_filter_result = await page.evaluate(
+            """
+            () => {
+              const hash = String(window.location.hash || "");
+              return {
+                hash,
+                hasTriage: /[?&]triage=/i.test(hash)
+              };
+            }
+            """
+        )
         await page.fill("#reskin-root .rv-ai-qa-input", "what happened yesterday")
         await page.click("#reskin-root .rv-ai-qa-submit")
         await page.wait_for_function(
@@ -135,48 +146,101 @@ async def main() -> int:
         await page.evaluate(
             """
             () => {
+              let accountNode = document.getElementById('acct');
+              if (!(accountNode instanceof HTMLElement)) {
+                accountNode = document.createElement('div');
+                accountNode.id = 'acct';
+                document.body.appendChild(accountNode);
+              }
+              accountNode.setAttribute('data-email', 'me@example.com');
+              accountNode.textContent = 'me@example.com';
+
               const main = document.querySelector('main[role="main"]');
               if (!(main instanceof HTMLElement)) return;
               main.innerHTML = `
                 <table>
-                  <tr role="row" class="zA" data-thread-id="#thread-f:222" aria-label="aaroh, hello, Feb 25">
+                  <tr role="row" class="zA" data-thread-id="thread-f:222" aria-label="aaroh@example.com, hello, Feb 25">
                     <td><span class="yP">aaroh@example.com</span></td>
                     <td><span class="bog">Hello Thread</span></td>
                     <td><span class="y2">HELLOOOOO</span></td>
                     <td><span>Feb 25</span></td>
                     <td><a href="#inbox/thread-f:222">open</a></td>
                   </tr>
-                  <tr role="row" class="zA" data-thread-id="thread-f:222" aria-label="aaroh, hello, Feb 25">
-                    <td><span class="yP">aaroh@example.com</span></td>
-                    <td><span class="bog">Hello Thread</span></td>
-                    <td><span class="y2">HELLOOOOO</span></td>
+                  <tr role="row" class="zA" data-thread-id="thread-f:223" aria-label="me@example.com to aaroh@example.com, Feb 25">
+                    <td><span class="yP">me@example.com</span></td>
+                    <td><span class="bog">Reply Thread</span></td>
+                    <td><span class="y2">MY-REPLY</span></td>
                     <td><span>Feb 25</span></td>
-                    <td><a href="#sent/f:222">open</a></td>
+                    <td><a href="#sent/thread-f:223">open</a></td>
                   </tr>
                 </table>
               `;
-              const mountThread = () => {
-                main.innerHTML = `
+              const threadMarkup = {
+                "thread-f:222": `
                   <section class="h7">
-                    <div data-message-id="msg-222">
+                    <div data-message-id="msg-222-a">
                       <span class="gD" email="aaroh@example.com">aaroh@example.com</span>
-                      <span class="g3" title="Feb 25, 2026, 4:51 PM">Feb 25</span>
+                      <span class="g3" title="Feb 25">Feb 25</span>
                       <div class="a3s aiL">HELLOOOOO</div>
                     </div>
+                    <div data-message-id="msg-222-b">
+                      <span class="gD" email="aaroh@example.com">aaroh@example.com</span>
+                      <span class="g3" title="Feb 25">Feb 25</span>
+                      <div class="a3s aiL">SAME-DOUBLE</div>
+                    </div>
+                    <div data-message-id="msg-222-c">
+                      <span class="gD" email="aaroh@example.com">aaroh@example.com</span>
+                      <span class="g3" title="Feb 25">Feb 25</span>
+                      <div class="a3s aiL">SAME-DOUBLE</div>
+                    </div>
                   </section>
-                `;
-                window.location.hash = '#inbox/thread-f:222';
+                `,
+                "thread-f:223": `
+                  <section class="h7">
+                    <div data-message-id="msg-223-a">
+                      <span class="gD" email="me@example.com">me@example.com</span>
+                      <span class="g3" title="Feb 25">Feb 25</span>
+                      <div class="a3s aiL">MY-REPLY</div>
+                    </div>
+                  </section>
+                `
               };
+              const mountThread = (threadId, updateHash = true) => {
+                const markup = threadMarkup[threadId];
+                if (!markup) return false;
+                main.innerHTML = markup;
+                if (updateHash) {
+                  const nextHash = `#inbox/${threadId}`;
+                  if (window.location.hash !== nextHash) {
+                    window.location.hash = nextHash;
+                  }
+                }
+                return true;
+              };
+              const mountThreadFromHash = () => {
+                const hash = String(window.location.hash || "");
+                const match = hash.match(/(thread-f:[A-Za-z0-9_-]+)/i);
+                if (!match || !match[1]) return;
+                mountThread(match[1], false);
+              };
+              if (!window.__chatHarnessThreadHashBound) {
+                window.addEventListener('hashchange', mountThreadFromHash);
+                window.__chatHarnessThreadHashBound = true;
+              }
               for (const row of Array.from(main.querySelectorAll('tr[role="row"]'))) {
                 row.addEventListener('click', (event) => {
                   event.preventDefault();
-                  mountThread();
+                  const threadId = String(row.getAttribute('data-thread-id') || '').replace(/^#/, '');
+                  mountThread(threadId || 'thread-f:222');
                 });
               }
               for (const link of Array.from(main.querySelectorAll('a[href]'))) {
                 link.addEventListener('click', (event) => {
                   event.preventDefault();
-                  mountThread();
+                  const href = String(link.getAttribute('href') || '');
+                  const match = href.match(/(thread-f:[A-Za-z0-9_-]+)/i);
+                  const threadId = match && match[1] ? match[1] : 'thread-f:222';
+                  mountThread(threadId);
                 });
               }
               window.location.hash = '#inbox';
@@ -217,15 +281,150 @@ async def main() -> int:
             """
         )
         await page.wait_for_selector("#reskin-root .rv-thread-msg", timeout=12000)
+        await page.wait_for_function(
+            """
+            () => {
+              const bodies = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg .rv-thread-msg-body'))
+                .map((node) => ((node && node.textContent) || '').trim())
+                .filter(Boolean);
+              const hasHello = bodies.includes('HELLOOOOO');
+              const hasReply = bodies.includes('MY-REPLY');
+              return hasHello && hasReply;
+            }
+            """,
+            timeout=12000,
+        )
         canonical_thread_result = await page.evaluate(
+            """
+            () => {
+              const rows = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg'));
+              const bodies = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg .rv-thread-msg-body'))
+                .map((node) => ((node && node.textContent) || '').trim());
+              const helloCount = bodies.filter((text) => text === 'HELLOOOOO').length;
+              const myReplyCount = bodies.filter((text) => text === 'MY-REPLY').length;
+              const outgoingCount = rows.filter((row) => row.classList.contains('rv-thread-msg--outgoing')).length;
+              const incomingCount = rows.filter((row) => row.classList.contains('rv-thread-msg--incoming')).length;
+              return {
+                bubbleCount: bodies.length,
+                helloCount,
+                myReplyCount,
+                outgoingCount,
+                incomingCount,
+                bodies
+              };
+            }
+            """
+        )
+
+        await page.click("#reskin-root .rv-back")
+        await page.wait_for_selector("#reskin-root .rv-item", timeout=12000)
+        await page.evaluate(
+            """
+            () => {
+              const main = document.querySelector('main[role="main"]');
+              if (!(main instanceof HTMLElement)) return;
+              main.innerHTML = `
+                <table>
+                  <tr role="row" class="zA" data-thread-id="thread-f:300" aria-label="zoe@example.com, first ping, Feb 25">
+                    <td><span class="yP">zoe@example.com</span></td>
+                    <td><span class="bog">First Ping</span></td>
+                    <td><span class="y2">HELLO-ZOE</span></td>
+                    <td><span>Feb 25</span></td>
+                    <td><a href="#inbox/thread-f:300">open</a></td>
+                  </tr>
+                </table>
+              `;
+              window.location.hash = '#inbox';
+            }
+            """
+        )
+        await page.wait_for_selector("#reskin-root .rv-item", timeout=12000)
+        await page.wait_for_function(
+            """
+            () => Array.from(document.querySelectorAll('#reskin-root .rv-item'))
+              .some((item) => /300/.test(String(item.getAttribute('data-thread-id') || '')))
+            """,
+            timeout=12000,
+        )
+        clicked_zoe = await page.evaluate(
+            """
+            () => {
+              const items = Array.from(document.querySelectorAll('#reskin-root .rv-item'));
+              for (const item of items) {
+                const threadId = String(item.getAttribute('data-thread-id') || '');
+                if (/300/.test(threadId)) {
+                  item.click();
+                  return true;
+                }
+              }
+              return false;
+            }
+            """
+        )
+        if not clicked_zoe:
+            raise RuntimeError("Could not click Zoe thread row")
+        await page.wait_for_selector("#reskin-root .rv-thread-msg", timeout=12000)
+        warmup_before_result = await page.evaluate(
             """
             () => {
               const bodies = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg .rv-thread-msg-body'))
                 .map((node) => ((node && node.textContent) || '').trim());
-              const helloCount = bodies.filter((text) => text === 'HELLOOOOO').length;
               return {
+                hasHello: bodies.includes('HELLO-ZOE'),
+                hasLateReply: bodies.includes('LATE-REPLY'),
+                bubbleCount: bodies.length
+              };
+            }
+            """
+        )
+        await page.evaluate(
+            """
+            () => {
+              const main = document.querySelector('main[role="main"]');
+              if (!(main instanceof HTMLElement)) return;
+              main.innerHTML = `
+                <table>
+                  <tr role="row" class="zA" data-thread-id="thread-f:300" aria-label="zoe@example.com, first ping, Feb 25">
+                    <td><span class="yP">zoe@example.com</span></td>
+                    <td><span class="bog">First Ping</span></td>
+                    <td><span class="y2">HELLO-ZOE</span></td>
+                    <td><span>Feb 25</span></td>
+                    <td><a href="#inbox/thread-f:300">open</a></td>
+                  </tr>
+                  <tr role="row" class="zA" data-thread-id="thread-f:301" aria-label="me@example.com to zoe@example.com, Feb 25">
+                    <td><span class="yP">me@example.com</span></td>
+                    <td><span class="bog">Late Reply</span></td>
+                    <td><span class="y2">LATE-REPLY</span></td>
+                    <td><span>Feb 25</span></td>
+                    <td><a href="#sent/thread-f:301">open</a></td>
+                  </tr>
+                </table>
+              `;
+            }
+            """
+        )
+        await page.wait_for_function(
+            """
+            () => {
+              const bodies = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg .rv-thread-msg-body'))
+                .map((node) => ((node && node.textContent) || '').trim());
+              return bodies.includes('HELLO-ZOE') && bodies.includes('LATE-REPLY');
+            }
+            """,
+            timeout=12000,
+        )
+        warmup_after_result = await page.evaluate(
+            """
+            () => {
+              const rows = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg'));
+              const bodies = rows
+                .map((node) => ((node.querySelector('.rv-thread-msg-body') || {}).textContent || '').trim());
+              const outgoingCount = rows.filter((row) => row.classList.contains('rv-thread-msg--outgoing')).length;
+              return {
+                hasLateReply: bodies.includes('LATE-REPLY'),
+                hasHello: bodies.includes('HELLO-ZOE'),
+                outgoingCount,
                 bubbleCount: bodies.length,
-                helloCount,
                 bodies
               };
             }
@@ -326,20 +525,40 @@ async def main() -> int:
     answer = (answer or "").strip()
     print("ANSWER", answer)
     print("DEBUG_BRIDGE_RESULT", debug_bridge_result)
+    print("STARTUP_FILTER_RESULT", startup_filter_result)
     print("DEDUP_RESULT", dedup_result)
     print("CANONICAL_GROUP_RESULT", canonical_group_result)
     print("CLICKED_AAROH", clicked_aaroh)
     print("CANONICAL_THREAD_RESULT", canonical_thread_result)
+    print("WARMUP_BEFORE_RESULT", warmup_before_result)
+    print("WARMUP_AFTER_RESULT", warmup_after_result)
     print("INLINE_QUOTE_RESULT", inline_quote_result)
     print("LEGACY_ID_RESULT", legacy_id_result)
     print("NORMALIZED_HASH_RESULT", normalized_hash_result)
     ok_answer = "Yesterday:" in answer
     ok_debug_bridge = debug_bridge_result.get("ok") is True
+    ok_startup_filter = startup_filter_result.get("hasTriage") is False
     ok_dedup = dedup_result.get("sameBodyCount", 0) >= 2
     ok_canonical = (
         canonical_group_result.get("aarohCount", 0) >= 1
         and clicked_aaroh is True
         and canonical_thread_result.get("helloCount", 0) == 1
+        and canonical_thread_result.get("myReplyCount", 0) >= 1
+        and canonical_thread_result.get("outgoingCount", 0) >= 1
+        and canonical_thread_result.get("bodies", [])[:2] == ["HELLOOOOO", "MY-REPLY"]
+    )
+    warmup_bodies = warmup_after_result.get("bodies", []) if isinstance(warmup_after_result.get("bodies"), list) else []
+    hello_index = warmup_bodies.index("HELLO-ZOE") if "HELLO-ZOE" in warmup_bodies else -1
+    late_index = warmup_bodies.index("LATE-REPLY") if "LATE-REPLY" in warmup_bodies else -1
+    ok_warmup = (
+        warmup_before_result.get("hasHello") is True
+        and warmup_before_result.get("hasLateReply") is False
+        and warmup_after_result.get("hasHello") is True
+        and warmup_after_result.get("hasLateReply") is True
+        and warmup_after_result.get("outgoingCount", 0) >= 1
+        and hello_index != -1
+        and late_index != -1
+        and hello_index < late_index
     )
     ok_inline_quote = (
         inline_quote_result.get("hasWrote") is False
@@ -348,7 +567,7 @@ async def main() -> int:
     )
     ok_legacy_id = legacy_id_result.get("hasLegacyBody") is True
     ok_hash_normalized = normalized_hash_result.get("hash") == "#inbox/thread-f:445566778899"
-    return 0 if ok_answer and ok_debug_bridge and ok_dedup and ok_canonical and ok_inline_quote and ok_legacy_id and ok_hash_normalized else 1
+    return 0 if ok_answer and ok_debug_bridge and ok_startup_filter and ok_dedup and ok_canonical and ok_warmup and ok_inline_quote and ok_legacy_id and ok_hash_normalized else 1
 
 
 if __name__ == "__main__":

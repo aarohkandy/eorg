@@ -2,12 +2,18 @@
 
 ## Scope note (2026-02-28)
 
-The thread-first timeline update is read/render focused. Send behavior is intentionally unchanged in this
-pass: bottom input Send and Enter still use the same existing send pipeline below.
+The contact-centric merged timeline update keeps send behavior intentionally unchanged. Bottom input Send
+and Enter still use the same existing send pipeline below.
 
 ## One sentence
 
 **Send button and Enter in the thread input both call `submitThreadReply(root)` in content.js, which first forces native thread context, then calls `ReskinCompose.replyToThread(text, { threadId, mailbox, threadHintHref, forceThreadContext, timeoutMs })` in compose.js and expects `{ ok, stage, reason? }`.**
+
+## Scheduler note (core phase)
+
+- Contact/thread open and send start now bump an `interactionEpoch` in `content.js`.
+- Mailbox scan is cooperative: if interaction epoch changes (open thread/contact, back, send), scan pauses and resumes only when list view is active again.
+- This keeps reply context stable while preserving the same `submitThreadReply` → `replyToThread` contract.
 
 ## Code locations
 

@@ -1,6 +1,6 @@
 {
   "name": "eorg",
-  "version": "1.1.0",
+  "version": "1.1.6",
   "private": true,
   "type": "module",
   "description": "Gmail Hard Reskin extension with AI triage + InboxSDK + headless tests",

@@ -6,8 +6,9 @@ A Manifest V3 Chrome extension that overlays Gmail with a custom full-screen vie
 
 - Replaces Gmail's visible UI with a custom "Mailita" surface.
 - Extracts thread metadata (sender, subject, date) from Gmail DOM with resilient selector fallbacks.
-- Opens threads by dispatching clicks to Gmail's own nodes to preserve native navigation behavior.
-- Adds AI inbox triage and Ask Inbox Q&A with automatic full-inbox background scanning.
+- Uses contact-first list rows for Inbox/Sent (one row per contact) and opens merged contact chat on click.
+- Builds contact timelines from row/cache sources (Inbox + Sent) with deterministic merge/dedupe ordering.
+- Adds AI inbox triage and Ask Inbox Q&A (manual/explicit runs; background AI automation is off in core phase).
 - Persists local triage state so badges/filters still work even if Gmail label sync fails.
 
 ## Project Structure
@@ -33,7 +34,8 @@ A Manifest V3 Chrome extension that overlays Gmail with a custom full-screen vie
 ## Usage
 
 - The custom viewer mounts automatically when Gmail is ready.
-- Triage filters and status run from the left sidebar (triage/scan now auto-runs).
+- Contact-first list and scan status run from the left sidebar.
+- AI triage is available from sidebar actions, but auto background AI kicks are disabled in this phase.
 - Ask Inbox runs from the right rail chat panel.
 
 ## Debugging
@@ -56,6 +58,9 @@ Expected lifecycle logs:
 - `Rendered N messages`
 - `Mutation observer started (debounced 75ms).`
 - `thread-extract:source` and `thread-render:timeline` while opening a thread
+- `contact-v2:open`, `contact-v2:scope`, `contact-v2:timeline-built`, `contact-v2:cache-refresh` for contact timeline v2
+- `interaction:epoch` and scheduler fields from `dumpState()` for scan preemption/debug
+- `startup-filter:default-all` when first inbox load defaults to unfiltered view
 
 `InboxSDK` injection errors can appear in console on some Gmail builds. They are non-fatal for timeline
 rendering: the extension automatically falls back to DOM extraction (`inboxsdk:fallback-dom`).

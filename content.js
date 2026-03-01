@@ -11,6 +11,8 @@
   const THEME_LIGHT = "light";
   const OBSERVER_DEBOUNCE_MS = 180;
   const OBSERVER_MIN_RENDER_GAP_MS = 320;
+  const LIST_LIVE_RENDER_GAP_MS = 520;
+  const THREAD_LIST_REFRESH_GAP_MS = 1600;
   const UI_POLL_INTERVAL_MS = 900;
   const LIST_REFRESH_INTERVAL_MS = 12000;
   const GMAIL_READY_SELECTORS = ['[role="main"]', '[aria-label="Main menu"]'];
@@ -104,15 +106,30 @@
 
   const LIST_LOAD_MORE_DISTANCE_PX = 280;
   const LIST_PREFETCH_DISTANCE_PX = 900;
+  const STARTUP_FAST_LIST_LIMIT = 90;
+  const STARTUP_WARM_LIST_DELAY_MS = 140;
   const MAILBOX_SCAN_MAX_PAGES = 120;
   const MAILBOX_SCAN_NO_CHANGE_LIMIT = 3;
+  const THREAD_EXPAND_MAX_PASSES = 5;
+  const THREAD_EXPAND_MAX_CLICKS_PER_PASS = 42;
+  const THREAD_EXPAND_CLICK_YIELD_MS = 80;
+  const THREAD_EXPAND_BODY_SETTLE_MS = 2500;
+  const THREAD_EXPAND_BODY_POLL_MS = 80;
   const OPTIMISTIC_RECONCILE_WINDOW_MS = 120000;
   const INBOX_SDK_APP_ID = "sdk_reskinmail_25053b311c";
   const INBOX_SDK_THREAD_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
   const CHAT_DEBUG_STORAGE_KEY = "reskin_chat_debug_v1";
   const CHAT_DEBUG_DEFAULT_ENABLED = true;
-  // Deprecated compatibility switch: keep false for strict thread-first rendering.
-  const ENABLE_CONTACT_MERGE_MODE = false;
+  const LIST_MODE = "contact_groups";
+  const CHAT_MODE = "contact_merge_lite_v2";
+  const CONTACT_TIMELINE_V2_ENABLED = true;
+  const ENABLE_AI_BACKGROUND_AUTOMATION = false;
+  const ENABLE_CONTACT_MERGE_MODE = (
+    CHAT_MODE === "contact_merge_lite_v2"
+    || CHAT_MODE === "contact_merge_on_click"
+  );
+  const ENABLE_CONTACT_MERGE_LEGACY = ENABLE_CONTACT_MERGE_MODE && !CONTACT_TIMELINE_V2_ENABLED;
+  const ENABLE_CONTACT_GROUP_LIST = LIST_MODE === "contact_groups";
   const THREAD_READY_MAX_RETRIES = 5;
   const THREAD_READY_RETRY_BASE_MS = 260;
   const DEBUG_BRIDGE_REQUEST_EVENT = "reskin:debug:request";
@@ -139,6 +156,8 @@
     isApplying: false,
     interactionLockUntil: 0,
     lastListSignature: "",
+    lastListHadVisible: false,
+    lastListRenderAt: 0,
     currentView: "list",
     activeThreadId: "",
     lockListView: false,
@@ -159,6 +178,7 @@
     triageMapLoadInFlight: false,
     triageMapPersistTimer: null,
     initialCriticalApplied: false,
+    mailboxCacheRevision: 0,
     summaryByThreadId: {},
     summaryMetaByThreadId: {},
     summaryStatusByThreadId: {},
@@ -169,17 +189,27 @@
     summaryLoaded: false,
     summaryPersistTimer: null,
     fullScanRunning: false,
+    scanRunId: 0,
+    scanPaused: false,
+    scanPauseReason: "",
+    interactionEpoch: 0,
+    activeTask: "idle",
     fullScanMailbox: "",
     fullScanStatus: "",
     fullScanCompletedByMailbox: {},
     mailboxScanProgress: {},
     mailboxScanQueue: [],
     mailboxScanRunner: false,
+    mailboxScanKickTimer: null,
+    mailboxScanKickKey: "",
     scannedMailboxMessages: {},
     inboxHashNudged: false,
     inboxEmptyRetryScheduled: false,
     listVisibleByMailbox: {},
     listChunkSize: 240,
+    startupWarmListReady: false,
+    startupWarmListScheduled: false,
+    startupBootDeferredScheduled: false,
     aiQuestionText: "",
     aiAnswerBusy: false,
     aiChatMessages: [],
@@ -194,6 +224,7 @@
     lastAutoTriageAt: 0,
     lastAutoTriageKickAt: 0,
     lastObserverRenderAt: 0,
+    lastMaintenanceRenderAt: 0,
     pendingObserverTimer: null,
     lastObserverSignature: "",
     lastSeenHash: "",
@@ -204,6 +235,12 @@
     activeConversationKey: "",
     contactThreadIds: [],
     mergedMessages: [],
+    activeTimelineMessages: [],
+    contactTimelineIsDeep: false,
+    contactTimelineDeepHydratedAt: 0,
+    contactTimelineDeepCount: 0,
+    contactTimelineV2Metrics: null,
+    contactTimelineRefreshTimer: null,
     currentThreadIdForReply: "",
     currentThreadHintHref: "",
     currentThreadMailbox: "",
@@ -212,6 +249,8 @@
     inboxSdkInstance: null,
     inboxSdkLoadPromise: null,
     inboxSdkReady: false,
+    inboxSdkDisabled: false,
+    inboxSdkFailureReason: "",
     inboxSdkThreadMessages: {},
     inboxSdkThreadUpdatedAt: {},
     inboxSdkThreadViewById: {},
@@ -223,6 +262,8 @@
     replySendInProgress: false,
     contactChatLoading: false,
     contactDisplayName: "",
+    contactHydrationRunId: 0,
+    lastContactMergeMetrics: null,
     threadExtractRetry: 0,
     snippetByThreadId: {},
     localReadUntilByThread: {},
@@ -233,6 +274,37 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function scheduleDeferredWork(task, options = {}) {
+    const work = typeof task === "function" ? task : null;
+    if (!work) return;
+    const delayMs = Math.max(0, Number(options.delayMs || 0));
+    const timeoutMs = Math.max(120, Number(options.timeoutMs || 1500));
+    const run = () => {
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(() => {
+          try {
+            work();
+          } catch (error) {
+            logWarn("Deferred work failed", error);
+          }
+        }, { timeout: timeoutMs });
+        return;
+      }
+      setTimeout(() => {
+        try {
+          work();
+        } catch (error) {
+          logWarn("Deferred work failed", error);
+        }
+      }, 0);
+    };
+    if (delayMs > 0) {
+      setTimeout(run, delayMs);
+    } else {
+      run();
+    }
   }
 
   function logInfo(message, extra) {
@@ -368,6 +440,34 @@
 
   function interactionsLocked() {
     return Date.now() < state.interactionLockUntil;
+  }
+
+  function bumpInteractionEpoch(reason = "") {
+    state.interactionEpoch = Number(state.interactionEpoch || 0) + 1;
+    if (reason) {
+      logChatDebug("interaction:epoch", {
+        epoch: state.interactionEpoch,
+        reason: normalize(reason || "")
+      }, { throttleKey: `interaction-epoch:${normalize(reason || "unknown")}`, throttleMs: 120 });
+    }
+    return state.interactionEpoch;
+  }
+
+  function setActiveTask(task = "idle") {
+    state.activeTask = normalize(task || "idle") || "idle";
+  }
+
+  function mailboxScanPauseReason() {
+    if (state.replySendInProgress) return "reply-send";
+    if (state.currentView !== "list") return `view:${normalize(state.currentView || "unknown")}`;
+    if (state.contactChatLoading) return "contact-chat-loading";
+    if (state.suspendHashSyncDuringContactHydration) return "contact-hydration";
+    if (interactionsLocked()) return "interaction-lock";
+    return "";
+  }
+
+  function shouldPauseMailboxScan() {
+    return Boolean(mailboxScanPauseReason());
   }
 
   function normalize(text) {
@@ -619,14 +719,25 @@
   }
 
   function clearContactConversationState() {
+    if (state.contactTimelineRefreshTimer) {
+      clearTimeout(state.contactTimelineRefreshTimer);
+      state.contactTimelineRefreshTimer = null;
+    }
+    state.contactHydrationRunId = Number(state.contactHydrationRunId || 0) + 1;
     state.activeContactKey = "";
     state.activeContactEmail = "";
     state.activeConversationKey = "";
     state.contactThreadIds = [];
     state.mergedMessages = [];
+    state.activeTimelineMessages = [];
+    state.contactTimelineIsDeep = false;
+    state.contactTimelineDeepHydratedAt = 0;
+    state.contactTimelineDeepCount = 0;
+    state.contactTimelineV2Metrics = null;
     state.contactDisplayName = "";
     state.contactChatLoading = false;
     state.suspendHashSyncDuringContactHydration = false;
+    state.threadExtractRetry = 0;
   }
 
   function activeThreadTimelineContext(overrides = {}) {
@@ -738,11 +849,10 @@
     const activeAccountEmail = extractEmail(snapshot.context.activeAccountEmail || "");
     const messageMailbox = mailboxCacheKey(message && message.mailbox ? message.mailbox : "");
     const sourceType = normalize(message && message.sourceType ? message.sourceType : "").toLowerCase();
-    const optimisticDirection = normalize(message && message.direction ? message.direction : "").toLowerCase();
     const optimisticOutgoing = Boolean(
       sourceType === "optimistic"
       || Boolean(message && message.isOptimistic)
-      || optimisticDirection === "outgoing"
+      || normalize(message && message.clientSendId ? message.clientSendId : "")
     );
     const inferredContactKey = extractEmail(contactKeyFromMessage(message || {}));
     const inferredContactMatch = Boolean(contactEmail && inferredContactKey && inferredContactKey === contactEmail);
@@ -752,7 +862,6 @@
         contactEmail,
         activeAccountEmail,
         sourceType,
-        optimisticDirection,
         snapshot: summarizeChatMessageForDebug(message)
       }, { throttleKey: `include-optimistic:${contactEmail}`, throttleMs: 800 });
       return true;
@@ -1295,22 +1404,51 @@
     return getInboxSdkThreadMessages(canonicalTid);
   }
 
+  function isFatalInboxSdkInjectionError(error) {
+    const text = normalize(error && error.message ? error.message : String(error || "")).toLowerCase();
+    if (!text) return false;
+    return (
+      text.includes("couldn't inject pageworld.js")
+      || text.includes("could not establish connection")
+      || text.includes("receiving end does not exist")
+      || text.includes("inboxsdk__injectpageworld")
+      || text.includes("runtime.lasterror")
+      || text.includes("extension context invalidated")
+    );
+  }
+
   async function ensureInboxSdkReady() {
+    if (state.inboxSdkDisabled) return null;
     if (state.inboxSdkReady && state.inboxSdkInstance) return state.inboxSdkInstance;
     if (state.inboxSdkLoadPromise) return state.inboxSdkLoadPromise;
     if (!window.InboxSDK || typeof window.InboxSDK.load !== "function") {
       return null;
     }
-    state.inboxSdkLoadPromise = window.InboxSDK.load(2, INBOX_SDK_APP_ID, {
-      eventTracking: false,
-      globalErrorLogging: false
-    }).then((sdk) => {
+    let loadPromise = null;
+    try {
+      loadPromise = window.InboxSDK.load(2, INBOX_SDK_APP_ID, {
+        eventTracking: false,
+        globalErrorLogging: false
+      });
+    } catch (error) {
+      state.inboxSdkReady = false;
+      state.inboxSdkDisabled = isFatalInboxSdkInjectionError(error);
+      state.inboxSdkFailureReason = normalize(error && error.message ? error.message : String(error || ""));
+      if (state.inboxSdkDisabled) {
+        logWarn(`InboxSDK disabled after fatal injection error: ${state.inboxSdkFailureReason}`);
+      } else {
+        logWarn(`InboxSDK initialization failed: ${state.inboxSdkFailureReason}`);
+      }
+      return null;
+    }
+    state.inboxSdkLoadPromise = Promise.resolve(loadPromise).then((sdk) => {
       if (!sdk || !sdk.Conversations || typeof sdk.Conversations.registerThreadViewHandler !== "function") {
         state.inboxSdkReady = false;
         return null;
       }
       state.inboxSdkInstance = sdk;
       state.inboxSdkReady = true;
+      state.inboxSdkFailureReason = "";
       sdk.Conversations.registerThreadViewHandler((threadView) => {
         (async () => {
           try {
@@ -1339,7 +1477,13 @@
       return sdk;
     }).catch((error) => {
       state.inboxSdkReady = false;
-      logWarn(`InboxSDK initialization failed: ${normalize(error && error.message ? error.message : String(error || ""))}`);
+      state.inboxSdkFailureReason = normalize(error && error.message ? error.message : String(error || ""));
+      if (isFatalInboxSdkInjectionError(error)) {
+        state.inboxSdkDisabled = true;
+        logWarn(`InboxSDK disabled after fatal injection error: ${state.inboxSdkFailureReason}`);
+      } else {
+        logWarn(`InboxSDK initialization failed: ${state.inboxSdkFailureReason}`);
+      }
       return null;
     }).finally(() => {
       if (!state.inboxSdkReady) {
@@ -1890,12 +2034,21 @@
   async function refreshActiveThreadAfterSend(threadId, mailbox, optimisticMessage) {
     const targetThreadId = normalize(threadId || "");
     if (!targetThreadId) return false;
+    if (isContactTimelineV2Enabled() && isContactTimelineV2Active()) {
+      const refreshed = rebuildActiveContactTimelineV2({
+        reason: "send-refresh",
+        preferredThreadId: targetThreadId,
+        optimisticMessage
+      });
+      return Boolean(refreshed);
+    }
     const targetCanonicalThreadId = canonicalThreadId(targetThreadId) || targetThreadId;
     const attempts = [180, 360, 620, 900, 1300];
     let matched = false;
 
     for (let i = 0; i < attempts.length; i += 1) {
       await sleep(attempts[i]);
+      await forceExpandGmailThread();
       const extracted = extractOpenThreadData();
       const normalizedExtracted = normalizeThreadMessagesForChat(
         Array.isArray(extracted.messages) ? extracted.messages : [],
@@ -2332,6 +2485,39 @@
     return threadContextSnapshot(threadId);
   }
 
+  async function waitForThreadDomReadyForHydration(threadId, timeoutMs = 4200) {
+    const targetCanonical = canonicalThreadId(threadId || "") || normalize(threadId || "");
+    const targetSynthetic = targetCanonical.startsWith("synthetic-");
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const snapshot = threadContextSnapshot(threadId);
+      if (snapshot.ok) return { ok: true, status: snapshot, mode: "context" };
+      const hash = normalize(window.location.hash || "");
+      const dom = threadDomReadinessSnapshot();
+      const hashCanonical = canonicalThreadId(threadIdFromHash(hash) || "") || normalize(threadIdFromHash(hash) || "");
+      const threadMatch = !targetCanonical || !hashCanonical || targetCanonical === hashCanonical || targetSynthetic;
+      if (isThreadHash(hash) && dom.ready && threadMatch) {
+        return {
+          ok: true,
+          status: {
+            ...snapshot,
+            ok: true,
+            hashThreadLike: true,
+            threadMatch: true,
+            dom: {
+              ...(snapshot.dom || {}),
+              messageNodes: Math.max(Number((snapshot.dom || {}).messageNodes || 0), Number(dom.messageContainers || 0)),
+              domReady: true
+            }
+          },
+          mode: "dom-ready"
+        };
+      }
+      await sleep(120);
+    }
+    return { ok: false, status: threadContextSnapshot(threadId), mode: "timeout" };
+  }
+
   function buildThreadContextHashCandidates(threadId, mailbox, hintHref = "") {
     const out = [];
     const box = mailboxCacheKey(mailbox || "inbox");
@@ -2394,6 +2580,40 @@
       contextStep: "thread-context-not-found",
       reason: "thread-context-not-found",
       status: finalStatus,
+      tried
+    };
+  }
+
+  async function forceThreadContextForHydration(threadId, mailbox, hintHref = "") {
+    const targetThreadId = normalize(threadId || "");
+    const bestHint = normalize(hintHref || "") || lookupThreadHintHref(targetThreadId);
+    const candidates = buildThreadContextHashCandidates(targetThreadId, mailbox, bestHint);
+    const tried = [];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const currentHash = normalize(window.location.hash || "");
+      if (currentHash !== candidate) {
+        window.location.hash = candidate;
+      }
+      tried.push(candidate);
+      await sleep(170);
+      const ready = await waitForThreadDomReadyForHydration(targetThreadId, 4200);
+      if (ready.ok) {
+        return {
+          ok: true,
+          contextStep: "forced-hash",
+          status: ready.status,
+          readyMode: ready.mode,
+          candidate,
+          tried
+        };
+      }
+    }
+    return {
+      ok: false,
+      contextStep: "forced-hash-failed",
+      reason: "thread-context-not-found",
+      status: threadContextSnapshot(targetThreadId),
       tried
     };
   }
@@ -3106,7 +3326,22 @@
     }
 
     if (state.currentView === "thread" && state.activeThreadId && !threadHash) {
-      return;
+      const main = getGmailMainRoot();
+      const hasThreadDom = Boolean(
+        main instanceof HTMLElement
+        && (
+          main.querySelector(THREAD_MESSAGE_SELECTORS)
+          || main.querySelector(BODY_SELECTORS)
+        )
+      );
+      const keepThreadView = Boolean(
+        hasThreadDom
+        || isContactTimelineV2Active()
+        || state.replySendInProgress
+      );
+      if (keepThreadView) {
+        return;
+      }
     }
 
     state.currentView = threadHash ? "thread" : "list";
@@ -3116,6 +3351,7 @@
       const nextThreadId = canonicalThreadId(nextThreadIdRaw || "") || normalize(nextThreadIdRaw || "");
       state.activeThreadId = nextThreadIdRaw;
       if (nextThreadId && nextThreadId !== previousThreadId) {
+        bumpInteractionEpoch("hash-thread-open");
         state.threadExtractRetry = 0;
       }
     } else {
@@ -3134,13 +3370,17 @@
       } else if (hashHasTriageParam(currentHash)) {
         state.triageFilter = parsed.triage;
         state.initialCriticalApplied = true;
-      } else if (!state.initialCriticalApplied) {
-        state.initialCriticalApplied = true;
-        state.triageFilter = "critical";
-        state.lastListHash = "#inbox?triage=critical";
-        if (window.location.hash !== "#inbox?triage=critical") {
-          window.location.hash = "#inbox?triage=critical";
+      } else {
+        if (!state.initialCriticalApplied) {
+          logChatDebug("startup-filter:default-all", {
+            hash: normalize(currentHash || ""),
+            mailbox: parsed.mailbox,
+            triage: parsed.triage || ""
+          }, { throttleKey: "startup-filter-default-all", throttleMs: 4000 });
         }
+        state.initialCriticalApplied = true;
+        state.triageFilter = "";
+        state.lastListHash = "#inbox";
       }
     }
   }
@@ -3424,14 +3664,37 @@
       }, { throttleKey: "reply-submit-skip:in-progress", throttleMs: 900 });
       return;
     }
-    const input = root.querySelector(".rv-thread-input");
+    const inputNodes = Array.from(root.querySelectorAll(".rv-thread-input"))
+      .filter((node) => node instanceof HTMLInputElement);
+    const input = inputNodes.find((node) => node === document.activeElement)
+      || inputNodes.find((node) => Boolean(normalize(node.value || "")))
+      || inputNodes[0]
+      || null;
     if (!(input instanceof HTMLInputElement)) {
       logChatDebug("reply:submit-skip", {
         reason: "input-not-found"
       }, { throttleKey: "reply-submit-skip:input-not-found", throttleMs: 1200 });
       return;
     }
-    const text = (input.value || "").trim();
+    const draftProbeThreadId = canonicalThreadId(
+      state.currentThreadIdForReply
+      || threadIdFromHash(window.location.hash || "")
+      || state.activeThreadId
+      || (Array.isArray(state.contactThreadIds) && state.contactThreadIds.length > 0 ? state.contactThreadIds[0] : "")
+      || ""
+    ) || normalize(
+      state.currentThreadIdForReply
+      || threadIdFromHash(window.location.hash || "")
+      || state.activeThreadId
+      || (Array.isArray(state.contactThreadIds) && state.contactThreadIds.length > 0 ? state.contactThreadIds[0] : "")
+      || ""
+    );
+    const draftFallbackText = draftProbeThreadId ? normalize(getReplyDraft(draftProbeThreadId) || "") : "";
+    let text = normalize(input.value || "");
+    if (!text && draftFallbackText) {
+      text = draftFallbackText;
+      input.value = draftFallbackText;
+    }
     if (!text) {
       logChatDebug("reply:submit-skip", {
         reason: "empty-text"
@@ -3487,8 +3750,10 @@
     };
     let optimisticMessage = null;
 
+    bumpInteractionEpoch("send-start");
     state.replySendInProgress = true;
     state.suspendHashSyncDuringContactHydration = true;
+    setActiveTask("send-reply");
     if (sendBtn instanceof HTMLElement) {
       sendBtn.textContent = "Sending...";
       sendBtn.setAttribute("disabled", "true");
@@ -3512,7 +3777,12 @@
         if (ENABLE_CONTACT_MERGE_MODE) {
           ensureContactThreadTracked(targetThreadId);
         }
-        if (ENABLE_CONTACT_MERGE_MODE && Array.isArray(state.contactThreadIds) && state.contactThreadIds.length > 0) {
+        if (isContactTimelineV2Enabled() && isContactTimelineV2Active()) {
+          rebuildActiveContactTimelineV2({
+            reason: "send-optimistic",
+            preferredThreadId: targetThreadId
+          });
+        } else if (ENABLE_CONTACT_MERGE_LEGACY && Array.isArray(state.contactThreadIds) && state.contactThreadIds.length > 0) {
           const displayThreadIds = state.contactThreadIds
             .map((id) => canonicalThreadId(id || "") || normalize(id || ""))
             .filter(Boolean)
@@ -3576,12 +3846,20 @@
         setReplyDraft(replyDraftThreadId, "");
         if (optimisticMessage) {
           markOptimisticMessageDelivered(targetThreadId, optimisticMessage.messageKey);
-          updateOptimisticInMergedMessages(targetThreadId, optimisticMessage.messageKey, {
-            deliveryState: "sent",
-            optimisticStatus: "sent",
-            optimisticDeliveredAt: Date.now(),
-            optimisticUnverifiedAt: likelyStage ? Date.now() : 0
-          });
+          if (isContactTimelineV2Enabled() && isContactTimelineV2Active()) {
+            rebuildActiveContactTimelineV2({
+              reason: "send-mark-sent",
+              preferredThreadId: targetThreadId,
+              optimisticMessage
+            });
+          } else {
+            updateOptimisticInMergedMessages(targetThreadId, optimisticMessage.messageKey, {
+              deliveryState: "sent",
+              optimisticStatus: "sent",
+              optimisticDeliveredAt: Date.now(),
+              optimisticUnverifiedAt: likelyStage ? Date.now() : 0
+            });
+          }
         }
         appendLocalSentCacheEntry(
           targetThreadId,
@@ -3590,6 +3868,13 @@
           Date.now(),
           threadHintHref
         );
+        if (isContactTimelineV2Enabled() && isContactTimelineV2Active()) {
+          rebuildActiveContactTimelineV2({
+            reason: "send-local-sent-cache",
+            preferredThreadId: targetThreadId,
+            optimisticMessage
+          });
+        }
         const latestRoot = document.getElementById(ROOT_ID);
         if (latestRoot instanceof HTMLElement && state.currentView === "thread") {
           renderThread(latestRoot);
@@ -3602,11 +3887,18 @@
         setReplyDraft(replyDraftThreadId, priorInputValue || text);
         if (optimisticMessage) {
           markOptimisticMessageFailed(targetThreadId, optimisticMessage.messageKey);
-          updateOptimisticInMergedMessages(targetThreadId, optimisticMessage.messageKey, {
-            deliveryState: "failed",
-            optimisticStatus: "failed",
-            optimisticFailedAt: Date.now()
-          });
+          if (isContactTimelineV2Enabled() && isContactTimelineV2Active()) {
+            rebuildActiveContactTimelineV2({
+              reason: "send-mark-failed",
+              preferredThreadId: targetThreadId
+            });
+          } else {
+            updateOptimisticInMergedMessages(targetThreadId, optimisticMessage.messageKey, {
+              deliveryState: "failed",
+              optimisticStatus: "failed",
+              optimisticFailedAt: Date.now()
+            });
+          }
           const latestRoot = document.getElementById(ROOT_ID);
           if (latestRoot instanceof HTMLElement && state.currentView === "thread") {
             renderThread(latestRoot);
@@ -3635,11 +3927,18 @@
       setReplyDraft(replyDraftThreadId, priorInputValue || text);
       if (optimisticMessage) {
         markOptimisticMessageFailed(targetThreadId, optimisticMessage.messageKey);
-        updateOptimisticInMergedMessages(targetThreadId, optimisticMessage.messageKey, {
-          deliveryState: "failed",
-          optimisticStatus: "failed",
-          optimisticFailedAt: Date.now()
-        });
+        if (isContactTimelineV2Enabled() && isContactTimelineV2Active()) {
+          rebuildActiveContactTimelineV2({
+            reason: "send-exception-failed",
+            preferredThreadId: targetThreadId
+          });
+        } else {
+          updateOptimisticInMergedMessages(targetThreadId, optimisticMessage.messageKey, {
+            deliveryState: "failed",
+            optimisticStatus: "failed",
+            optimisticFailedAt: Date.now()
+          });
+        }
         const latestRoot = document.getElementById(ROOT_ID);
         if (latestRoot instanceof HTMLElement && state.currentView === "thread") {
           renderThread(latestRoot);
@@ -3663,8 +3962,10 @@
     } finally {
       state.replySendInProgress = false;
       state.suspendHashSyncDuringContactHydration = previousSuspendHydration;
+      setActiveTask(state.fullScanRunning ? `scan:${state.fullScanMailbox || "mailbox"}` : "idle");
       const liveInput = root.querySelector(".rv-thread-input");
       if (liveInput instanceof HTMLInputElement) {
+        liveInput.removeAttribute("disabled");
         if (failureStage) {
           if (!normalize(liveInput.value || "")) {
             liveInput.value = priorInputValue || text;
@@ -3767,6 +4068,8 @@
 
       if (target.closest(".rv-back")) {
         consumeEvent(event);
+        bumpInteractionEpoch("back-to-list");
+        setActiveTask("back-to-list");
         state.settingsPinned = false;
         state.currentView = "list";
         state.activeThreadId = "";
@@ -4534,6 +4837,7 @@
     const key = mailboxCacheKey(mailbox);
     const existing = Array.isArray(state.scannedMailboxMessages[key]) ? state.scannedMailboxMessages[key] : [];
     const map = new Map();
+    let changed = false;
     for (const msg of existing) {
       const id = messageCacheKey(msg);
       if (!id) continue;
@@ -4546,7 +4850,7 @@
     for (const msg of incoming || []) {
       const id = messageCacheKey(msg);
       if (!id) continue;
-      map.set(id, {
+      const nextEntry = {
         threadId: msg.threadId || "",
         sender: msg.sender || "",
         senderEmail: msg.senderEmail || extractEmail(msg.sender || ""),
@@ -4560,9 +4864,32 @@
         triageLevel: msg.triageLevel || "",
         unread: isThreadMarkedReadLocally(msg.threadId) ? false : Boolean(msg.unread),
         mailbox: normalize(msg.mailbox || key) || key
-      });
+      };
+      const prev = map.get(id);
+      if (!prev) {
+        changed = true;
+      } else {
+        const prevRowKey = canonicalRowKey(prev);
+        const nextRowKey = canonicalRowKey(nextEntry);
+        if (
+          prevRowKey !== nextRowKey
+          || normalize(prev.snippet || "") !== normalize(nextEntry.snippet || "")
+          || normalize(prev.date || "") !== normalize(nextEntry.date || "")
+          || Boolean(prev.unread) !== Boolean(nextEntry.unread)
+        ) {
+          changed = true;
+        }
+      }
+      map.set(id, nextEntry);
     }
     const merged = Array.from(map.values());
+    if (merged.length !== existing.length) changed = true;
+    if (changed) {
+      state.mailboxCacheRevision = Number(state.mailboxCacheRevision || 0) + 1;
+      if (key === mailboxCacheKey("inbox") || key === mailboxCacheKey("sent")) {
+        scheduleActiveContactTimelineRefreshV2(`cache:${key}`);
+      }
+    }
     state.scannedMailboxMessages[key] = merged;
     return merged;
   }
@@ -4609,7 +4936,10 @@
     const key = mailboxCacheKey(mailbox);
     const cached = Array.isArray(state.scannedMailboxMessages[key]) ? state.scannedMailboxMessages[key] : [];
     const live = Array.isArray(liveMessages) ? liveMessages : [];
-    return cached.length >= live.length ? cached.slice() : live.slice();
+    if (cached.length === 0) return live.slice();
+    if (live.length === 0) return cached.slice();
+    // Prefer fresh DOM rows while retaining warmed cache coverage.
+    return dedupeMessagesStable([...live, ...cached]);
   }
 
   function chatScopeMessages(routeMailbox, liveMessages = []) {
@@ -4715,6 +5045,39 @@
     };
   }
 
+  function schedulerScanToken(options = {}) {
+    const token = Number(options.interactionEpoch);
+    if (Number.isFinite(token) && token >= 0) return token;
+    return Number(state.interactionEpoch || 0);
+  }
+
+  function scheduleMailboxScanKick(root, options = {}) {
+    const shell = root instanceof HTMLElement ? root : document.getElementById(ROOT_ID);
+    if (!(shell instanceof HTMLElement)) return;
+    const requested = Array.isArray(options.mailboxes)
+      ? options.mailboxes.map(mailboxCacheKey).filter(Boolean)
+      : [];
+    if (requested.length === 0) return;
+    const key = `${requested.join(",")}|force:${Boolean(options.force)}|pages:${Number(options.maxPages) || MAILBOX_SCAN_MAX_PAGES}`;
+    const delayMs = Math.max(0, Number(options.delayMs || 0));
+    if (state.mailboxScanKickTimer && state.mailboxScanKickKey === key) return;
+    if (state.mailboxScanKickTimer) {
+      clearTimeout(state.mailboxScanKickTimer);
+      state.mailboxScanKickTimer = null;
+    }
+    state.mailboxScanKickKey = key;
+    state.mailboxScanKickTimer = setTimeout(() => {
+      state.mailboxScanKickTimer = null;
+      state.mailboxScanKickKey = "";
+      runFullMailboxScan(shell, {
+        ...options,
+        mailboxes: requested
+      }).catch((error) => {
+        logWarn("Scheduled mailbox scan failed", error);
+      });
+    }, delayMs);
+  }
+
   async function waitForPageChange(previousFingerprint, timeoutMs = 7000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -4728,13 +5091,14 @@
   async function scanMailboxPages(mailbox, options = {}) {
     const key = mailboxCacheKey(mailbox);
     const force = Boolean(options.force);
+    const scanToken = schedulerScanToken(options);
     const maxPages = Math.max(1, Math.min(MAILBOX_SCAN_MAX_PAGES, Number(options.maxPages) || MAILBOX_SCAN_MAX_PAGES));
     const root = options.root instanceof HTMLElement ? options.root : document.getElementById(ROOT_ID);
     const cached = Array.isArray(state.scannedMailboxMessages[key]) ? state.scannedMailboxMessages[key] : [];
     if (!force && state.fullScanCompletedByMailbox[key] && cached.length > 0) return;
-    if (state.replySendInProgress) return;
-    if (state.currentView !== "list" || state.contactChatLoading || state.suspendHashSyncDuringContactHydration) return;
+    if (shouldPauseMailboxScan()) return;
     if (state.fullScanRunning && state.fullScanMailbox && state.fullScanMailbox !== key) return;
+    if (scanToken !== Number(state.interactionEpoch || 0)) return;
 
     const returnHash = normalize(window.location.hash || state.lastListHash || "#inbox") || "#inbox";
     const targetHash = `#${key}`;
@@ -4745,10 +5109,15 @@
       await sleep(520);
     }
 
+    state.scanRunId = Number(state.scanRunId || 0) + 1;
+    const runId = state.scanRunId;
     state.fullScanRunning = true;
+    state.scanPaused = false;
+    state.scanPauseReason = "";
     state.fullScanMailbox = key;
     state.fullScanCompletedByMailbox[key] = false;
     state.fullScanStatus = `Scanning ${key}...`;
+    setActiveTask(`scan:${key}`);
     updateMailboxScanProgress(key, {
       status: "running",
       pagesScanned: Number((state.mailboxScanProgress[key] || {}).pagesScanned || 0),
@@ -4756,11 +5125,25 @@
     });
     if (root instanceof HTMLElement) renderSidebar(root);
 
+    const shouldAbort = () => {
+      if (runId !== Number(state.scanRunId || 0)) return "scan-superseded";
+      if (scanToken !== Number(state.interactionEpoch || 0)) return "interaction-changed";
+      return mailboxScanPauseReason();
+    };
+
     let pageCount = 0;
     let movedPages = 0;
     let noChangeStreak = 0;
+    let aborted = false;
+    let abortReason = "";
     try {
       while (pageCount < maxPages) {
+        const earlyStop = shouldAbort();
+        if (earlyStop) {
+          aborted = true;
+          abortReason = earlyStop;
+          break;
+        }
         const result = collectMessages(500);
         const merged = mergeMailboxCache(key, result.items || []);
         pageCount += 1;
@@ -4776,12 +5159,24 @@
           if (state.currentView === "list") renderList(root);
         }
 
+        const prePageTurnStop = shouldAbort();
+        if (prePageTurnStop) {
+          aborted = true;
+          abortReason = prePageTurnStop;
+          break;
+        }
         const nextButton = findPagerButton("next");
         if (!(nextButton instanceof HTMLElement) || isDisabledButton(nextButton)) break;
 
         const previousFingerprint = firstPageFingerprint(10);
         dispatchSyntheticClick(nextButton);
         const changed = await waitForPageChange(previousFingerprint, 7000);
+        const postPageTurnStop = shouldAbort();
+        if (postPageTurnStop) {
+          aborted = true;
+          abortReason = postPageTurnStop;
+          break;
+        }
         if (!changed.changed) {
           noChangeStreak += 1;
           if (noChangeStreak >= MAILBOX_SCAN_NO_CHANGE_LIMIT) break;
@@ -4792,31 +5187,44 @@
         await sleep(220);
       }
 
-      let rewindNoChange = 0;
-      for (let i = 0; i < movedPages; i += 1) {
-        const prevButton = findPagerButton("prev");
-        if (!(prevButton instanceof HTMLElement) || isDisabledButton(prevButton)) break;
-        const previousFingerprint = firstPageFingerprint(10);
-        dispatchSyntheticClick(prevButton);
-        const changed = await waitForPageChange(previousFingerprint, 7000);
-        if (!changed.changed) {
-          rewindNoChange += 1;
-          if (rewindNoChange >= MAILBOX_SCAN_NO_CHANGE_LIMIT) break;
-          continue;
+      if (!aborted) {
+        let rewindNoChange = 0;
+        for (let i = 0; i < movedPages; i += 1) {
+          if (shouldAbort()) break;
+          const prevButton = findPagerButton("prev");
+          if (!(prevButton instanceof HTMLElement) || isDisabledButton(prevButton)) break;
+          const previousFingerprint = firstPageFingerprint(10);
+          dispatchSyntheticClick(prevButton);
+          const changed = await waitForPageChange(previousFingerprint, 7000);
+          if (!changed.changed) {
+            rewindNoChange += 1;
+            if (rewindNoChange >= MAILBOX_SCAN_NO_CHANGE_LIMIT) break;
+            continue;
+          }
+          rewindNoChange = 0;
+          await sleep(180);
         }
-        rewindNoChange = 0;
-        await sleep(180);
       }
 
       const count = Array.isArray(state.scannedMailboxMessages[key])
         ? state.scannedMailboxMessages[key].length
         : 0;
-      state.fullScanCompletedByMailbox[key] = true;
-      state.fullScanStatus = `Scan complete for ${key}. Cached ${count} emails.`;
-      updateMailboxScanProgress(key, {
-        status: "done",
-        cachedCount: count
-      });
+      if (aborted) {
+        state.scanPaused = true;
+        state.scanPauseReason = normalize(abortReason || "paused") || "paused";
+        state.fullScanStatus = `Scan paused for ${key}: ${state.scanPauseReason}.`;
+        updateMailboxScanProgress(key, {
+          status: "paused",
+          cachedCount: count
+        });
+      } else {
+        state.fullScanCompletedByMailbox[key] = true;
+        state.fullScanStatus = `Scan complete for ${key}. Cached ${count} emails.`;
+        updateMailboxScanProgress(key, {
+          status: "done",
+          cachedCount: count
+        });
+      }
       const visible = Number(state.listVisibleByMailbox[key] || 0);
       if (!visible) state.listVisibleByMailbox[key] = state.listChunkSize;
     } catch (error) {
@@ -4827,11 +5235,22 @@
     } finally {
       state.fullScanRunning = false;
       state.fullScanMailbox = "";
+      setActiveTask("idle");
+      if (aborted) {
+        queueMailboxScan(key, root, {
+          maxPages,
+          force
+        });
+      } else {
+        state.scanPaused = false;
+        state.scanPauseReason = "";
+      }
       if (
         returnHash &&
         normalize(window.location.hash || "") !== normalize(returnHash) &&
         state.currentView === "list" &&
-        !state.replySendInProgress
+        !state.replySendInProgress &&
+        !aborted
       ) {
         window.location.hash = returnHash;
         await sleep(220);
@@ -4864,31 +5283,36 @@
     state.mailboxScanRunner = true;
     try {
       while (state.mailboxScanQueue.length > 0) {
-        if (
-          state.replySendInProgress
-          || state.currentView !== "list"
-          || state.contactChatLoading
-          || state.suspendHashSyncDuringContactHydration
-        ) {
+        const pauseReason = mailboxScanPauseReason();
+        if (pauseReason) {
+          state.scanPaused = true;
+          state.scanPauseReason = pauseReason;
           await sleep(260);
           continue;
         }
+        state.scanPaused = false;
+        state.scanPauseReason = "";
         const next = state.mailboxScanQueue.shift();
         if (!next) continue;
         await scanMailboxPages(next.mailbox, {
           ...(next.options || {}),
-          root: next.root instanceof HTMLElement ? next.root : root
+          root: next.root instanceof HTMLElement ? next.root : root,
+          interactionEpoch: Number(state.interactionEpoch || 0)
         });
       }
     } finally {
       state.mailboxScanRunner = false;
+      if (state.mailboxScanQueue.length === 0 && !state.fullScanRunning) {
+        state.scanPaused = false;
+        state.scanPauseReason = "";
+      }
     }
   }
 
   async function runFullMailboxScan(root, options = {}) {
     const shell = root instanceof HTMLElement ? root : document.getElementById(ROOT_ID);
     if (!(shell instanceof HTMLElement)) return;
-    if (state.currentView !== "list") return;
+    if (shouldPauseMailboxScan()) return;
     const requested = Array.isArray(options.mailboxes) ? options.mailboxes.map(mailboxCacheKey).filter(Boolean) : [];
     const active = mailboxCacheKey(options.primaryMailbox || activeMailbox());
     const order = requested.length > 0
@@ -5140,6 +5564,197 @@
     };
   }
 
+  function canExpandThreadContentNow() {
+    return Boolean(
+      state.currentView === "thread" || isThreadHash(window.location.hash || "")
+    );
+  }
+
+  async function forceExpandGmailThread() {
+    const targets = document.querySelectorAll('.kv, .gK, .et, [aria-expanded="false"], div[data-tooltip*="trimmed"], .ajR');
+    console.warn("[DEBUG EXPANSION] Elements found to click:", targets.length, targets);
+    if (targets.length > 0) {
+      for (const el of targets) {
+        el.click();
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  function collectThreadExpandTargets(scope) {
+    if (!(scope instanceof HTMLElement)) return [];
+    const keywordTokens = [
+      "expand",
+      "show trimmed",
+      "show hidden",
+      "show quoted",
+      "show more",
+      "more messages",
+      "more message",
+      "quoted text"
+    ];
+    const selectors = [
+      '[role="button"]',
+      'button',
+      '[role="link"]',
+      '.ajR',
+      '.ajT',
+      '.adx',
+      '[aria-expanded="false"]'
+    ];
+    const candidates = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+      const nodes = Array.from(scope.querySelectorAll(selector));
+      for (const node of nodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        if (!isElementVisible(node)) continue;
+        if ((node.matches("button, [role='button']") || node.getAttribute("aria-expanded") === "false") && isDisabledButton(node)) {
+          continue;
+        }
+        const haystack = normalize(
+          node.getAttribute("aria-label")
+          || node.getAttribute("data-tooltip")
+          || node.getAttribute("title")
+          || node.innerText
+          || node.textContent
+        ).toLowerCase();
+        if (!haystack) continue;
+        if (!keywordTokens.some((token) => haystack.includes(token))) continue;
+        const key = `${node.tagName}|${normalize(node.getAttribute("aria-label") || "")}|${normalize(node.textContent || "").slice(0, 120)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(node);
+      }
+    }
+    return candidates;
+  }
+
+  function collectCollapsedThreadMessageHeaders(scope) {
+    if (!(scope instanceof HTMLElement)) return [];
+    const containers = Array.from(scope.querySelectorAll(THREAD_MESSAGE_SELECTORS)).slice(0, 240);
+    const headers = [];
+    const seen = new Set();
+    for (const container of containers) {
+      if (!(container instanceof HTMLElement)) continue;
+      const hasBody = Boolean(findBodyNodeInScope(container) || findBodyNodeInScopeIframes(container));
+      if (hasBody) continue;
+      const header = container.querySelector(
+        '[aria-expanded="false"], [role="button"], .adx, .ajR, .ajT, h3, [tabindex]'
+      );
+      if (!(header instanceof HTMLElement)) continue;
+      if (!isElementVisible(header)) continue;
+      if (header.matches("button, [role='button']") && isDisabledButton(header)) continue;
+      const marker = normalize(
+        container.getAttribute("data-message-id")
+        || container.getAttribute("data-legacy-message-id")
+        || header.getAttribute("aria-label")
+        || header.textContent
+      ).slice(0, 180);
+      if (!marker || seen.has(marker)) continue;
+      seen.add(marker);
+      headers.push(header);
+    }
+    return headers;
+  }
+
+  async function waitForBodyInContainer(container, timeoutMs) {
+    if (!(container instanceof HTMLElement)) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (findBodyNodeInScope(container) || findBodyNodeInScopeIframes(container)) return true;
+      await sleep(THREAD_EXPAND_BODY_POLL_MS);
+    }
+    return false;
+  }
+
+  async function expandCollapsedThreadMessagesForExtraction(threadId = "", options = {}) {
+    if (!canExpandThreadContentNow()) return { clicks: 0, passes: 0 };
+    const main = getGmailMainRoot() || document.querySelector('[role="main"]') || document.body;
+    if (!(main instanceof HTMLElement)) return { clicks: 0, passes: 0 };
+    const maxPasses = Math.max(1, Math.min(10, Number(options.maxPasses) || THREAD_EXPAND_MAX_PASSES));
+    const maxClicksPerPass = Math.max(8, Math.min(80, Number(options.maxClicksPerPass) || THREAD_EXPAND_MAX_CLICKS_PER_PASS));
+    let totalClicks = 0;
+    let passes = 0;
+    const clicked = new Set();
+    const threadKey = normalize(threadId || state.currentThreadIdForReply || state.activeThreadId || "");
+
+    // Pre-wait: give the thread view time to finish its initial render before scanning
+    await sleep(1500);
+
+    function nodeMarker(node) {
+      return `${node.tagName}|${normalize(
+        node.getAttribute("data-message-id")
+        || node.getAttribute("data-legacy-message-id")
+        || node.getAttribute("aria-label")
+        || node.textContent
+      ).slice(0, 220)}`;
+    }
+
+    function collectAllCollapseTargets() {
+      const seen = new Set();
+      const out = [];
+      function add(node) {
+        if (!(node instanceof HTMLElement) || !node.isConnected) return;
+        if (!isElementVisible(node)) return;
+        const marker = nodeMarker(node);
+        if (clicked.has(marker)) return;
+        if (seen.has(marker)) return;
+        seen.add(marker);
+        out.push(node);
+      }
+      // Accordion / collapsed message cards
+      for (const n of main.querySelectorAll(".kv, .gK, .et, .kQ, .pG, .adx, [data-message-id]:not(.h7)")) add(n);
+      // Trimmed content ellipsis buttons
+      for (const n of main.querySelectorAll('.ajR, .aH1, [data-tooltip*="trimmed"], div.aXjCH')) add(n);
+      // aria-expanded=false — any collapsed interactive element
+      for (const n of main.querySelectorAll('[aria-expanded="false"]')) {
+        if (!(n instanceof HTMLElement)) continue;
+        if (isDisabledButton(n)) continue;
+        add(n);
+      }
+      // Existing keyword-based expand buttons
+      for (const n of collectThreadExpandTargets(main)) add(n);
+      // Message containers that have no rendered body yet
+      for (const n of collectCollapsedThreadMessageHeaders(main)) add(n);
+      return out;
+    }
+
+    while (passes < maxPasses) {
+      if (!canExpandThreadContentNow()) break;
+      const elementsToClick = collectAllCollapseTargets();
+      console.warn("[Expansion Loop] Found targets:", elementsToClick.length, "Target nodes:", elementsToClick);
+      if (elementsToClick.length === 0) {
+        console.warn("[Expansion Loop] No more collapsed elements. Breaking loop.");
+        break;
+      }
+      let clickedThisPass = 0;
+      for (const node of elementsToClick) {
+        if (clickedThisPass >= maxClicksPerPass) break;
+        if (!node.isConnected || !isElementVisible(node)) continue;
+        const marker = nodeMarker(node);
+        if (clicked.has(marker)) continue;
+        clicked.add(marker);
+        dispatchSyntheticClick(node);
+        clickedThisPass += 1;
+      }
+      if (clickedThisPass === 0) break;
+      totalClicks += clickedThisPass;
+      passes += 1;
+      // Hard 1000ms sleep — Gmail's XHR requests for lazy-loaded bodies must complete
+      await sleep(1000);
+    }
+
+    if (totalClicks > 0) {
+      logChatDebug("thread-expand:applied", {
+        threadId: threadKey,
+        clicks: totalClicks,
+        passes
+      }, { throttleKey: `thread-expand:${threadKey || "unknown"}`, throttleMs: 300 });
+    }
+    return { clicks: totalClicks, passes };
+  }
+
   function hasUsefulBodyText(text) {
     const value = normalize(text);
     return Boolean(value && value !== THREAD_BODY_PLACEHOLDER && value !== THREAD_NO_CONTENT);
@@ -5258,6 +5873,13 @@
       || ""
     );
     const sdkCachedMessages = getInboxSdkThreadMessages(extractionThreadIdHint);
+    const extractionAccountEmail = extractEmail(
+      state.activeAccountEmail
+      || state.currentUserEmail
+      || detectCurrentUserEmail(true)
+      || detectCurrentUserEmail()
+      || ""
+    );
 
     const subjectCandidates = Array.from(main.querySelectorAll("h1, h2, [role='heading']"))
       .map((node) => normalize(node.textContent))
@@ -5265,6 +5887,127 @@
     const subject = subjectCandidates[0] || "No subject";
 
     const messages = [];
+    const LOCALIZED_SELF_TOKENS = new Set([
+      "me", "yo", "moi", "ich", "io", "eu", "mim", "min", "ja", "ik", "jeg", "ben",
+      "mne", "menya", "меня", "я", "私", "我", "나", "저", "我自己", "내"
+    ]);
+    function looksLikeLocalizedSelfSender(value = "") {
+      const token = normalize(value || "").toLowerCase();
+      if (!token) return false;
+      if (isSelfSenderLabel(token)) return true;
+      const compact = token.replace(/\./g, "").trim();
+      return LOCALIZED_SELF_TOKENS.has(compact);
+    }
+
+    function senderElementForScope(scope) {
+      if (!(scope instanceof HTMLElement)) return null;
+      const selectors = [
+        "h3 .gD[email]",
+        "h3 .gD[data-hovercard-id]",
+        ".go .gD[email]",
+        ".go .gD[data-hovercard-id]",
+        ".gD[email]",
+        ".gD[data-hovercard-id]",
+        "h3 [email]",
+        "h3 [data-hovercard-id]",
+        ".go [email]",
+        ".go [data-hovercard-id]"
+      ];
+      for (const selector of selectors) {
+        const node = scope.querySelector(selector);
+        if (node instanceof HTMLElement) return node;
+      }
+      return null;
+    }
+
+    function evaluateOutgoingForScope(scope, senderValue = "", recipientEmails = []) {
+      const senderNode = senderElementForScope(scope);
+      const senderNodeEmail = extractEmail(
+        senderNode instanceof HTMLElement
+          ? (
+            senderNode.getAttribute("email")
+            || senderNode.getAttribute("data-hovercard-id")
+            || senderNode.getAttribute("data-hovercard-owner-email")
+            || senderNode.getAttribute("name")
+            || senderNode.getAttribute("title")
+            || senderNode.getAttribute("aria-label")
+            || senderNode.textContent
+          )
+          : ""
+      );
+      const senderNodeText = normalize(
+        senderNode instanceof HTMLElement
+          ? (senderNode.innerText || senderNode.textContent || senderNode.getAttribute("title") || "")
+          : ""
+      );
+      const senderEmail = extractEmail(senderValue || "") || senderNodeEmail;
+      const headerLine = normalize(
+        (scope instanceof HTMLElement ? (scope.querySelector(".g2, .hb, .go")?.textContent || "") : "") || ""
+      ).toLowerCase();
+      const byEmail = Boolean(
+        extractionAccountEmail
+        && senderEmail
+        && senderEmail === extractionAccountEmail
+      );
+      const byLocalizedMeLabel = looksLikeLocalizedSelfSender(senderValue || "") || looksLikeLocalizedSelfSender(senderNodeText || "");
+      const byStructure = Boolean(
+        scope instanceof HTMLElement
+        && scope.matches(".adn, .h7 .adn, [data-message-id], [data-legacy-message-id]")
+        && (
+          /\bto\b/.test(headerLine)
+          || headerLine.includes("destinataire")
+          || headerLine.includes("para ")
+          || headerLine.includes("a ")
+        )
+        && (
+          byLocalizedMeLabel
+          || (extractionAccountEmail && headerLine.includes(extractionAccountEmail.split("@")[0] || ""))
+          || (
+            extractionAccountEmail
+            && Array.isArray(recipientEmails)
+            && recipientEmails.some((email) => email && email !== extractionAccountEmail)
+          )
+        )
+      );
+      const outgoing = byEmail || byLocalizedMeLabel || byStructure;
+      const resolvedSenderEmail = outgoing && extractionAccountEmail
+        ? extractionAccountEmail
+        : senderEmail;
+      const direction = outgoing ? "outgoing" : (resolvedSenderEmail ? "incoming" : "unknown");
+      return {
+        direction,
+        outgoing,
+        senderEmail: resolvedSenderEmail,
+        senderNode,
+        senderNodeText,
+        senderNodeHtml: senderNode instanceof HTMLElement ? senderNode.outerHTML : ""
+      };
+    }
+
+    function warnExtractedSender(scope, sender, senderEval, mid) {
+      try {
+        const scopeClass = scope instanceof HTMLElement ? normalize(scope.className || "").slice(0, 160) : "";
+        console.warn(
+          "[reskin] Parsed message sender DOM:",
+          senderEval.senderNodeHtml || "(none)",
+          "sender:",
+          sender || "(empty)",
+          "senderEmail:",
+          senderEval.senderEmail || "(empty)",
+          "direction:",
+          senderEval.direction,
+          "outgoing:",
+          Boolean(senderEval.outgoing),
+          "mid:",
+          normalize(mid || ""),
+          "scopeClass:",
+          scopeClass
+        );
+      } catch (_) {
+        // ignore debug logging failures
+      }
+    }
+
     function headerScopesForMessage(scope) {
       const roots = [];
       const seen = new Set();
@@ -5446,6 +6189,8 @@
       );
       const sender = extractSenderFromScope(scope);
       const recipientEmails = extractRecipientEmails(scope, sender);
+      const senderEval = evaluateOutgoingForScope(scope, sender, recipientEmails);
+      warnExtractedSender(scope, sender, senderEval, mid);
       const date = extractDate(scope);
       const extractedBody = extractMessageBodyFromScope(scope, extractionThreadIdHint);
       const bodyHtml = extractedBody.bodyHtml || "";
@@ -5468,13 +6213,14 @@
       usedNodes.add(container);
       messages.push({
         sender: isUseful(sender) ? sender : "Unknown sender",
-        senderEmail: extractEmail(sender || ""),
+        senderEmail: senderEval.senderEmail || extractEmail(sender || ""),
         recipientEmails,
         date: date || "",
         dataMessageId: mid || "",
         bodyHtml: bodyHtml || "",
         bodyText: bodyText || THREAD_NO_CONTENT,
-        sourceType: extractedBody.sourceType || "captured"
+        sourceType: extractedBody.sourceType || "captured",
+        direction: senderEval.direction
       });
     }
     if (DEBUG_THREAD_EXTRACT) {
@@ -5499,6 +6245,8 @@
             );
             const sender = extractSenderFromScope(scope);
             const recipientEmails = extractRecipientEmails(scope, sender);
+            const senderEval = evaluateOutgoingForScope(scope, sender, recipientEmails);
+            warnExtractedSender(scope, sender, senderEval, mid);
             const date = extractDate(scope);
             const extractedBody = extractMessageBodyFromScope(scope, extractionThreadIdHint);
             const bodyHtml = extractedBody.bodyHtml || "";
@@ -5515,13 +6263,14 @@
             if (uniqueKey) seenBodies.add(uniqueKey);
             messages.push({
               sender: isUseful(sender) ? sender : "Unknown sender",
-              senderEmail: extractEmail(sender || ""),
+              senderEmail: senderEval.senderEmail || extractEmail(sender || ""),
               recipientEmails,
               date: date || "",
               dataMessageId: mid || "",
               bodyHtml: bodyHtml || "",
               bodyText: bodyText || THREAD_NO_CONTENT,
-              sourceType: extractedBody.sourceType || "captured"
+              sourceType: extractedBody.sourceType || "captured",
+              direction: senderEval.direction
             });
           }
           if (messages.length > 0) break;
@@ -5553,6 +6302,7 @@
         const scope = container;
         const sender = extractSenderFromScope(scope);
         const recipientEmails = extractRecipientEmails(scope, sender);
+        const senderEval = evaluateOutgoingForScope(scope, sender, recipientEmails);
         const date = extractDate(scope);
         const extractedBody = extractMessageBodyFromScope(scope, extractionThreadIdHint);
         const bodyHtml = extractedBody.bodyHtml || "";
@@ -5597,15 +6347,17 @@
         }
         if (uniqueKey && seenBodies.has(uniqueKey)) continue;
         if (uniqueKey) seenBodies.add(uniqueKey);
+        warnExtractedSender(scope, sender, senderEval, mid);
         messages.push({
           sender: isUseful(sender) ? sender : "Unknown sender",
-          senderEmail: extractEmail(sender || ""),
+          senderEmail: senderEval.senderEmail || extractEmail(sender || ""),
           recipientEmails,
           date: date || "",
           dataMessageId: mid || "",
           bodyHtml: bodyHtml || "",
           bodyText: bodyText || THREAD_NO_CONTENT,
-          sourceType: extractedBody.sourceType || (hasStrictBody ? "captured" : "fallback")
+          sourceType: extractedBody.sourceType || (hasStrictBody ? "captured" : "fallback"),
+          direction: senderEval.direction
         });
       }
       if (DEBUG_THREAD_EXTRACT) {
@@ -5648,6 +6400,7 @@
       }
       const sender = extractSenderFromScope(main);
       const recipientEmails = extractRecipientEmails(main, sender);
+      const senderEval = evaluateOutgoingForScope(main, sender, recipientEmails);
       const dateCandidates = Array.from(main.querySelectorAll("span.g3[title], time, span[title], div[title]"))
         .map((node) => normalize(node.getAttribute("title") || node.innerText || node.textContent))
         .filter((text) => looksLikeDateOrTime(text) || /\b\d{4}\b/.test(text));
@@ -5728,14 +6481,16 @@
           iframes: document.querySelectorAll("iframe").length
         };
       }
+      warnExtractedSender(main, sender, senderEval, "");
       messages.push({
         sender: isUseful(sender) ? sender : "Unknown sender",
-        senderEmail: extractEmail(sender || ""),
+        senderEmail: senderEval.senderEmail || extractEmail(sender || ""),
         recipientEmails,
         date,
         dataMessageId: "",
         bodyHtml: finalBodyText.length >= 3 ? bodyHtml : "",
-        bodyText: finalBodyText
+        bodyText: finalBodyText,
+        direction: senderEval.direction
       });
     }
 
@@ -6069,40 +6824,94 @@
     return score;
   }
 
-  async function captureThreadDataWithRetry(threadId, mailbox, maxAttempts = 6, hintHref = "") {
+  async function captureThreadDataWithRetry(threadId, mailbox, maxAttempts = 6, hintHref = "", options = {}) {
     const threadHintHref = normalize(hintHref || "") || lookupThreadHintHref(threadId);
     const targetHash = threadHashForMailbox(mailbox, threadId, threadHintHref);
     let bestData = { subject: "", messages: [] };
     let bestScore = -Infinity;
-    await ensureInboxSdkReady();
+    let extractAttempts = 0;
+    let contextHits = 0;
+    const forceExtractAttempt = Boolean(options && options.forceExtractAttempt);
+    try {
+      await ensureInboxSdkReady();
+    } catch (error) {
+      logWarn(`InboxSDK warmup failed during hydration; continuing with DOM extraction only: ${normalize(error && error.message ? error.message : String(error || ""))}`);
+    }
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const lockStartedAt = Date.now();
       while (state.replySendInProgress && Date.now() - lockStartedAt < 12000) {
         await sleep(120);
       }
-      const context = await ensureThreadContextForReply(threadId, mailbox, threadHintHref);
-      if (!context.ok && window.location.hash !== targetHash) {
-        window.location.hash = targetHash;
-      }
+      let context = await ensureThreadContextForReply(threadId, mailbox, threadHintHref);
       let contextReady = context.ok ? (context.status || threadContextSnapshot(threadId)) : threadContextSnapshot(threadId);
+      let contextMode = context.ok ? "ensure-context" : "ensure-context-failed";
+
       if (!contextReady.ok) {
-        contextReady = await waitForThreadContextForReply(threadId, 5200);
+        if (window.location.hash !== targetHash) {
+          window.location.hash = targetHash;
+          await sleep(180);
+        }
+        const forced = await forceThreadContextForHydration(threadId, mailbox, threadHintHref);
+        if (forced.ok) {
+          context = forced;
+          contextReady = forced.status || threadContextSnapshot(threadId);
+          contextMode = normalize(forced.readyMode || forced.contextStep || "") || "forced-hash";
+        }
       }
+
       if (!contextReady.ok) {
-        const reopened = openThread(threadId, threadHintHref, lookupThreadRowHint(threadId));
-        if (reopened) {
-          contextReady = await waitForThreadContextForReply(threadId, 3600);
+        const domWait = await waitForThreadDomReadyForHydration(threadId, 4200);
+        if (domWait.ok) {
+          contextReady = domWait.status || threadContextSnapshot(threadId);
+          contextMode = normalize(domWait.mode || "") || "dom-wait";
         }
       }
       if (!contextReady.ok) {
+        logChatDebug("contact-hydration:context-miss", {
+          threadId: normalize(threadId || ""),
+          mailbox: mailboxCacheKey(mailbox),
+          hintHref: Boolean(threadHintHref),
+          attempt,
+          mode: contextMode,
+          hash: normalize(window.location.hash || ""),
+          status: contextReady || null,
+          tried: Array.isArray(context && context.tried) ? context.tried.slice(0, 8) : []
+        }, { throttleKey: `contact-hydration-context-miss:${normalize(threadId || "")}`, throttleMs: 220 });
         await sleep(220 + Math.min(380, attempt * 80));
         continue;
       }
+      contextHits += 1;
+      logChatDebug("contact-hydration:context-ready", {
+        threadId: normalize(threadId || ""),
+        mailbox: mailboxCacheKey(mailbox),
+        hintHref: Boolean(threadHintHref),
+        attempt,
+        mode: contextMode,
+        hash: normalize(window.location.hash || ""),
+        dom: contextReady && contextReady.dom ? contextReady.dom : null
+      }, { throttleKey: `contact-hydration-context-ready:${normalize(threadId || "")}`, throttleMs: 220 });
 
+      const expansion = await expandCollapsedThreadMessagesForExtraction(threadId, {
+        maxPasses: attempt === 0 ? THREAD_EXPAND_MAX_PASSES : Math.max(2, THREAD_EXPAND_MAX_PASSES - 1),
+        maxClicksPerPass: attempt === 0 ? THREAD_EXPAND_MAX_CLICKS_PER_PASS : Math.max(18, THREAD_EXPAND_MAX_CLICKS_PER_PASS - 10)
+      });
       await waitForInboxSdkThreadMessages(threadId, attempt === 0 ? 1200 : 520);
+      if (expansion.clicks > 0) {
+        await sleep(220 + Math.min(260, expansion.clicks * 4));
+      }
       await sleep(attempt === 0 ? 900 : 520 + Math.min(320, attempt * 55));
+      logChatDebug("contact-hydration:extract-run", {
+        threadId: normalize(threadId || ""),
+        mailbox: mailboxCacheKey(mailbox),
+        attempt,
+        hash: normalize(window.location.hash || ""),
+        expansionClicks: expansion.clicks,
+        expansionPasses: expansion.passes
+      }, { throttleKey: `contact-hydration-extract-run:${normalize(threadId || "")}`, throttleMs: 220 });
+      await forceExpandGmailThread();
       const data = extractOpenThreadData();
+      extractAttempts += 1;
       const messages = normalizeThreadMessagesForChat(
         applySnippetFallbackToMessages(Array.isArray(data.messages) ? data.messages : [], threadId),
         threadId
@@ -6125,10 +6934,61 @@
       if (hasSdkBody) break;
     }
 
+    if (forceExtractAttempt && extractAttempts === 0) {
+      logChatDebug("contact-hydration:last-chance-start", {
+        threadId: normalize(threadId || ""),
+        mailbox: mailboxCacheKey(mailbox),
+        hintHref: Boolean(threadHintHref),
+        hash: normalize(window.location.hash || "")
+      }, { throttleKey: `contact-hydration-last-chance-start:${normalize(threadId || "")}`, throttleMs: 260 });
+      if (window.location.hash !== targetHash) {
+        window.location.hash = targetHash;
+        await sleep(220);
+      }
+      await forceThreadContextForHydration(threadId, mailbox, threadHintHref);
+      await waitForThreadDomReadyForHydration(threadId, 2200);
+      await expandCollapsedThreadMessagesForExtraction(threadId, {
+        maxPasses: Math.max(2, THREAD_EXPAND_MAX_PASSES - 1),
+        maxClicksPerPass: Math.max(18, THREAD_EXPAND_MAX_CLICKS_PER_PASS - 10)
+      });
+      await waitForInboxSdkThreadMessages(threadId, 520);
+      await sleep(360);
+      await forceExpandGmailThread();
+      const data = extractOpenThreadData();
+      extractAttempts += 1;
+      const messages = normalizeThreadMessagesForChat(
+        applySnippetFallbackToMessages(Array.isArray(data.messages) ? data.messages : [], threadId),
+        threadId
+      );
+      const sdkMessages = getInboxSdkThreadMessages(threadId);
+      const scoredDom = scoreExtractedMessages(messages);
+      const scoredSdk = scoreExtractedMessages(sdkMessages);
+      if (scoredSdk > scoredDom && hasMeaningfulCapturedMessages(sdkMessages)) {
+        if (scoredSdk > bestScore) {
+          bestScore = scoredSdk;
+          bestData = { ...data, messages: sdkMessages };
+        }
+      } else if (scoredDom > bestScore) {
+        bestScore = scoredDom;
+        bestData = { ...data, messages };
+      }
+      logChatDebug("contact-hydration:last-chance-finish", {
+        threadId: normalize(threadId || ""),
+        mailbox: mailboxCacheKey(mailbox),
+        domCount: Array.isArray(messages) ? messages.length : 0,
+        sdkCount: Array.isArray(sdkMessages) ? sdkMessages.length : 0,
+        bestScore
+      }, { throttleKey: `contact-hydration-last-chance-finish:${normalize(threadId || "")}`, throttleMs: 260 });
+    }
+
     if (!Array.isArray(bestData.messages) || bestData.messages.length === 0) {
       logWarn(`Thread hydration failed threadId=${normalize(threadId || "")} mailbox=${normalize(mailbox || "")} hint=${threadHintHref ? "yes" : "no"}`);
     }
-    return bestData;
+    return {
+      ...bestData,
+      extractAttempts,
+      contextHits
+    };
   }
 
   function contactMessageSourceRank(message) {
@@ -6178,7 +7038,8 @@
       const hasCapturedCanonical = normalizedThreadMessages.some(
         (msg) => !msg.isSeededPlaceholder && msg.sourceType !== "seeded"
       );
-      for (const message of normalizedThreadMessages) {
+      for (let messageOrdinal = 0; messageOrdinal < normalizedThreadMessages.length; messageOrdinal += 1) {
+        const message = normalizedThreadMessages[messageOrdinal];
         if (!message || typeof message !== "object") continue;
         if (hasCapturedCanonical && message.isSeededPlaceholder) continue;
         const messageId = normalize(message.messageId || message.dataMessageId || "");
@@ -6187,11 +7048,17 @@
           continue;
         }
         const bodyHash = hashString(normalize(message.cleanBodyText || "").toLowerCase());
+        const stableSourceIndex = Number.isFinite(Number(message.sourceIndex))
+          ? Number(message.sourceIndex)
+          : messageOrdinal;
         const fallbackKey = [
           canonicalThreadId(threadId),
           normalize(message.senderEmail || message.sender || "").toLowerCase(),
           Number(message.timestampMs || 0),
-          bodyHash
+          normalizeMessageDateToken(message.date || ""),
+          normalize(message.direction || ""),
+          bodyHash,
+          stableSourceIndex
         ].join("|");
         if (!messageId && seenFallbackKeys.has(fallbackKey)) {
           dedupByFallback += 1;
@@ -6205,7 +7072,7 @@
           __order: merged.length,
           __threadOrder: threadOrder,
           __sourceRank: contactMessageSourceRank(message),
-          __sourceIndex: Number.isFinite(Number(message.sourceIndex)) ? Number(message.sourceIndex) : 0
+          __sourceIndex: stableSourceIndex
         });
       }
     }
@@ -6221,7 +7088,7 @@
         return Number(a.__order || 0) - Number(b.__order || 0);
       })
       .map(({ __order, __threadOrder, __sourceIndex, __sourceRank, ...rest }) => rest);
-    logChatDebug("contact-merge:final", {
+    const mergeMetrics = {
       conversationKey: conversationContext.conversationKey || "",
       contactEmail: conversationContext.contactEmail || "",
       activeAccountEmail: conversationContext.activeAccountEmail || "",
@@ -6232,7 +7099,9 @@
       dedupByFallback,
       threadStats: perThreadDebug,
       sample: summarizeChatMessagesForDebug(finalMessages, 8)
-    }, {
+    };
+    state.lastContactMergeMetrics = mergeMetrics;
+    logChatDebug("contact-merge:final", mergeMetrics, {
       throttleKey: `contact-merge-final:${conversationContext.conversationKey || conversationContext.contactEmail || "unknown"}`,
       throttleMs: 420
     });
@@ -6272,8 +7141,742 @@
     return byThread;
   }
 
-  function loadContactChat(group, root) {
+  function isContactTimelineV2Enabled() {
+    return Boolean(ENABLE_CONTACT_MERGE_MODE && CONTACT_TIMELINE_V2_ENABLED);
+  }
+
+  function isContactTimelineV2Active() {
+    return Boolean(
+      isContactTimelineV2Enabled()
+      && normalize(state.activeConversationKey || "")
+      && normalize(state.activeContactEmail || "")
+    );
+  }
+
+  function contactTimelineSourceRank(source) {
+    const normalized = normalize(source || "").toLowerCase();
+    // Prefer mailbox cache ordering over transient live-row snapshots for tie-break stability.
+    if (normalized === "row_cache") return 0;
+    if (normalized === "row_live") return 1;
+    if (normalized === "optimistic") return 2;
+    return 3;
+  }
+
+  function parseTimelineRowTimestampMs(rowMessage) {
+    const msg = rowMessage && typeof rowMessage === "object" ? rowMessage : {};
+    const explicit = Number(msg.timestampMs || msg.optimisticAt || 0);
+    if (explicit > 0) return explicit;
+    const rawDate = normalize(msg.date || "");
+    if (!rawDate) return 0;
+
+    const parsedExplicit = parseThreadTimestampForOrder(rawDate);
+    if (parsedExplicit > 0) return parsedExplicit;
+
+    const fallbackMessageSort = messageDateSortValue({ date: rawDate });
+    if (fallbackMessageSort > 0) return fallbackMessageSort;
+
+    const direct = Date.parse(rawDate);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+
+    if (/^[A-Za-z]{3}\s+\d{1,2}$/i.test(rawDate)) {
+      const year = new Date().getFullYear();
+      const withYear = Date.parse(`${rawDate}, ${year} 12:00 PM`);
+      if (Number.isFinite(withYear) && withYear > 0) return withYear;
+    }
+
+    if (/^\d{1,2}:\d{2}\s?(AM|PM)$/i.test(rawDate)) {
+      const today = new Date();
+      const withToday = Date.parse(`${today.toDateString()} ${rawDate}`);
+      if (Number.isFinite(withToday) && withToday > 0) return withToday;
+    }
+
+    return 0;
+  }
+
+  function normalizeTimelineRowMessageV2(rowMessage, context = {}, source = "row_live", rowOrder = 0) {
+    const msg = rowMessage && typeof rowMessage === "object" ? rowMessage : {};
+    const conversationContext = activeConversationContext(context);
+    const mailbox = mailboxCacheKey(msg.mailbox || "inbox");
+    const threadId = canonicalThreadId(msg.threadId || "") || normalize(msg.threadId || "");
+    if (!threadId) return null;
+
+    const senderRaw = normalize(msg.sender || "");
+    let senderEmail = extractEmail(msg.senderEmail || senderRaw);
+    if (!senderEmail && mailbox === "sent" && conversationContext.activeAccountEmail) {
+      senderEmail = conversationContext.activeAccountEmail;
+    }
+    const recipientEmails = normalizeEmailList([
+      msg.recipientEmails,
+      msg.recipients,
+      msg.to,
+      msg.cc,
+      msg.ariaLabel,
+      msg.row instanceof HTMLElement ? msg.row.getAttribute("aria-label") : "",
+      msg.row instanceof HTMLElement ? normalize(msg.row.innerText || msg.row.textContent || "").slice(0, 620) : ""
+    ]).filter((email) => email && email !== senderEmail);
+    const participants = normalizeEmailList([
+      senderEmail,
+      recipientEmails,
+      msg.participants
+    ]);
+
+    const bodyText = normalize(msg.bodyText || msg.snippet || "");
+    const dateLabel = normalize(msg.date || "");
+    const dateToken = normalizeMessageDateToken(dateLabel);
+    const timestampMs = parseTimelineRowTimestampMs(msg);
+    const messageId = normalize(msg.messageId || msg.dataMessageId || "");
+    const snippetHash = hashString(`${normalize(msg.subject || "").toLowerCase()}|${bodyText.toLowerCase()}`);
+    const hrefToken = normalize(hashFromHref(msg.href || "") || msg.href || "");
+    const fallbackDiscriminator = hrefToken || `ord:${Number(rowOrder || 0)}`;
+    const rowKey = messageId
+      ? `mid:${messageId}`
+      : [
+        "row",
+        mailbox,
+        threadId,
+        normalize(senderEmail || senderRaw).toLowerCase(),
+        dateToken,
+        snippetHash,
+        fallbackDiscriminator
+      ].join("|");
+
+    let direction = "unknown";
+    const activeEmail = extractEmail(conversationContext.activeAccountEmail || "");
+    if (source === "optimistic") {
+      if (!senderEmail) {
+        senderEmail = extractEmail(
+          conversationContext.activeAccountEmail
+          || msg.senderEmail
+          || detectCurrentUserEmail()
+          || ""
+        );
+      }
+      direction = "outgoing";
+    } else if (senderEmail && activeEmail && senderEmail === activeEmail) {
+      direction = "outgoing";
+    } else if (senderEmail && (!activeEmail || senderEmail !== activeEmail)) {
+      direction = "incoming";
+    }
+
+    const normalized = normalizeThreadMessageForChat({
+      threadId,
+      mailbox,
+      sender: senderRaw || senderEmail || "Unknown sender",
+      senderEmail: senderEmail || "",
+      recipientEmails,
+      participants,
+      date: dateLabel,
+      bodyText,
+      snippet: normalize(msg.snippet || ""),
+      subject: normalize(msg.subject || ""),
+      messageId,
+      dataMessageId: messageId,
+      conversationKey: normalize(conversationContext.conversationKey || ""),
+      messageKey: rowKey,
+      direction,
+      sourceType: source === "optimistic" ? "optimistic" : "fallback",
+      isOptimistic: source === "optimistic" || Boolean(msg.isOptimistic),
+      deliveryState: normalize(msg.deliveryState || msg.optimisticStatus || ""),
+      optimisticStatus: normalize(msg.optimisticStatus || ""),
+      optimisticAt: Number(msg.optimisticAt || 0),
+      clientSendId: normalize(msg.clientSendId || ""),
+      timestampMs,
+      sourceIndex: Number(rowOrder || 0)
+    }, {
+      ...conversationContext,
+      threadId,
+      sourceIndex: Number(rowOrder || 0),
+      index: Number(rowOrder || 0),
+      direction
+    });
+
+    return {
+      ...normalized,
+      id: rowKey,
+      messageKey: rowKey,
+      conversationKey: normalize(conversationContext.conversationKey || ""),
+      source,
+      sourceType: source,
+      mailbox,
+      dateToken,
+      timestampMs,
+      rowOrder: Number(rowOrder || 0)
+    };
+  }
+
+  function messageBelongsToContactTimelineV2(message, context = {}) {
+    const msg = message && typeof message === "object" ? message : {};
+    const conversationContext = activeConversationContext(context);
+    const contactEmail = extractEmail(conversationContext.contactEmail || "");
+    const activeAccountEmail = extractEmail(conversationContext.activeAccountEmail || "");
+    if (!contactEmail) return false;
+    const sourceType = normalize(msg.sourceType || msg.source || "").toLowerCase();
+    if (sourceType === "optimistic" || Boolean(msg.isOptimistic)) return true;
+
+    const parties = messagePartySnapshot(msg, conversationContext);
+    const participantSet = new Set(Array.isArray(parties.participants) ? parties.participants : []);
+    const senderEmail = extractEmail(parties.senderEmail || "");
+    const inferredContact = extractEmail(contactKeyFromMessage(msg));
+    const hasContact = participantSet.has(contactEmail) || senderEmail === contactEmail || inferredContact === contactEmail;
+    if (!hasContact) return false;
+
+    const isGroup = participantSet.size > 2;
+    if (!activeAccountEmail) {
+      if (isGroup) return false;
+      return hasContact;
+    }
+    if (isGroup) {
+      return participantSet.has(contactEmail) && participantSet.has(activeAccountEmail);
+    }
+    if (participantSet.has(activeAccountEmail) || senderEmail === activeAccountEmail) return true;
+
+    const mailbox = mailboxCacheKey(msg.mailbox || "");
+    const senderLooksSelf = senderEmail === activeAccountEmail || isSelfSenderLabel(msg.sender || "");
+    const senderLooksContact = senderEmail === contactEmail;
+    if (senderLooksSelf && (mailbox === "sent" || inferredContact === contactEmail)) return true;
+    if (senderLooksContact && mailbox !== "sent") return true;
+    return false;
+  }
+
+  function buildContactTimelineFromRows(context = {}, sources = {}) {
+    const conversationContext = activeConversationContext(context);
+    const liveRows = Array.isArray(sources.liveRows) ? sources.liveRows : [];
+    const inboxCached = Array.isArray(sources.inboxCached) ? sources.inboxCached : [];
+    const sentCached = Array.isArray(sources.sentCached) ? sources.sentCached : [];
+    const extraRows = Array.isArray(sources.extraRows) ? sources.extraRows : [];
+    const optimisticRows = Array.isArray(sources.optimisticRows) ? sources.optimisticRows : [];
+
+    const normalizedPool = [];
+    const sourceStats = { row_live: 0, row_cache: 0, optimistic: 0 };
+    const pushRows = (rows, source) => {
+      for (let index = 0; index < rows.length; index += 1) {
+        const normalized = normalizeTimelineRowMessageV2(rows[index], conversationContext, source, index);
+        if (!normalized) continue;
+        normalizedPool.push(normalized);
+        sourceStats[source] = Number(sourceStats[source] || 0) + 1;
+      }
+    };
+
+    pushRows(liveRows, "row_live");
+    pushRows(inboxCached, "row_cache");
+    pushRows(sentCached, "row_cache");
+    pushRows(extraRows, "row_live");
+    pushRows(optimisticRows, "optimistic");
+
+    const filtered = [];
+    let droppedNoContactMatch = 0;
+    for (const message of normalizedPool) {
+      if (!messageBelongsToContactTimelineV2(message, conversationContext)) {
+        droppedNoContactMatch += 1;
+        continue;
+      }
+      filtered.push(message);
+    }
+
+    const deduped = [];
+    const seenMessageIds = new Set();
+    const seenFallbackKeys = new Set();
+    let dedupByMessageId = 0;
+    let dedupByFallback = 0;
+    for (const message of filtered) {
+      const messageId = normalize(message.messageId || message.dataMessageId || "");
+      if (messageId) {
+        if (seenMessageIds.has(messageId)) {
+          dedupByMessageId += 1;
+          continue;
+        }
+        seenMessageIds.add(messageId);
+      } else {
+        const canonicalThread = canonicalThreadId(message.threadId || "") || normalize(message.threadId || "");
+        const senderEmail = extractEmail(message.senderEmail || message.sender || "");
+        const direction = normalize(message.direction || "");
+        const timestampMs = Number(message.timestampMs || 0);
+        const dateToken = normalizeMessageDateToken(message.date || "");
+        const bodyFingerprint = hashString(normalize(
+          message.cleanBodyText
+          || message.bodyText
+          || message.snippet
+          || ""
+        ).toLowerCase());
+        const fallbackKey = [
+          canonicalThread,
+          senderEmail,
+          direction,
+          timestampMs,
+          dateToken,
+          bodyFingerprint
+        ].join("|");
+        if (!fallbackKey) continue;
+        if (seenFallbackKeys.has(fallbackKey)) {
+          dedupByFallback += 1;
+          continue;
+        }
+        seenFallbackKeys.add(fallbackKey);
+      }
+      deduped.push(message);
+    }
+
+    const messages = deduped
+      .slice()
+      .sort((a, b) => {
+        const ta = Number(a.timestampMs || 0);
+        const tb = Number(b.timestampMs || 0);
+        if (ta !== tb) return ta - tb;
+        const sa = contactTimelineSourceRank(a.source || a.sourceType || "");
+        const sb = contactTimelineSourceRank(b.source || b.sourceType || "");
+        if (sa !== sb) return sa - sb;
+        const ra = Number(a.rowOrder || 0);
+        const rb = Number(b.rowOrder || 0);
+        if (ra !== rb) return ra - rb;
+        return normalize(a.id || a.messageKey || "").localeCompare(normalize(b.id || b.messageKey || ""));
+      });
+
+    const threadLatestAt = new Map();
+    for (const message of messages) {
+      const threadId = canonicalThreadId(message.threadId || "") || normalize(message.threadId || "");
+      if (!threadId) continue;
+      const stamp = Number(message.timestampMs || 0);
+      const current = Number(threadLatestAt.get(threadId) || 0);
+      if (stamp >= current) threadLatestAt.set(threadId, stamp);
+    }
+    const threadIds = Array.from(threadLatestAt.entries())
+      .sort((a, b) => {
+        if (a[1] !== b[1]) return b[1] - a[1];
+        return String(a[0]).localeCompare(String(b[0]));
+      })
+      .map((entry) => entry[0]);
+
+    const metrics = {
+      conversationKey: normalize(conversationContext.conversationKey || ""),
+      contactEmail: extractEmail(conversationContext.contactEmail || ""),
+      activeAccountEmail: extractEmail(conversationContext.activeAccountEmail || ""),
+      sourceCounts: sourceStats,
+      poolCount: normalizedPool.length,
+      filteredCount: filtered.length,
+      droppedNoContactMatch,
+      dedupByMessageId,
+      dedupByFallback,
+      finalCount: messages.length,
+      threadCount: threadIds.length,
+      sample: summarizeChatMessagesForDebug(messages, 8)
+    };
+
+    return { context: conversationContext, messages, threadIds, metrics };
+  }
+
+  function buildActiveContactTimelineV2(options = {}) {
+    if (!isContactTimelineV2Enabled()) return null;
+    const conversationContext = activeConversationContext({
+      activeAccountEmail: options.activeAccountEmail || state.activeAccountEmail || state.currentUserEmail,
+      contactEmail: options.contactEmail || state.activeContactEmail || activeConversationContactEmail(),
+      conversationKey: options.conversationKey || state.activeConversationKey || ""
+    });
+    const contactEmail = extractEmail(conversationContext.contactEmail || "");
+    if (!contactEmail) return null;
+
+    const liveRows = Array.isArray(options.liveRows) ? options.liveRows : (collectMessages(500).items || []);
+    const inboxCached = Array.isArray(options.inboxCached)
+      ? options.inboxCached
+      : (Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("inbox")]) ? state.scannedMailboxMessages[mailboxCacheKey("inbox")] : []);
+    const sentCached = Array.isArray(options.sentCached)
+      ? options.sentCached
+      : (Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("sent")]) ? state.scannedMailboxMessages[mailboxCacheKey("sent")] : []);
+    const extraRows = Array.isArray(options.extraRows) ? options.extraRows : [];
+
+    const trackedThreadIds = Array.isArray(state.contactThreadIds) ? state.contactThreadIds : [];
+    const optimisticRows = [];
+    for (const threadId of trackedThreadIds) {
+      optimisticRows.push(...getOptimisticMessagesForThread(threadId));
+    }
+    if (Array.isArray(options.optimisticRows)) {
+      optimisticRows.push(...options.optimisticRows);
+    }
+
+    return buildContactTimelineFromRows(conversationContext, {
+      liveRows,
+      inboxCached,
+      sentCached,
+      extraRows,
+      optimisticRows
+    });
+  }
+
+  function applyActiveContactTimelineV2(result, options = {}) {
+    if (!result || !result.context) return false;
+    const preferredThreadId = canonicalThreadId(options.preferredThreadId || "") || normalize(options.preferredThreadId || "");
+    const threadIds = Array.isArray(result.threadIds) ? result.threadIds.slice() : [];
+
+    // Deep-hydration guard: if the timeline was fully deep-hydrated recently, do not let a
+    // shallow cache-refresh rebuild (which only sees list-row snippets) shrink it back down.
+    const incomingCount = Array.isArray(result.messages) ? result.messages.length : 0;
+    const existingDeepCount = Number(state.contactTimelineDeepCount || 0);
+    const deepHydratedRecently = Boolean(
+      state.contactTimelineIsDeep
+      && state.contactTimelineDeepHydratedAt
+      && Date.now() - state.contactTimelineDeepHydratedAt < 120000
+    );
+    if (deepHydratedRecently && incomingCount < existingDeepCount) {
+      logChatDebug("contact-v2:shallow-rebuild-blocked", {
+        reason: "deep-hydration-guard",
+        existingDeepCount,
+        incomingCount,
+        deepHydratedAgoMs: Date.now() - state.contactTimelineDeepHydratedAt
+      }, { throttleKey: `contact-v2-shallow-blocked:${normalize(state.activeConversationKey || "unknown")}`, throttleMs: 500 });
+      return true;
+    }
+
+    state.activeContactEmail = extractEmail(result.context.contactEmail || "") || state.activeContactEmail;
+    state.activeConversationKey = normalize(result.context.conversationKey || "") || state.activeConversationKey;
+    state.activeContactKey = state.activeContactEmail || normalize(state.activeContactKey || "");
+    state.activeAccountEmail = extractEmail(result.context.activeAccountEmail || "") || state.activeAccountEmail;
+    state.activeTimelineMessages = Array.isArray(result.messages) ? result.messages.slice() : [];
+    state.contactThreadIds = threadIds;
+    state.mergedMessages = state.activeTimelineMessages.slice();
+    state.contactTimelineV2Metrics = result.metrics || null;
+
+    if (preferredThreadId && threadIds.includes(preferredThreadId)) {
+      state.currentThreadIdForReply = preferredThreadId;
+      state.activeThreadId = preferredThreadId;
+    } else if (
+      !state.currentThreadIdForReply
+      || !threadIds.includes(canonicalThreadId(state.currentThreadIdForReply || "") || normalize(state.currentThreadIdForReply || ""))
+    ) {
+      const fallbackThreadId = threadIds[0] || "";
+      state.currentThreadIdForReply = fallbackThreadId;
+      state.activeThreadId = fallbackThreadId;
+    }
+
+    logChatDebug("contact-v2:timeline-built", {
+      reason: normalize(options.reason || "build"),
+      conversationKey: state.activeConversationKey || "",
+      contactEmail: state.activeContactEmail || "",
+      activeAccountEmail: state.activeAccountEmail || "",
+      threadCount: threadIds.length,
+      messageCount: state.activeTimelineMessages.length,
+      metrics: state.contactTimelineV2Metrics || null
+    }, { throttleKey: `contact-v2-built:${state.activeConversationKey || state.activeContactEmail || "unknown"}`, throttleMs: 320 });
+    return true;
+  }
+
+  function rebuildActiveContactTimelineV2(options = {}) {
+    if (!isContactTimelineV2Enabled()) return false;
+    if (!isContactTimelineV2Active()) return false;
+    const result = buildActiveContactTimelineV2(options);
+    if (!result) return false;
+    const removedOptimisticKeys = new Set();
+    const trackedThreadIds = Array.from(new Set(
+      (Array.isArray(result.threadIds) ? result.threadIds : [])
+        .map((id) => canonicalThreadId(id || "") || normalize(id || ""))
+        .filter(Boolean)
+    ));
+    for (const threadId of trackedThreadIds) {
+      const canonicalRows = (Array.isArray(result.messages) ? result.messages : []).filter((msg) => {
+        const nextThreadId = canonicalThreadId(msg && msg.threadId || "") || normalize(msg && msg.threadId || "");
+        if (nextThreadId !== threadId) return false;
+        if (normalize(msg && msg.direction || "") !== "outgoing") return false;
+        return normalize(msg && msg.source || msg && msg.sourceType || "") !== "optimistic";
+      });
+      const reconciliation = reconcileOptimisticMessagesWithCanonical(threadId, canonicalRows, options.optimisticMessage || null);
+      if (!reconciliation || !reconciliation.changed) continue;
+      for (const key of reconciliation.matchedKeys || []) {
+        if (normalize(key)) removedOptimisticKeys.add(normalize(key));
+      }
+    }
+    if (removedOptimisticKeys.size > 0) {
+      result.messages = (Array.isArray(result.messages) ? result.messages : [])
+        .filter((msg) => !removedOptimisticKeys.has(normalize(msg && msg.messageKey || "")));
+      result.metrics = {
+        ...(result.metrics || {}),
+        reconciledOptimisticCount: removedOptimisticKeys.size
+      };
+    }
+    const applied = applyActiveContactTimelineV2(result, options);
+    if (!applied) return false;
+
+    const root = options.root instanceof HTMLElement ? options.root : document.getElementById(ROOT_ID);
+    if (root instanceof HTMLElement && state.currentView === "thread") {
+      renderThread(root);
+    }
+    return true;
+  }
+
+  function scheduleActiveContactTimelineRefreshV2(reason = "") {
+    if (!isContactTimelineV2Enabled()) return;
+    if (!isContactTimelineV2Active()) return;
+    if (state.contactTimelineRefreshTimer) {
+      clearTimeout(state.contactTimelineRefreshTimer);
+    }
+    state.contactTimelineRefreshTimer = setTimeout(() => {
+      state.contactTimelineRefreshTimer = null;
+      const refreshed = rebuildActiveContactTimelineV2({ reason: normalize(reason || "cache-refresh") });
+      logChatDebug("contact-v2:cache-refresh", {
+        reason: normalize(reason || "cache-refresh"),
+        refreshed,
+        conversationKey: normalize(state.activeConversationKey || ""),
+        cacheRevision: Number(state.mailboxCacheRevision || 0)
+      }, { throttleKey: `contact-v2-cache-refresh:${normalize(state.activeConversationKey || "")}`, throttleMs: 500 });
+    }, 180);
+  }
+
+  function openContactTimelineFromRowV2(message, root, route = {}, options = {}) {
+    if (!isContactTimelineV2Enabled()) return false;
+    if (!(root instanceof HTMLElement)) return false;
+    const msg = message && typeof message === "object" ? message : null;
+    if (!msg) return false;
+    bumpInteractionEpoch("open-contact-v2");
+
+    const contactKey = normalize(contactKeyFromMessage(msg) || "");
+    const contactEmail = extractEmail(contactKey || msg.senderEmail || msg.sender || "");
+    if (!contactEmail) return false;
+
+    const activeAccountEmail = detectCurrentUserEmail(true) || detectCurrentUserEmail();
+    const conversationKey = conversationKeyFromContact(contactEmail);
+    const context = activeConversationContext({
+      activeAccountEmail,
+      contactEmail,
+      conversationKey
+    });
+    const mailbox = mailboxCacheKey(route.mailbox || msg.mailbox || "inbox");
+    const liveRows = collectMessages(500).items || [];
+    const inboxCached = Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("inbox")])
+      ? state.scannedMailboxMessages[mailboxCacheKey("inbox")]
+      : [];
+    const sentCached = Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("sent")])
+      ? state.scannedMailboxMessages[mailboxCacheKey("sent")]
+      : [];
+    const seedRows = Array.isArray(options.seedRows)
+      ? options.seedRows
+      : (Array.isArray(msg.seedRows) ? msg.seedRows : []);
+
+    const result = buildContactTimelineFromRows(context, {
+      liveRows,
+      inboxCached,
+      sentCached,
+      extraRows: [msg, ...seedRows]
+    });
+    if (!result || !Array.isArray(result.messages)) return false;
+    if (result.messages.length === 0) {
+      const fallback = normalizeTimelineRowMessageV2(msg, context, "row_live", 0);
+      if (fallback) {
+        result.messages = [fallback];
+        result.threadIds = [canonicalThreadId(fallback.threadId || "") || normalize(fallback.threadId || "")].filter(Boolean);
+        result.metrics = {
+          ...(result.metrics || {}),
+          finalCount: 1,
+          threadCount: result.threadIds.length,
+          fallbackIncludedClickedRow: true
+        };
+      }
+    }
+
+    const clickedThreadId = canonicalThreadId(msg.threadId || "") || normalize(msg.threadId || "");
+    const latestThreadId = Array.isArray(result.threadIds) && result.threadIds[0]
+      ? (canonicalThreadId(result.threadIds[0]) || normalize(result.threadIds[0]))
+      : "";
+    const preferredThreadId = latestThreadId || clickedThreadId;
+    const preferredMessage = (Array.isArray(result.messages) ? result.messages : []).find((entry) => (
+      (canonicalThreadId(entry && entry.threadId || "") || normalize(entry && entry.threadId || "")) === preferredThreadId
+    ));
+    const preferredHint = lookupThreadHintHref(preferredThreadId) || normalize(msg.href || "") || lookupThreadHintHref(clickedThreadId);
+    const preferredMailbox = mailboxCacheKey(
+      (preferredMessage && preferredMessage.mailbox)
+      || msg.mailbox
+      || mailbox
+      || "inbox"
+    );
+
+    state.suspendHashSyncDuringContactHydration = false;
+    state.contactChatLoading = false;
+    state.contactHydrationRunId = Number(state.contactHydrationRunId || 0) + 1;
+    state.currentView = "thread";
+    state.contactDisplayName = senderDisplayName(msg.sender || "") || contactEmail;
+    state.currentThreadMailbox = preferredMailbox;
+    state.currentThreadHintHref = preferredHint;
+    state.lastListHash = sanitizeListHash(window.location.hash || state.lastListHash || "#inbox");
+    applyActiveContactTimelineV2(result, {
+      reason: "open",
+      preferredThreadId
+    });
+    if (preferredThreadId) {
+      state.currentThreadIdForReply = preferredThreadId;
+      state.activeThreadId = preferredThreadId;
+      rememberThreadNavigationHint(preferredThreadId, preferredHint, msg.row);
+    }
+    markThreadsReadLocally(
+      result.threadIds || [],
+      [msg.row].filter((row) => row instanceof HTMLElement)
+    );
+
+    logChatDebug("contact-v2:open", {
+      contactEmail,
+      conversationKey: normalize(context.conversationKey || ""),
+      activeAccountEmail: extractEmail(context.activeAccountEmail || ""),
+      clickedThreadId,
+      clickedMailbox: preferredMailbox,
+      preferredThreadId
+    }, { throttleKey: `contact-v2-open:${normalize(context.conversationKey || contactEmail)}`, throttleMs: 240 });
+    logChatDebug("contact-v2:scope", {
+      routeMailbox: mailbox,
+      liveCount: liveRows.length,
+      inboxCached: inboxCached.length,
+      sentCached: sentCached.length,
+      threadCount: Array.isArray(result.threadIds) ? result.threadIds.length : 0,
+      messageCount: Array.isArray(result.messages) ? result.messages.length : 0
+    }, { throttleKey: `contact-v2-scope:${normalize(context.conversationKey || contactEmail)}`, throttleMs: 240 });
+
+    if (!state.replySendInProgress && preferredThreadId) {
+      window.location.hash = threadHashForMailbox(preferredMailbox, preferredThreadId, preferredHint);
+    }
+
+    renderList(root);
+    renderCurrentView(root);
+    return true;
+  }
+
+  function openContactChatFromRowLegacy(message, root, route = {}) {
+    if (!ENABLE_CONTACT_MERGE_MODE) return false;
+    if (!(root instanceof HTMLElement)) return false;
+    const msg = message && typeof message === "object" ? message : null;
+    if (!msg) return false;
+    const contactKey = normalize(contactKeyFromMessage(msg) || "");
+    const contactEmail = extractEmail(contactKey || msg.senderEmail || msg.sender || "");
+    if (!contactKey && !contactEmail) return false;
+
+    const mailbox = mailboxCacheKey(route.mailbox || msg.mailbox || "inbox");
+    const liveRows = collectMessages(500).items || [];
+    const inboxCached = Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("inbox")])
+      ? state.scannedMailboxMessages[mailboxCacheKey("inbox")]
+      : [];
+    const sentCached = Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("sent")])
+      ? state.scannedMailboxMessages[mailboxCacheKey("sent")]
+      : [];
+    const baseScope = chatScopeMessages(mailbox, liveRows);
+    const pool = dedupeMessagesStable([
+      ...baseScope,
+      ...inboxCached,
+      ...sentCached,
+      ...liveRows,
+      msg
+    ]);
+
+    const context = activeConversationContext({
+      activeAccountEmail: detectCurrentUserEmail(true) || detectCurrentUserEmail(),
+      contactEmail: contactEmail || contactKey,
+      conversationKey: conversationKeyFromContact(contactEmail || contactKey)
+    });
+    const scopedRows = pool.filter((rowMsg) => mailboxRowMatchesContactConversation(rowMsg, context));
+    const rowsForGrouping = scopedRows.length > 0 ? scopedRows : [msg];
+    const grouped = groupMessagesByContact(rowsForGrouping);
+    const normalizedContactKey = normalize(contactKey || contactEmail || "");
+    const targetEmail = extractEmail(contactEmail || contactKey || "");
+
+    logChatDebug("contact-open:scope", {
+      routeMailbox: mailbox,
+      contactKey: normalizedContactKey,
+      contactEmail: targetEmail,
+      poolCount: pool.length,
+      scopedCount: scopedRows.length,
+      groupedCount: grouped.length,
+      inboxCached: inboxCached.length,
+      sentCached: sentCached.length,
+      liveCount: liveRows.length
+    }, { throttleKey: `contact-open-scope:${normalizedContactKey || targetEmail || "unknown"}`, throttleMs: 320 });
+
+    let selectedGroup = grouped.find((group) => {
+      const groupEmail = extractEmail(group && (group.contactEmail || group.contactKey) || "");
+      const groupKey = normalize(group && group.contactKey || "");
+      return Boolean(
+        (targetEmail && groupEmail && groupEmail === targetEmail)
+        || (normalizedContactKey && groupKey && groupKey === normalizedContactKey)
+      );
+    }) || null;
+
+    const clickedThreadId = canonicalThreadId(msg.threadId || "") || normalize(msg.threadId || "");
+    if (!selectedGroup) {
+      const latestByThread = new Map();
+      const pushRow = (rowMsg) => {
+        const threadId = canonicalThreadId(rowMsg && rowMsg.threadId) || normalize(rowMsg && rowMsg.threadId);
+        if (!threadId) return;
+        const existing = latestByThread.get(threadId);
+        const next = { ...rowMsg, threadId };
+        if (!existing) {
+          latestByThread.set(threadId, next);
+          return;
+        }
+        const chosen = compareMailboxRowsNewestFirst(next, existing) <= 0 ? next : existing;
+        latestByThread.set(threadId, chosen);
+      };
+      for (const rowMsg of rowsForGrouping) pushRow(rowMsg);
+      pushRow(msg);
+      const items = Array.from(latestByThread.values()).sort(compareMailboxRowsNewestFirst);
+      const threadIds = items
+        .map((item) => canonicalThreadId(item && item.threadId) || normalize(item && item.threadId))
+        .filter(Boolean);
+      const conversationContact = targetEmail || extractEmail(contactKey || "");
+      const conversationKey = conversationKeyFromContact(conversationContact || normalizedContactKey);
+      selectedGroup = {
+        contactKey: conversationContact || normalizedContactKey,
+        contactEmail: conversationContact,
+        conversationKey,
+        contactName: senderDisplayName(msg.sender || "") || conversationContact || normalizedContactKey || "Contact",
+        threadIds,
+        items,
+        latestItem: items[0] || msg
+      };
+    } else {
+      selectedGroup = {
+        ...selectedGroup,
+        items: Array.isArray(selectedGroup.items) ? selectedGroup.items.slice() : [],
+        threadIds: Array.isArray(selectedGroup.threadIds) ? selectedGroup.threadIds.slice() : []
+      };
+      if (clickedThreadId) {
+        const hasThread = selectedGroup.threadIds.some((id) => (
+          (canonicalThreadId(id || "") || normalize(id || "")) === clickedThreadId
+        ));
+        if (!hasThread) selectedGroup.threadIds.unshift(clickedThreadId);
+        const hasItem = selectedGroup.items.some((item) => (
+          (canonicalThreadId(item && item.threadId || "") || normalize(item && item.threadId || "")) === clickedThreadId
+        ));
+        if (!hasItem) {
+          selectedGroup.items.unshift({ ...msg, threadId: clickedThreadId });
+        }
+      }
+      if (!selectedGroup.contactEmail) {
+        selectedGroup.contactEmail = targetEmail || extractEmail(selectedGroup.contactKey || "");
+      }
+      selectedGroup.conversationKey = normalize(
+        selectedGroup.conversationKey
+        || conversationKeyFromContact(selectedGroup.contactEmail || selectedGroup.contactKey || "")
+      );
+      selectedGroup.latestItem = selectedGroup.items[0] || selectedGroup.latestItem || msg;
+    }
+
+    if (!Array.isArray(selectedGroup.threadIds) || selectedGroup.threadIds.length === 0) return false;
+    loadContactChat(selectedGroup, root);
+    return true;
+  }
+
+  function openContactChatFromRow(message, root, route = {}) {
+    if (!ENABLE_CONTACT_MERGE_MODE) return false;
+    if (isContactTimelineV2Enabled()) {
+      return openContactTimelineFromRowV2(message, root, route);
+    }
+    return openContactChatFromRowLegacy(message, root, route);
+  }
+
+  function loadContactChat(group, root, options = {}) {
     if (!group || !Array.isArray(group.threadIds) || group.threadIds.length === 0) return;
+    const forceDeepHydration = Boolean(options && options.forceDeepHydration);
+    const hydrationReason = normalize(options && options.reason ? options.reason : "");
+    const existingTimelineSnapshot = forceDeepHydration && Array.isArray(state.activeTimelineMessages)
+      ? state.activeTimelineMessages.slice()
+      : [];
+    const preserveExistingTimeline = Boolean(
+      forceDeepHydration
+      && state.currentView === "thread"
+      && existingTimelineSnapshot.length > 0
+    );
+    bumpInteractionEpoch("load-contact-chat");
     const route = parseListRoute(window.location.hash || state.lastListHash || "#inbox");
     const defaultMailbox = route.mailbox || "inbox";
     const activeAccountEmail = detectCurrentUserEmail(true) || detectCurrentUserEmail();
@@ -6312,6 +7915,7 @@
       .map((id) => canonicalThreadId(id || "") || normalize(id || ""))
       .filter(Boolean);
     if (threadIds.length === 0) return;
+    const hydrationRunId = Number(state.contactHydrationRunId || 0) + 1;
     const threadMailboxByThreadId = new Map();
     const threadHintByThreadId = new Map();
     for (const item of Array.isArray(selectedGroup.items) ? selectedGroup.items : []) {
@@ -6358,6 +7962,19 @@
       contactEmail,
       conversationKey
     });
+    logChatDebug("contact-open:start", {
+      contactEmail: conversationContext.contactEmail || contactEmail || "",
+      conversationKey: conversationContext.conversationKey || "",
+      activeAccountEmail: conversationContext.activeAccountEmail || "",
+      clickedThreadId: canonicalThreadId((group && group.latestItem && group.latestItem.threadId) || "") || ""
+    }, { throttleKey: `contact-open-start:${conversationContext.conversationKey || contactKey}`, throttleMs: 320 });
+    logChatDebug("contact-open:scope", {
+      contactEmail: conversationContext.contactEmail || contactEmail || "",
+      conversationKey: conversationContext.conversationKey || "",
+      candidateThreadCount: threadIds.length,
+      itemCount: Array.isArray(selectedGroup.items) ? selectedGroup.items.length : 0,
+      groupThreadCount: Array.isArray(group && group.threadIds) ? group.threadIds.length : 0
+    }, { throttleKey: `contact-open-scope:${conversationContext.conversationKey || contactKey}`, throttleMs: 320 });
     logChatDebug("contact-chat:open", {
       requestedContact: contactEmailFromGroup,
       resolvedContact: conversationContext.contactEmail || contactEmail,
@@ -6370,6 +7987,8 @@
     }, { throttleKey: `contact-chat-open:${conversationContext.conversationKey || contactKey}`, throttleMs: 400 });
     state.suspendHashSyncDuringContactHydration = true;
     state.contactChatLoading = true;
+    state.contactHydrationRunId = hydrationRunId;
+    state.threadExtractRetry = 0;
     state.contactThreadIds = threadIds.slice();
     state.contactDisplayName = selectedGroup.contactName || (selectedGroup.latestItem && senderDisplayName(selectedGroup.latestItem.sender)) || "Chat";
     state.activeContactKey = contactKey;
@@ -6378,7 +7997,13 @@
     state.activeAccountEmail = conversationContext.activeAccountEmail || activeAccountEmail || state.activeAccountEmail;
     state.currentView = "thread";
     state.activeThreadId = threadIds[0] || "";
-    state.mergedMessages = [];
+    state.mergedMessages = preserveExistingTimeline ? existingTimelineSnapshot.slice() : [];
+    if (isContactTimelineV2Enabled()) {
+      state.activeTimelineMessages = preserveExistingTimeline ? existingTimelineSnapshot.slice() : [];
+    }
+    state.contactTimelineIsDeep = false;
+    state.contactTimelineDeepHydratedAt = 0;
+    state.contactTimelineDeepCount = 0;
     state.currentThreadIdForReply = "";
     state.currentThreadHintHref = firstThreadHint;
     state.currentThreadMailbox = firstThreadMailbox;
@@ -6401,15 +8026,32 @@
       if (seedSender) seededSenderByThread.set(threadId, seedSender);
       if (seedDate) seededDateByThread.set(threadId, seedDate);
     }
-    state.mergedMessages = mergeContactMessagesByThread(displayThreadIds, seededByThread, conversationContext);
+    if (!preserveExistingTimeline) {
+      state.mergedMessages = mergeContactMessagesByThread(displayThreadIds, seededByThread, conversationContext);
+      if (isContactTimelineV2Enabled()) {
+        state.activeTimelineMessages = state.mergedMessages.slice();
+      }
+    } else {
+      logChatDebug("contact-chat:seed-preserved", {
+        reason: hydrationReason || "fallback",
+        conversationKey: conversationContext.conversationKey || "",
+        threadCount: threadIds.length,
+        preservedMessages: existingTimelineSnapshot.length
+      }, {
+        throttleKey: `contact-chat-seed-preserved:${conversationContext.conversationKey || contactKey}`,
+        throttleMs: 240
+      });
+    }
     state.currentThreadIdForReply = threadIds[0] || "";
     state.currentThreadHintHref = firstThreadHint;
     state.currentThreadMailbox = firstThreadMailbox;
-    state.contactChatLoading = false;
     renderList(root);
     renderCurrentView(root);
 
     const isStillActiveContactChat = () => {
+      if (Number(state.contactHydrationRunId || 0) !== hydrationRunId) return false;
+      if (state.currentView !== "thread") return false;
+      if (forceDeepHydration) return true;
       const activeConversation = normalize(state.activeConversationKey || "");
       const expectedConversation = normalize(conversationContext.conversationKey || "");
       if (activeConversation && expectedConversation) return activeConversation === expectedConversation;
@@ -6417,7 +8059,22 @@
     };
 
     (async () => {
-      const resolvedByThread = new Map(seededByThread);
+      const resolvedByThread = new Map();
+      if (preserveExistingTimeline) {
+        for (const message of existingTimelineSnapshot) {
+          const messageThreadId = canonicalThreadId(message && message.threadId || "") || normalize(message && message.threadId || "");
+          if (!messageThreadId) continue;
+          if (!resolvedByThread.has(messageThreadId)) resolvedByThread.set(messageThreadId, []);
+          resolvedByThread.get(messageThreadId).push(message);
+        }
+      }
+      for (const threadId of threadIds) {
+        if (resolvedByThread.has(threadId)) continue;
+        const seeded = seededByThread.get(threadId);
+        resolvedByThread.set(threadId, Array.isArray(seeded) ? seeded.slice() : []);
+      }
+      let totalExtractAttempts = 0;
+      let totalContextHits = 0;
       const primaryAttempts = threadIds.length > 8 ? 3 : 4;
       const secondaryAttempts = threadIds.length > 8 ? 2 : 3;
       for (let i = 0; i < threadIds.length; i += 1) {
@@ -6426,7 +8083,20 @@
         const threadMailbox = mailboxForThread(threadId);
         const threadHint = hintForThread(threadId);
         const attempts = i === 0 ? primaryAttempts : secondaryAttempts;
-        const data = await captureThreadDataWithRetry(threadId, threadMailbox, attempts, threadHint);
+        let data = { subject: "", messages: [], extractAttempts: 0, contextHits: 0 };
+        let hydrationError = "";
+        try {
+          data = await captureThreadDataWithRetry(threadId, threadMailbox, attempts, threadHint, {
+            forceExtractAttempt: forceDeepHydration
+          });
+        } catch (error) {
+          hydrationError = normalize(error && error.message ? error.message : String(error || ""));
+          logWarn(`Contact hydration thread failed threadId=${normalize(threadId || "")} mailbox=${threadMailbox}: ${hydrationError}`);
+        }
+        const extractAttempts = Number(data && data.extractAttempts || 0);
+        const contextHits = Number(data && data.contextHits || 0);
+        totalExtractAttempts += extractAttempts;
+        totalContextHits += contextHits;
         const captured = applySnippetFallbackToMessages(Array.isArray(data.messages) ? data.messages : [], threadId);
         const meaningfulCaptured = hasMeaningfulCapturedMessages(captured);
         let keptMode = "none";
@@ -6473,18 +8143,34 @@
           console.log(`[reskin] Hydration skipped placeholder-only capture for thread ${threadId}`);
         }
         state.mergedMessages = mergeContactMessagesByThread(displayThreadIds, resolvedByThread, conversationContext);
-        logChatDebug("contact-chat:hydration-step", {
+        if (isContactTimelineV2Enabled()) {
+          state.activeTimelineMessages = state.mergedMessages.slice();
+        }
+        const hydrationDebug = {
           threadId,
           index: i,
           totalThreads: threadIds.length,
           mailbox: threadMailbox,
           attempts,
           capturedCount: Array.isArray(captured) ? captured.length : 0,
+          extractAttempts,
+          contextHits,
+          totalExtractAttempts,
+          totalContextHits,
           meaningfulCaptured,
           keptMode,
           keptCount,
+          hydrationError,
           mergedCount: Array.isArray(state.mergedMessages) ? state.mergedMessages.length : 0
-        }, { throttleKey: `contact-hydration-step:${conversationContext.conversationKey || contactKey}:${threadId}`, throttleMs: 300 });
+        };
+        logChatDebug("contact-chat:hydration-step", hydrationDebug, {
+          throttleKey: `contact-hydration-step:${conversationContext.conversationKey || contactKey}:${threadId}`,
+          throttleMs: 300
+        });
+        logChatDebug("contact-hydration:step", hydrationDebug, {
+          throttleKey: `contact-hydration-step-v2:${conversationContext.conversationKey || contactKey}:${threadId}`,
+          throttleMs: 300
+        });
         state.currentThreadIdForReply = threadIds[0] || "";
         state.currentThreadHintHref = firstThreadHint;
         state.currentThreadMailbox = firstThreadMailbox;
@@ -6494,8 +8180,56 @@
           renderThread(latestRoot);
         }
       }
+      if (forceDeepHydration && totalExtractAttempts === 0 && threadIds.length > 0 && isStillActiveContactChat()) {
+        const fallbackThreadId = threadIds[0];
+        const fallbackMailbox = mailboxForThread(fallbackThreadId);
+        const fallbackHint = hintForThread(fallbackThreadId);
+        let forced = { subject: "", messages: [], extractAttempts: 0, contextHits: 0 };
+        try {
+          forced = await captureThreadDataWithRetry(fallbackThreadId, fallbackMailbox, 2, fallbackHint, {
+            forceExtractAttempt: true
+          });
+        } catch (error) {
+          logWarn(`Forced fallback hydration failed threadId=${normalize(fallbackThreadId || "")} mailbox=${fallbackMailbox}: ${normalize(error && error.message ? error.message : String(error || ""))}`);
+        }
+        const forcedExtractAttempts = Number(forced && forced.extractAttempts || 0);
+        totalExtractAttempts += forcedExtractAttempts;
+        const forcedCaptured = applySnippetFallbackToMessages(
+          Array.isArray(forced && forced.messages) ? forced.messages : [],
+          fallbackThreadId
+        );
+        if (hasMeaningfulCapturedMessages(forcedCaptured)) {
+          const normalizedCaptured = normalizeThreadMessagesForChat(forcedCaptured, fallbackThreadId, conversationContext);
+          const inConversation = normalizedCaptured.filter((msg) => (
+            messageBelongsToConversation(msg, conversationContext)
+          ));
+          if (inConversation.length > 0) {
+            resolvedByThread.set(fallbackThreadId, inConversation);
+          } else if (normalizedCaptured.length > 0) {
+            resolvedByThread.set(fallbackThreadId, normalizedCaptured);
+          }
+        }
+      }
       if (!isStillActiveContactChat()) return;
       state.mergedMessages = mergeContactMessagesByThread(displayThreadIds, resolvedByThread, conversationContext);
+      if (isContactTimelineV2Enabled()) {
+        state.activeTimelineMessages = state.mergedMessages.slice();
+      }
+      // Mark timeline as deeply hydrated so shallow rebuilds cannot clobber it
+      state.contactTimelineIsDeep = true;
+      state.contactTimelineDeepHydratedAt = Date.now();
+      state.contactTimelineDeepCount = state.activeTimelineMessages.length;
+      logChatDebug("contact-chat:hydration-finish", {
+        reason: hydrationReason || (forceDeepHydration ? "fallback" : "open"),
+        conversationKey: conversationContext.conversationKey || "",
+        threadCount: threadIds.length,
+        mergedCount: Array.isArray(state.mergedMessages) ? state.mergedMessages.length : 0,
+        totalExtractAttempts,
+        totalContextHits
+      }, {
+        throttleKey: `contact-hydration-finish:${conversationContext.conversationKey || contactKey}:${hydrationRunId}`,
+        throttleMs: 260
+      });
       state.currentThreadIdForReply = threadIds[0] || "";
       state.currentThreadHintHref = firstThreadHint;
       state.currentThreadMailbox = firstThreadMailbox;
@@ -6509,6 +8243,15 @@
         renderCurrentView(latestRoot);
         renderThread(latestRoot);
       }
+      // Deferred re-render: the hash assignment above fires a hashchange which can trigger a
+      // competing render before the browser settles. This ensures the deep state wins.
+      setTimeout(() => {
+        if (!isStillActiveContactChat()) return;
+        const deferredRoot = document.getElementById(ROOT_ID);
+        if (deferredRoot instanceof HTMLElement && state.currentView === "thread") {
+          renderThread(deferredRoot);
+        }
+      }, 300);
     })().catch((error) => {
       const stillActive = isStillActiveContactChat();
       if (stillActive) {
@@ -6714,63 +8457,91 @@
         window.location.hash = targetHash;
       }
     }
-    const readyState = waitForThreadContentReady(renderThreadId || normalize(state.activeThreadId || ""));
-    const readiness = readyState.readiness;
-    logChatDebug("thread-extract:containers", {
-      threadId: renderThreadId || normalize(state.activeThreadId || ""),
-      readiness
-    }, {
-      throttleKey: `thread-extract-containers:${renderThreadId || normalize(state.activeThreadId || "unknown")}`,
-      throttleMs: 260
-    });
-
-    if (!readyState.ready && !readyState.timedOut) {
-      const retryAttempt = readyState.attempt;
-      const waitMs = readyState.waitMs;
-      logChatDebug("thread-open:timeout", {
+    const inContactChatMode = Boolean(
+      ENABLE_CONTACT_MERGE_MODE &&
+      (normalize(state.activeConversationKey || "") || normalize(state.activeContactKey || "")) &&
+      Array.isArray(state.contactThreadIds) &&
+      state.contactThreadIds.length > 0
+    );
+    const inContactTimelineV2 = Boolean(
+      isContactTimelineV2Enabled()
+      && inContactChatMode
+      && Array.isArray(state.activeTimelineMessages)
+      && state.activeTimelineMessages.length > 0
+    );
+    let readiness = {
+      ready: true,
+      messageContainers: 0,
+      bodyNodes: 0,
+      iframeBodyNodes: 0,
+      iframeCount: 0
+    };
+    if (!inContactTimelineV2) {
+      const readyState = waitForThreadContentReady(renderThreadId || normalize(state.activeThreadId || ""));
+      readiness = readyState.readiness;
+      logChatDebug("thread-extract:containers", {
         threadId: renderThreadId || normalize(state.activeThreadId || ""),
-        attempt: retryAttempt,
-        waitMs,
         readiness
-      }, { throttleKey: `thread-open-timeout:${renderThreadId || "unknown"}:${retryAttempt}`, throttleMs: 220 });
-      wrap.innerHTML = `
-        <section class="rv-thread rv-thread-chat" data-reskin="true">
-          <div class="rv-thread-chat-header" data-reskin="true">
-            <button type="button" class="rv-back" data-reskin="true">\u2190 Back</button>
-            <h2 class="rv-thread-subject" data-reskin="true">Loading thread…</h2>
-          </div>
-          <div class="rv-thread-messages" data-reskin="true" style="display:flex;align-items:center;justify-content:center;padding:40px;">
-            <p class="rv-thread-empty" data-reskin="true" style="color:#949ba4;">Waiting for Gmail thread content…</p>
-          </div>
-        </section>
-      `;
-      setTimeout(() => {
-        const latestRoot = document.getElementById(ROOT_ID);
-        if (latestRoot instanceof HTMLElement && state.currentView === "thread") {
-          renderThread(latestRoot);
-        }
-      }, waitMs);
-      return;
-    }
-    if (readyState.ready && readyState.attempt > 0) {
-      logChatDebug("thread-open:ready", {
-        threadId: renderThreadId || normalize(state.activeThreadId || ""),
-        attempts: readyState.attempt,
-        readiness
-      }, { throttleKey: `thread-open-ready:${renderThreadId || "unknown"}`, throttleMs: 420 });
-      state.threadExtractRetry = 0;
-    }
-    if (!readyState.ready && readyState.timedOut) {
-      logChatDebug("thread-open:timeout", {
-        threadId: renderThreadId || normalize(state.activeThreadId || ""),
-        attempt: readyState.attempt,
-        waitMs: 0,
-        readiness,
-        maxRetries: THREAD_READY_MAX_RETRIES
-      }, { throttleKey: `thread-open-timeout-final:${renderThreadId || "unknown"}`, throttleMs: 1000 });
+      }, {
+        throttleKey: `thread-extract-containers:${renderThreadId || normalize(state.activeThreadId || "unknown")}`,
+        throttleMs: 260
+      });
+
+      if (!readyState.ready && !readyState.timedOut) {
+        const retryAttempt = readyState.attempt;
+        const waitMs = readyState.waitMs;
+        logChatDebug("thread-open:timeout", {
+          threadId: renderThreadId || normalize(state.activeThreadId || ""),
+          attempt: retryAttempt,
+          waitMs,
+          readiness
+        }, { throttleKey: `thread-open-timeout:${renderThreadId || "unknown"}:${retryAttempt}`, throttleMs: 220 });
+        wrap.innerHTML = `
+          <section class="rv-thread rv-thread-chat" data-reskin="true">
+            <div class="rv-thread-chat-header" data-reskin="true">
+              <button type="button" class="rv-back" data-reskin="true">\u2190 Back</button>
+              <h2 class="rv-thread-subject" data-reskin="true">Loading thread…</h2>
+            </div>
+            <div class="rv-thread-messages" data-reskin="true" style="display:flex;align-items:center;justify-content:center;padding:40px;">
+              <p class="rv-thread-empty" data-reskin="true" style="color:#949ba4;">Waiting for Gmail thread content…</p>
+            </div>
+          </section>
+        `;
+        setTimeout(() => {
+          const latestRoot = document.getElementById(ROOT_ID);
+          if (latestRoot instanceof HTMLElement && state.currentView === "thread") {
+            renderThread(latestRoot);
+          }
+        }, waitMs);
+        return;
+      }
+      if (readyState.ready && readyState.attempt > 0) {
+        logChatDebug("thread-open:ready", {
+          threadId: renderThreadId || normalize(state.activeThreadId || ""),
+          attempts: readyState.attempt,
+          readiness
+        }, { throttleKey: `thread-open-ready:${renderThreadId || "unknown"}`, throttleMs: 420 });
+        state.threadExtractRetry = 0;
+      }
+      if (!readyState.ready && readyState.timedOut) {
+        logChatDebug("thread-open:timeout", {
+          threadId: renderThreadId || normalize(state.activeThreadId || ""),
+          attempt: readyState.attempt,
+          waitMs: 0,
+          readiness,
+          maxRetries: THREAD_READY_MAX_RETRIES
+        }, { throttleKey: `thread-open-timeout-final:${renderThreadId || "unknown"}`, throttleMs: 1000 });
+      }
     }
 
-    if (ENABLE_CONTACT_MERGE_MODE && Array.isArray(state.mergedMessages) && state.mergedMessages.length > 0) {
+    if (inContactTimelineV2) {
+      thread = { subject: `Chat with ${state.contactDisplayName || "contact"}` };
+      messages = normalizeThreadMessagesForChat(
+        Array.isArray(state.activeTimelineMessages) ? state.activeTimelineMessages : [],
+        renderThreadId,
+        activeConversationContext()
+      );
+    } else if (ENABLE_CONTACT_MERGE_LEGACY && Array.isArray(state.mergedMessages) && state.mergedMessages.length > 0) {
       thread = { subject: `Chat with ${state.contactDisplayName || "contact"}` };
       messages = normalizeThreadMessagesForChat(state.mergedMessages, renderThreadId, activeConversationContext());
     } else {
@@ -6794,12 +8565,7 @@
         state.threadExtractRetry = 0;
       }
     }
-    const inContactChatMode = Boolean(
-      ENABLE_CONTACT_MERGE_MODE &&
-      (normalize(state.activeConversationKey || "") || normalize(state.activeContactKey || "")) &&
-      Array.isArray(state.contactThreadIds) &&
-      state.contactThreadIds.length > 0
-    );
+
     const headerTitle = inContactChatMode
       ? `Chat with ${state.contactDisplayName || senderDisplayName((messages[0] && messages[0].sender) || "") || "contact"}`
       : (
@@ -6807,7 +8573,6 @@
           ? `Chat with ${senderDisplayName(messages[0].sender)}`
           : (thread.subject || "Chat")
       );
-    const placeholderBody = THREAD_BODY_PLACEHOLDER;
     const activeThreadForSnippet = threadIdFromHash(window.location.hash) || state.activeThreadId;
     if (messages.length > 1) {
       const usefulCount = messages.filter((msg) => hasUsefulBodyText(msg && msg.cleanBodyText)).length;
@@ -6828,7 +8593,9 @@
         ""
       );
     }
-    messages = mergeOptimisticIntoMessages(messages, renderThreadId);
+    if (!inContactTimelineV2) {
+      messages = mergeOptimisticIntoMessages(messages, renderThreadId);
+    }
     const emptyOrPlaceholder = messages.length === 0 || messages.every((msg) => (
       !hasUsefulBodyText(msg && msg.cleanBodyText)
       || normalize((msg && msg.cleanBodyText) || "") === THREAD_BODY_PLACEHOLDER
@@ -6907,16 +8674,16 @@
         || senderDisplayName((msg && msg.sender) || "")
         || stableContactLabel
       ) || "Contact";
+      const activeContactEmail = extractEmail(state.activeContactEmail || activeConversationContactEmail() || "");
+      const mappedIncomingLabel = incomingSenderEmail
+        ? (stableIncomingLabelBySenderEmail.get(incomingSenderEmail) || incomingFallbackLabel)
+        : incomingFallbackLabel;
       const senderLabel = direction === "outgoing"
         ? "You"
         : (
-          inContactChatMode
+          inContactChatMode && incomingSenderEmail && activeContactEmail && incomingSenderEmail === activeContactEmail
             ? stableContactLabel
-            : (
-              incomingSenderEmail
-                ? (stableIncomingLabelBySenderEmail.get(incomingSenderEmail) || incomingFallbackLabel)
-                : incomingFallbackLabel
-            )
+            : mappedIncomingLabel
         );
       const bodyText = normalize((msg && msg.cleanBodyText) || (msg && msg.bodyText) || "");
       const initial = initialForSender(senderLabel || (msg && msg.sender));
@@ -7263,11 +9030,29 @@
       renderSettings(root);
       return;
     }
-    /* Always update the list column (left) so it shows current messages even when a thread is open. */
-    renderList(root);
     if (state.currentView === "thread") {
+      const now = Date.now();
+      const hashLooksList = !isThreadHash(window.location.hash || "");
+      if (hashLooksList || now - Number(state.lastListRenderAt || 0) >= THREAD_LIST_REFRESH_GAP_MS) {
+        renderList(root);
+      }
       renderThread(root);
+      if (
+        !state.fullScanRunning &&
+        !state.replySendInProgress &&
+        /^open-|^back-to-list$/.test(normalize(state.activeTask || ""))
+      ) {
+        setActiveTask("idle");
+      }
       return;
+    }
+    renderList(root);
+    if (
+      !state.fullScanRunning &&
+      !state.replySendInProgress &&
+      /^open-|^back-to-list$/.test(normalize(state.activeTask || ""))
+    ) {
+      setActiveTask("idle");
     }
   }
 
@@ -7392,6 +9177,28 @@
     `;
   }
 
+  function scheduleStartupWarmListRender(reason = "") {
+    if (state.startupWarmListReady || state.startupWarmListScheduled) return;
+    state.startupWarmListScheduled = true;
+    scheduleDeferredWork(() => {
+      state.startupWarmListScheduled = false;
+      if (state.startupWarmListReady) return;
+      state.startupWarmListReady = true;
+      state.lastListSignature = "";
+      state.lastObserverSignature = "";
+      const root = document.getElementById(ROOT_ID);
+      if (!(root instanceof HTMLElement)) return;
+      if (state.currentView !== "list") return;
+      logChatDebug("startup:warm-list-render", {
+        reason: normalize(reason || "startup"),
+        mailbox: mailboxCacheKey(activeMailbox()),
+        hash: normalize(window.location.hash || "")
+      }, { throttleKey: "startup-warm-list-render", throttleMs: 500 });
+      renderList(root);
+      renderSidebar(root);
+    }, { delayMs: STARTUP_WARM_LIST_DELAY_MS, timeoutMs: 1800 });
+  }
+
   function renderList(root) {
     const list = root.querySelector(".rv-list");
     if (!(list instanceof HTMLElement)) return;
@@ -7401,6 +9208,8 @@
       state.triageFilter = "";
     } else if (hashHasTriageParam(window.location.hash || "")) {
       state.triageFilter = route.triage;
+    } else {
+      state.triageFilter = "";
     }
 
     if (route.mailbox === "inbox" && !state.settingsCache && !state.settingsLoadInFlight && window.ReskinAI) {
@@ -7408,7 +9217,9 @@
     }
 
     const mailbox = mailboxCacheKey(route.mailbox);
-    const result = collectMessages(500);
+    const startupFastMode = !state.startupWarmListReady;
+    const collectLimit = startupFastMode ? STARTUP_FAST_LIST_LIMIT : 500;
+    const result = collectMessages(collectLimit);
     const liveMessages = result.items || [];
     const mergedCache = mergeMailboxCache(mailbox, liveMessages);
     const sourcePool = mailboxMessagesForList(mailbox, mergedCache.length >= liveMessages.length ? mergedCache : liveMessages);
@@ -7460,17 +9271,29 @@
     }
 
     const visibleLimit = Math.max(state.listChunkSize, Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize));
-    const groupedMessages = ENABLE_CONTACT_MERGE_MODE ? groupMessagesByContact(groupingMessages) : [];
-    const useGroups = ENABLE_CONTACT_MERGE_MODE && groupedMessages.length > 0;
+    const listSupportsContactGroups = ENABLE_CONTACT_GROUP_LIST && ENABLE_CONTACT_MERGE_MODE
+      && (mailbox === mailboxCacheKey("inbox") || mailbox === mailboxCacheKey("sent"));
+    const groupedMessages = listSupportsContactGroups
+      ? groupMessagesByContact(groupingMessages)
+      : [];
+    const useGroups = listSupportsContactGroups && groupedMessages.length > 0;
     const visibleMessages = messages.slice(0, visibleLimit);
     const visibleGroups = groupedMessages.slice(0, visibleLimit);
 
     const listSignature = useGroups
-      ? `${route.hash}|g|${groupingMessages.length}|${visibleGroups.length}|${scanMarker}|${visibleGroups.map((g) => `${g.contactKey}:${g.threadIds.length}:${(g.latestItem && g.latestItem.threadId) || ""}`).join(",")}`
-      : `${route.hash}|m|${messages.length}|${visibleMessages.length}|${scanMarker}|${visibleMessages.map((m) => `${m.threadId}:${m.triageLevel || "u"}:${m.unread ? "1" : "0"}`).join(",")}`;
+      ? `${route.hash}|g|${groupingMessages.length}|${visibleGroups.length}|${scanMarker}|rev:${Number(state.mailboxCacheRevision || 0)}|${visibleGroups.map((g) => `${g.contactKey}:${g.threadIds.length}:${(g.latestItem && g.latestItem.threadId) || ""}`).join(",")}`
+      : `${route.hash}|m|${messages.length}|${visibleMessages.length}|${scanMarker}|rev:${Number(state.mailboxCacheRevision || 0)}|${visibleMessages.map((m) => `${m.threadId}:${m.triageLevel || "u"}:${m.unread ? "1" : "0"}`).join(",")}`;
     const hasVisible = useGroups ? visibleGroups.length > 0 : visibleMessages.length > 0;
-    if (state.lastListSignature === listSignature && !interactionsLocked() && hasVisible) return;
+    if (
+      state.lastListSignature === listSignature
+      && !interactionsLocked()
+      && hasVisible
+      && state.lastListHadVisible
+    ) {
+      return;
+    }
     state.lastListSignature = listSignature;
+    state.lastListHadVisible = hasVisible;
     state.snippetByThreadId = state.snippetByThreadId || {};
     const hintMessages = useGroups
       ? visibleGroups.flatMap((g) => Array.isArray(g.items) ? g.items : [])
@@ -7544,9 +9367,9 @@
         state.fullScanStatus = route.mailbox === "sent" ? "Loading sent…" : "Loading inbox…";
         renderSidebar(root);
         if (route.mailbox === "inbox") {
-          setTimeout(() => runFullMailboxScan(root, { mailboxes: ["inbox", "sent"] }), 400);
+          scheduleMailboxScanKick(root, { mailboxes: ["inbox", "sent"], delayMs: 240 });
         } else {
-          setTimeout(() => runFullMailboxScan(root, { mailboxes: ["sent"] }), 400);
+          scheduleMailboxScanKick(root, { mailboxes: ["sent"], delayMs: 240 });
         }
       }
       if (route.mailbox === "inbox" && state.currentView === "list" && !state.inboxHashNudged) {
@@ -7560,6 +9383,12 @@
       }
       if (route.mailbox === "inbox" && !state.inboxEmptyRetryScheduled) {
         state.inboxEmptyRetryScheduled = true;
+        logChatDebug("list-render:empty-retry", {
+          mailbox: route.mailbox,
+          hash: normalize(window.location.hash || ""),
+          triageFilter: normalize(filterLevel || ""),
+          messageCount: messages.length
+        }, { throttleKey: `list-empty-retry:${route.mailbox}`, throttleMs: 1400 });
         setTimeout(() => {
           state.lastListSignature = "";
           applyReskin();
@@ -7609,11 +9438,51 @@
           `;
 
           item.setAttribute("data-contact-key", g.contactKey || "");
+          item.setAttribute("data-thread-id", normalize((latest && latest.threadId) || ""));
           item.addEventListener("click", (e) => {
             if (e.target.closest(".rv-item-server-btn")) return;
             lockInteractions(900);
+            bumpInteractionEpoch("open-contact");
+            setActiveTask("open-contact");
             state.lockListView = false;
-            loadContactChat(g, root);
+            const openedV2 = openContactTimelineFromRowV2(latest, root, route, { seedRows: g.items });
+            if (openedV2) {
+              const expectedConversation = normalize(
+                g.conversationKey
+                || conversationKeyFromContact(g.contactEmail || g.contactKey || "")
+              );
+              setTimeout(() => {
+                if (!(root instanceof HTMLElement)) return;
+                if (state.currentView !== "thread") return;
+                if (state.contactChatLoading || state.replySendInProgress) return;
+                const activeConversation = normalize(state.activeConversationKey || "");
+                if (expectedConversation && activeConversation && activeConversation !== expectedConversation) return;
+                const timeline = Array.isArray(state.activeTimelineMessages) ? state.activeTimelineMessages : [];
+                const hasOutgoing = timeline.some((msg) => normalize(msg && msg.direction || "") === "outgoing");
+                const shouldHydrate = Boolean(
+                  Array.isArray(g.threadIds)
+                  && g.threadIds.length > 0
+                  && timeline.length >= 2
+                  && !hasOutgoing
+                );
+                if (!shouldHydrate) return;
+                logChatDebug("contact-v2:hydrate-fallback", {
+                  contactEmail: extractEmail(g.contactEmail || g.contactKey || ""),
+                  conversationKey: expectedConversation || activeConversation || "",
+                  threadCount: Array.isArray(g.threadIds) ? g.threadIds.length : 0,
+                  timelineCount: timeline.length,
+                  hasOutgoing
+                }, { throttleKey: `contact-v2-hydrate-fallback:${expectedConversation || activeConversation || "unknown"}`, throttleMs: 280 });
+                loadContactChat(g, root, {
+                  forceDeepHydration: true,
+                  reason: "contact-v2-hydrate-fallback"
+                });
+              }, 180);
+              return;
+            }
+            if (!openedV2) {
+              loadContactChat(g, root);
+            }
           });
           list.appendChild(item);
         } else {
@@ -7622,6 +9491,7 @@
           item.type = "button";
           item.className = "rv-item" + (msg.unread ? " is-unread" : "") + (state.activeThreadId === msg.threadId ? " is-active" : "");
           item.setAttribute("data-reskin", "true");
+          item.setAttribute("data-thread-id", normalize(msg.threadId || ""));
           if (msg.unread) item.setAttribute("title", "Unread");
 
           const level = msg.triageLevel;
@@ -7654,8 +9524,13 @@
           item.addEventListener("click", (e) => {
             if (e.target.closest(".rv-item-server-btn")) return;
             lockInteractions(900);
-            clearContactConversationState();
+            bumpInteractionEpoch("open-thread");
+            setActiveTask("open-thread");
             state.lockListView = false;
+            if (ENABLE_CONTACT_MERGE_MODE && openContactChatFromRow(msg, root, route)) {
+              return;
+            }
+            clearContactConversationState();
             state.currentView = "thread";
             state.threadExtractRetry = 0;
             state.activeThreadId = msg.threadId;
@@ -7745,18 +9620,21 @@
           return;
         }
         if (nearEndPrefetch && !state.fullScanCompletedByMailbox[mailbox] && !state.fullScanRunning) {
-          if (route.mailbox === "inbox") runFullMailboxScan(root, { mailboxes: ["inbox", "sent"] });
-          else runFullMailboxScan(root, { mailboxes: ["sent"] });
+          if (route.mailbox === "inbox") {
+            scheduleMailboxScanKick(root, { mailboxes: ["inbox", "sent"], delayMs: 0 });
+          } else {
+            scheduleMailboxScanKick(root, { mailboxes: ["sent"], delayMs: 0 });
+          }
         }
       };
       if (!state.fullScanCompletedByMailbox[mailbox] && !state.fullScanRunning) {
         if (route.mailbox === "inbox") {
-          setTimeout(() => runFullMailboxScan(root, { mailboxes: ["inbox", "sent"] }), 220);
+          scheduleMailboxScanKick(root, { mailboxes: ["inbox", "sent"], delayMs: 180 });
         } else {
-          setTimeout(() => runFullMailboxScan(root, { mailboxes: ["sent"] }), 220);
+          scheduleMailboxScanKick(root, { mailboxes: ["sent"], delayMs: 180 });
         }
       }
-      if (route.mailbox === "inbox") {
+      if (ENABLE_AI_BACKGROUND_AUTOMATION && route.mailbox === "inbox") {
         setTimeout(() => {
           runTriageForInbox({ force: false, processAll: true, source: "auto" });
         }, 120);
@@ -7765,6 +9643,10 @@
       list.onscroll = null;
     }
 
+    state.lastListRenderAt = Date.now();
+    if (startupFastMode && state.currentView === "list") {
+      scheduleStartupWarmListRender("initial-list");
+    }
     renderSidebar(root);
   }
 
@@ -7812,7 +9694,7 @@
           lastBodyPreview = normalize(lastBodyEl.innerText || lastBodyEl.textContent).slice(0, 96);
         }
       }
-      return `${hash}|${state.currentView}|thread|${busy}|${messageNodes}|${bodyNodes}|${lastMessageId}|${lastBodyPreview}`;
+      return `${hash}|${state.currentView}|thread|${busy}|${messageNodes}|${bodyNodes}|${lastMessageId}|${lastBodyPreview}|rev:${Number(state.mailboxCacheRevision || 0)}`;
     }
     const firstRow =
       main.querySelector('[data-thread-id], [data-legacy-thread-id], tr[role="row"], [role="option"]') || null;
@@ -7831,7 +9713,7 @@
     const cachedCount = Array.isArray(state.scannedMailboxMessages[mailbox]) ? state.scannedMailboxMessages[mailbox].length : 0;
     const progress = state.mailboxScanProgress[mailbox] || {};
     const progressMarker = `${progress.pagesScanned || 0}:${progress.cachedCount || cachedCount}:${progress.lastUpdatedAt || 0}`;
-    return `${hash}|${state.currentView}|${busy}|${visibleRows}|${firstRowId}|${cachedCount}|${progressMarker}`;
+    return `${hash}|${state.currentView}|${busy}|${visibleRows}|${firstRowId}|${cachedCount}|${progressMarker}|rev:${Number(state.mailboxCacheRevision || 0)}`;
   }
 
   function renderFromObserver() {
@@ -7891,6 +9773,7 @@
       }
 
       const canAutoKickTriage =
+        ENABLE_AI_BACKGROUND_AUTOMATION &&
         state.currentView === "list" &&
         activeMailbox() === "inbox" &&
         !state.triageRunning &&
@@ -7900,11 +9783,19 @@
         runTriageForInbox({ force: false, processAll: true, source: "auto" });
       }
 
-      const elapsed = Date.now() - state.lastObserverRenderAt;
-      const listIsEmpty = state.currentView === "list" && state.lastListSignature && state.lastListSignature.indexOf("|0|") !== -1;
-      const renderGap = listIsEmpty ? 1500 : Math.max(OBSERVER_MIN_RENDER_GAP_MS, LIST_REFRESH_INTERVAL_MS);
+      const now = Date.now();
+      const elapsed = now - state.lastObserverRenderAt;
+      const listIsEmpty = state.currentView === "list" && !state.lastListHadVisible;
+      const renderGap = listIsEmpty
+        ? Math.max(240, Math.floor(LIST_LIVE_RENDER_GAP_MS * 0.75))
+        : (state.currentView === "list" ? LIST_LIVE_RENDER_GAP_MS : OBSERVER_MIN_RENDER_GAP_MS);
       if (elapsed >= renderGap) {
         if (listIsEmpty) state.lastObserverSignature = "";
+        renderFromObserver();
+      }
+      if (now - Number(state.lastMaintenanceRenderAt || 0) >= LIST_REFRESH_INTERVAL_MS) {
+        state.lastMaintenanceRenderAt = now;
+        state.lastObserverSignature = "";
         renderFromObserver();
       }
     }, UI_POLL_INTERVAL_MS);
@@ -7926,23 +9817,40 @@
       if (!ready) return;
       clearInterval(poll);
       logInfo("Gmail ready. Applying viewer.");
-      loadPersistedTriageMap()
-        .catch((error) => logWarn("Local triage map bootstrap failed", error))
-        .finally(() => {
-          loadPersistedSummaries().catch((error) => logWarn("Row summary cache bootstrap failed", error));
-          applyReskin();
-          startObserver();
-          ensureInboxSdkReady().catch((error) => {
-            logWarn(`InboxSDK bootstrap failed: ${normalize(error && error.message ? error.message : String(error || ""))}`);
-          });
-          setTimeout(() => {
+      applyReskin();
+      startObserver();
+      if (state.startupBootDeferredScheduled) return;
+      state.startupBootDeferredScheduled = true;
+
+      scheduleDeferredWork(() => {
+        loadPersistedTriageMap()
+          .catch((error) => logWarn("Local triage map bootstrap failed", error))
+          .finally(() => {
             const root = document.getElementById(ROOT_ID);
             if (!(root instanceof HTMLElement)) return;
-            if (state.currentView !== "list") return;
-            if (state.fullScanRunning) return;
-            runFullMailboxScan(root, { mailboxes: ["inbox", "sent"] });
-          }, 600);
+            state.lastListSignature = "";
+            state.lastObserverSignature = "";
+            if (state.currentView === "list") renderList(root);
+          });
+      }, { delayMs: 0, timeoutMs: 2200 });
+
+      scheduleDeferredWork(() => {
+        loadPersistedSummaries().catch((error) => logWarn("Row summary cache bootstrap failed", error));
+      }, { delayMs: 120, timeoutMs: 2200 });
+
+      scheduleDeferredWork(() => {
+        ensureInboxSdkReady().catch((error) => {
+          logWarn(`InboxSDK bootstrap failed: ${normalize(error && error.message ? error.message : String(error || ""))}`);
         });
+      }, { delayMs: 220, timeoutMs: 2600 });
+
+      scheduleDeferredWork(() => {
+        const root = document.getElementById(ROOT_ID);
+        if (!(root instanceof HTMLElement)) return;
+        if (state.currentView !== "list") return;
+        if (state.fullScanRunning) return;
+        scheduleMailboxScanKick(root, { mailboxes: ["inbox", "sent"], delayMs: 0 });
+      }, { delayMs: 600, timeoutMs: 2600 });
     }, 200);
   }
 
@@ -7958,9 +9866,25 @@
         activeThreadId: normalize(state.activeThreadId || ""),
         threadContext: activeThreadTimelineContext(),
         activeAccountEmail: extractEmail(state.activeAccountEmail || state.currentUserEmail || ""),
+        listMode: LIST_MODE,
+        chatMode: CHAT_MODE,
+        activeContactEmail: extractEmail(state.activeContactEmail || ""),
+        activeConversationKey: normalize(state.activeConversationKey || ""),
+        contactThreadCount: Array.isArray(state.contactThreadIds) ? state.contactThreadIds.length : 0,
+        contactHydrationRunId: Number(state.contactHydrationRunId || 0),
+        contactTimelineV2Enabled: isContactTimelineV2Enabled(),
+        contactTimelineMessageCount: Array.isArray(state.activeTimelineMessages) ? state.activeTimelineMessages.length : 0,
+        contactTimelineSample: summarizeChatMessagesForDebug(state.activeTimelineMessages || [], 12),
         mergedCount: Array.isArray(state.mergedMessages) ? state.mergedMessages.length : 0,
         mergedSample: summarizeChatMessagesForDebug(state.mergedMessages || [], 12),
-        threadExtractRetry: Number(state.threadExtractRetry || 0)
+        threadExtractRetry: Number(state.threadExtractRetry || 0),
+        scanRunId: Number(state.scanRunId || 0),
+        scanPaused: Boolean(state.scanPaused),
+        scanPauseReason: normalize(state.scanPauseReason || ""),
+        interactionEpoch: Number(state.interactionEpoch || 0),
+        activeTask: normalize(state.activeTask || ""),
+        contactMergeMetrics: state.lastContactMergeMetrics || null,
+        contactTimelineV2Metrics: state.contactTimelineV2Metrics || null
       }),
       dumpMailboxCache: () => ({
         inboxCount: Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("inbox")])
@@ -7968,7 +9892,8 @@
           : 0,
         sentCount: Array.isArray(state.scannedMailboxMessages[mailboxCacheKey("sent")])
           ? state.scannedMailboxMessages[mailboxCacheKey("sent")].length
-          : 0
+          : 0,
+        cacheRevision: Number(state.mailboxCacheRevision || 0)
       }),
       dumpReplyDebug: () => (
         window.ReskinCompose && typeof window.ReskinCompose.getLastReplyDebug === "function"
