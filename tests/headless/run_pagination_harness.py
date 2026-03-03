@@ -276,6 +276,25 @@ async def run_case(page, html_uri: str, content_js: str, model_script: str):
     await page.goto(html_uri + '#inbox')
     await page.add_script_tag(content=model_script)
     await page.add_script_tag(content=content_js)
+    await page.evaluate(
+        """
+        () => {
+          window.__reskinRoot = () => {
+            const host = document.querySelector('#rv-shadow-host');
+            return (host && host.shadowRoot && host.shadowRoot.querySelector('#reskin-root'))
+              || document.querySelector('#reskin-root');
+          };
+          window.__reskinQuery = (selector) => {
+            const root = window.__reskinRoot && window.__reskinRoot();
+            return root ? root.querySelector(selector) : null;
+          };
+          window.__reskinQueryAll = (selector) => {
+            const root = window.__reskinRoot && window.__reskinRoot();
+            return root ? Array.from(root.querySelectorAll(selector)) : [];
+          };
+        }
+        """
+    )
 
 
 async def main() -> int:
@@ -292,11 +311,11 @@ async def main() -> int:
         page_empty = await browser.new_page()
         page_empty.on('console', lambda msg: print(f"EMPTY_CONSOLE[{msg.type}] {msg.text}"))
         await run_case(page_empty, html_uri, content_js, EMPTY_THEN_ROWS_SCRIPT)
-        await page_empty.wait_for_selector('#reskin-root .rv-list', timeout=12000)
+        await page_empty.wait_for_selector('#rv-shadow-host >> .rv-list', timeout=12000)
         empty_initial = await page_empty.evaluate(
             """
             () => ({
-              itemCount: document.querySelectorAll('#reskin-root .rv-item').length,
+              itemCount: window.__reskinQueryAll('.rv-item').length,
               hash: String(window.location.hash || ''),
               delayedLoaded: Boolean(window.__emptyCaseRowsLoaded)
             })
@@ -305,7 +324,7 @@ async def main() -> int:
         await page_empty.wait_for_function(
             """
             () => {
-              const count = document.querySelectorAll('#reskin-root .rv-item').length;
+              const count = window.__reskinQueryAll('.rv-item').length;
               return count > 0 && Boolean(window.__emptyCaseRowsLoaded);
             }
             """,
@@ -315,7 +334,7 @@ async def main() -> int:
         empty_after = await page_empty.evaluate(
             """
             () => ({
-              itemCount: document.querySelectorAll('#reskin-root .rv-item').length,
+              itemCount: window.__reskinQueryAll('.rv-item').length,
               hash: String(window.location.hash || ''),
               delayedLoaded: Boolean(window.__emptyCaseRowsLoaded)
             })
@@ -326,12 +345,12 @@ async def main() -> int:
         page_pagination = await browser.new_page()
         page_pagination.on('console', lambda msg: print(f"PAGINATION_CONSOLE[{msg.type}] {msg.text}"))
         await run_case(page_pagination, html_uri, content_js, PAGINATION_SCRIPT)
-        await page_pagination.wait_for_selector('#reskin-root .rv-item', timeout=12000)
+        await page_pagination.wait_for_selector('#rv-shadow-host >> .rv-item', timeout=12000)
         await page_pagination.wait_for_function(
             """
             () => {
-              const count = document.querySelectorAll('#reskin-root .rv-item').length;
-              const statusNode = document.querySelector('#reskin-root .rv-triage-status:last-child');
+              const count = window.__reskinQueryAll('.rv-item').length;
+              const statusNode = window.__reskinQuery('.rv-triage-status:last-child');
               const status = ((statusNode && statusNode.textContent) || '').toLowerCase();
               return count >= 117 || status.includes('cached 117') || status.includes('117 emails');
             }
@@ -341,9 +360,9 @@ async def main() -> int:
         pagination_result = await page_pagination.evaluate(
             """
             () => {
-              const count = document.querySelectorAll('#reskin-root .rv-item').length;
-              const loadMore = document.querySelector('#reskin-root .rv-list-more');
-              const statuses = Array.from(document.querySelectorAll('#reskin-root .rv-triage-status'))
+              const count = window.__reskinQueryAll('.rv-item').length;
+              const loadMore = window.__reskinQuery('.rv-list-more');
+              const statuses = Array.from(window.__reskinQueryAll('.rv-triage-status'))
                 .map((node) => ((node && node.textContent) || '').trim());
               return {
                 renderedCount: count,
@@ -358,7 +377,7 @@ async def main() -> int:
         page_preempt = await browser.new_page()
         page_preempt.on('console', lambda msg: print(f"PREEMPT_CONSOLE[{msg.type}] {msg.text}"))
         await run_case(page_preempt, html_uri, content_js, SCAN_PREEMPTION_SCRIPT)
-        await page_preempt.wait_for_selector('#reskin-root .rv-item', timeout=12000)
+        await page_preempt.wait_for_selector('#rv-shadow-host >> .rv-item', timeout=12000)
         await page_preempt.wait_for_function(
             """
             () => (typeof window.__scanNextClicks === 'number') && window.__scanNextClicks >= 1
@@ -369,12 +388,12 @@ async def main() -> int:
             """
             () => ({
               nextClicks: Number(window.__scanNextClicks || 0),
-              itemCount: document.querySelectorAll('#reskin-root .rv-item').length
+              itemCount: window.__reskinQueryAll('.rv-item').length
             })
             """
         )
-        await page_preempt.click('#reskin-root .rv-item')
-        await page_preempt.wait_for_selector('#reskin-root .rv-thread-msg', timeout=12000)
+        await page_preempt.click('#rv-shadow-host >> .rv-item')
+        await page_preempt.wait_for_selector('#rv-shadow-host >> .rv-thread-msg', timeout=12000)
         await page_preempt.wait_for_timeout(1200)
         preempt_result = await page_preempt.evaluate(
             """

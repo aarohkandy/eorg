@@ -42,6 +42,25 @@ async def main() -> int:
         await page.goto(html_path.as_uri() + "#inbox")
         await page.add_script_tag(content=STUB_COMPOSE)
         await page.add_script_tag(content=content_path.read_text(encoding="utf-8"))
+        await page.evaluate(
+            """
+            () => {
+              window.__reskinRoot = () => {
+                const host = document.querySelector('#rv-shadow-host');
+                return (host && host.shadowRoot && host.shadowRoot.querySelector('#reskin-root'))
+                  || document.querySelector('#reskin-root');
+              };
+              window.__reskinQuery = (selector) => {
+                const root = window.__reskinRoot && window.__reskinRoot();
+                return root ? root.querySelector(selector) : null;
+              };
+              window.__reskinQueryAll = (selector) => {
+                const root = window.__reskinRoot && window.__reskinRoot();
+                return root ? Array.from(root.querySelectorAll(selector)) : [];
+              };
+            }
+            """
+        )
 
         await page.evaluate(
             """
@@ -89,14 +108,14 @@ async def main() -> int:
             """
         )
 
-        await page.wait_for_selector("#reskin-root .rv-item", timeout=12000)
-        await page.click("#reskin-root .rv-item")
-        await page.wait_for_selector("#reskin-root .rv-thread-input", timeout=12000)
+        await page.wait_for_selector("#rv-shadow-host >> .rv-item", timeout=12000)
+        await page.click("#rv-shadow-host >> .rv-item")
+        await page.wait_for_selector("#rv-shadow-host >> .rv-thread-input", timeout=12000)
         await page.wait_for_timeout(1600)
         initial_thread_result = await page.evaluate(
             """
             () => {
-              const incomingRows = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg.rv-thread-msg--incoming'));
+              const incomingRows = Array.from(window.__reskinQueryAll('.rv-thread-msg.rv-thread-msg--incoming'));
               const incomingBodies = incomingRows.map((row) => (
                 ((row.querySelector('.rv-thread-msg-body') || {}).textContent || '').trim()
               ));
@@ -110,18 +129,18 @@ async def main() -> int:
 
         # Enter key path should succeed from list-like hash by forcing thread-context open first.
         await page.evaluate("() => { window.location.hash = '#inbox'; }")
-        await page.fill("#reskin-root .rv-thread-input", "hello-enter")
+        await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-enter")
         optimistic_enter_ms = await page.evaluate(
             """
             async () => {
-              const input = document.querySelector('#reskin-root .rv-thread-input');
+              const input = window.__reskinQuery('.rv-thread-input');
               if (!(input instanceof HTMLInputElement)) return -1;
               const startedAt = performance.now();
               input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
               input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
               const deadline = startedAt + 1200;
               while (performance.now() < deadline) {
-                const rows = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg.rv-thread-msg--outgoing'));
+                const rows = Array.from(window.__reskinQueryAll('.rv-thread-msg.rv-thread-msg--outgoing'));
                 if (rows.length > 0) {
                   const body = rows[rows.length - 1].querySelector('.rv-thread-msg-body');
                   const text = ((body && body.textContent) || '').trim();
@@ -136,7 +155,7 @@ async def main() -> int:
         optimistic_enter = await page.evaluate(
             """
             () => {
-              const rows = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg.rv-thread-msg--outgoing'));
+              const rows = Array.from(window.__reskinQueryAll('.rv-thread-msg.rv-thread-msg--outgoing'));
               if (!rows.length) return { hasOutgoing: false, text: "" };
               const body = rows[rows.length - 1].querySelector('.rv-thread-msg-body');
               return {
@@ -157,7 +176,7 @@ async def main() -> int:
             timeout=6000,
         )
         await page.wait_for_function(
-            "() => { const input = document.querySelector('#reskin-root .rv-thread-input'); return input && !input.disabled; }",
+            "() => { const input = window.__reskinQuery('.rv-thread-input'); return input && !input.disabled; }",
             timeout=10000,
         )
         enter_result = await page.evaluate(
@@ -166,8 +185,8 @@ async def main() -> int:
               callCount: window.__replyCalls.length,
               lastBody: (window.__replyCalls[window.__replyCalls.length - 1] || {}).body || "",
               lastOpts: (window.__replyCalls[window.__replyCalls.length - 1] || {}).opts || {},
-              inputValue: (document.querySelector('#reskin-root .rv-thread-input') || {}).value || "",
-              buttonText: ((document.querySelector('#reskin-root .rv-thread-send') || {}).textContent || "").trim()
+              inputValue: (window.__reskinQuery('.rv-thread-input') || {}).value || "",
+              buttonText: ((window.__reskinQuery('.rv-thread-send') || {}).textContent || "").trim()
             })
             """
         )
@@ -175,15 +194,15 @@ async def main() -> int:
         # Button success path should also work from list-like hash.
         await page.evaluate("() => { window.location.hash = '#inbox'; }")
         for _ in range(4):
-            await page.fill("#reskin-root .rv-thread-input", "hello-click")
-            await page.click("#reskin-root .rv-thread-send")
+            await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-click")
+            await page.click("#rv-shadow-host >> .rv-thread-send")
             await page.wait_for_timeout(500)
             call_count = await page.evaluate("() => Array.isArray(window.__replyCalls) ? window.__replyCalls.length : 0")
             if call_count >= 2:
                 break
         await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 2", timeout=10000)
         await page.wait_for_function(
-            "() => { const input = document.querySelector('#reskin-root .rv-thread-input'); return input && !input.disabled; }",
+            "() => { const input = window.__reskinQuery('.rv-thread-input'); return input && !input.disabled; }",
             timeout=10000,
         )
         click_success_result = await page.evaluate(
@@ -192,27 +211,27 @@ async def main() -> int:
               callCount: window.__replyCalls.length,
               lastBody: (window.__replyCalls[window.__replyCalls.length - 1] || {}).body || "",
               lastOpts: (window.__replyCalls[window.__replyCalls.length - 1] || {}).opts || {},
-              inputValue: (document.querySelector('#reskin-root .rv-thread-input') || {}).value || ""
+              inputValue: (window.__reskinQuery('.rv-thread-input') || {}).value || ""
             })
             """
         )
 
         # Same-text sends should remain as distinct bubbles.
         await page.evaluate("() => { window.__replyMode = 'ok'; window.__replyDelayMs = 420; window.location.hash = '#inbox'; }")
-        await page.fill("#reskin-root .rv-thread-input", "repeat-text")
-        await page.click("#reskin-root .rv-thread-send")
+        await page.fill("#rv-shadow-host >> .rv-thread-input", "repeat-text")
+        await page.click("#rv-shadow-host >> .rv-thread-send")
         await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 3", timeout=10000)
         await page.wait_for_function(
-            "() => { const btn = document.querySelector('#reskin-root .rv-thread-send'); return btn && !btn.disabled; }",
+            "() => { const btn = window.__reskinQuery('.rv-thread-send'); return btn && !btn.disabled; }",
             timeout=10000,
         )
-        await page.fill("#reskin-root .rv-thread-input", "repeat-text")
-        await page.click("#reskin-root .rv-thread-send")
+        await page.fill("#rv-shadow-host >> .rv-thread-input", "repeat-text")
+        await page.click("#rv-shadow-host >> .rv-thread-send")
         await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 4", timeout=10000)
         repeat_result = await page.evaluate(
             """
             () => {
-              const outgoingBodies = Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg.rv-thread-msg--outgoing .rv-thread-msg-body'))
+              const outgoingBodies = Array.from(window.__reskinQueryAll('.rv-thread-msg.rv-thread-msg--outgoing .rv-thread-msg-body'))
                 .map((node) => ((node && node.textContent) || '').trim());
               const repeatBodies = outgoingBodies.filter((text) => text === 'repeat-text');
               return {
@@ -232,20 +251,20 @@ async def main() -> int:
             }
             """
         )
-        await page.fill("#reskin-root .rv-thread-input", "hello-fail")
-        await page.click("#reskin-root .rv-thread-send")
+        await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-fail")
+        await page.click("#rv-shadow-host >> .rv-thread-send")
         await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 3", timeout=10000)
         saw_retry = False
         try:
           await page.wait_for_function(
-              "() => { const btn = document.querySelector('#reskin-root .rv-thread-send'); return btn && ((btn.textContent || '').trim().startsWith('Retry (')); }",
+              "() => { const btn = window.__reskinQuery('.rv-thread-send'); return btn && ((btn.textContent || '').trim().startsWith('Retry (')); }",
               timeout=3000,
           )
           saw_retry = True
         except Exception:
           saw_retry = False
         await page.wait_for_function(
-            "() => { const input = document.querySelector('#reskin-root .rv-thread-input'); return input && !input.disabled; }",
+            "() => { const input = window.__reskinQuery('.rv-thread-input'); return input && !input.disabled; }",
             timeout=10000,
         )
         fail_result = await page.evaluate(
@@ -254,11 +273,11 @@ async def main() -> int:
               callCount: window.__replyCalls.length,
               lastBody: (window.__replyCalls[window.__replyCalls.length - 1] || {}).body || "",
               lastOpts: (window.__replyCalls[window.__replyCalls.length - 1] || {}).opts || {},
-              inputValue: (document.querySelector('#reskin-root .rv-thread-input') || {}).value || "",
-              buttonText: ((document.querySelector('#reskin-root .rv-thread-send') || {}).textContent || "").trim(),
-              hasFailBubble: Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg.rv-thread-msg--outgoing .rv-thread-msg-body'))
+              inputValue: (window.__reskinQuery('.rv-thread-input') || {}).value || "",
+              buttonText: ((window.__reskinQuery('.rv-thread-send') || {}).textContent || "").trim(),
+              hasFailBubble: Array.from(window.__reskinQueryAll('.rv-thread-msg.rv-thread-msg--outgoing .rv-thread-msg-body'))
                 .some((node) => ((node && node.textContent) || '').includes('hello-fail')),
-              hasFailedStatus: Array.from(document.querySelectorAll('#reskin-root .rv-thread-msg-status'))
+              hasFailedStatus: Array.from(window.__reskinQueryAll('.rv-thread-msg-status'))
                 .some((node) => ((node && node.textContent) || '').trim().toLowerCase() === 'failed')
             })
             """
