@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 import asyncio
 from pathlib import Path
+
 from playwright.async_api import async_playwright
 
+from diag_client import (
+    enable_e2e_diag,
+    get_recent_diag,
+    run_with_diag_timeout,
+    set_diag_mode,
+    wait_for_diagnostic_code,
+    wait_for_run_terminal,
+    new_diag_token,
+)
+from harness_loader import inject_content_runtime
 
 STUB_COMPOSE = r'''
 (() => {
@@ -30,18 +41,68 @@ STUB_COMPOSE = r'''
 '''
 
 
+async def latest_diag_seq(page, token: str) -> int:
+    recent = await get_recent_diag(page, token, limit=1)
+    if not recent:
+        return 0
+    event = recent[-1] if isinstance(recent[-1], dict) else {}
+    try:
+        return int(event.get("seq") or 0)
+    except Exception:
+        return 0
+
+
 async def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     html_path = repo_root / "tests" / "headless" / "chat_harness.html"
-    content_path = repo_root / "content.js"
+    artifacts_dir = repo_root / "tests" / "headless" / "artifacts"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         page.on("console", lambda msg: print(f"CONSOLE[{msg.type}] {msg.text}"))
         await page.goto(html_path.as_uri() + "#inbox")
+        await inject_content_runtime(page, repo_root, skip_files={"compose.js", "inboxsdk.js"})
         await page.add_script_tag(content=STUB_COMPOSE)
-        await page.add_script_tag(content=content_path.read_text(encoding="utf-8"))
+        diag_token = new_diag_token("reply")
+        await enable_e2e_diag(page, diag_token, ttl_ms=10 * 60 * 1000)
+        await set_diag_mode(page, "important", diag_token)
+
+        async def wait_reply_terminal(step_name: str, after_seq: int, expect_failure: bool = False):
+            expected_code = "RP199" if expect_failure else "RP180"
+            matched = await run_with_diag_timeout(
+                step_name,
+                wait_for_diagnostic_code(
+                    page,
+                    expected_code,
+                    token=diag_token,
+                    run_type="reply",
+                    after_seq=after_seq,
+                    timeout_ms=10000,
+                ),
+                page=page,
+                token=diag_token,
+                artifacts_dir=artifacts_dir,
+                timeout_ms=11000,
+            )
+            run_id = str((matched.get("event") or {}).get("r") or "")
+            if run_id:
+                await run_with_diag_timeout(
+                    f"{step_name}-run-terminal",
+                    wait_for_run_terminal(
+                        page,
+                        run_id,
+                        token=diag_token,
+                        timeout_ms=10000,
+                        after_seq=matched.get("seq"),
+                    ),
+                    page=page,
+                    token=diag_token,
+                    artifacts_dir=artifacts_dir,
+                    timeout_ms=11000,
+                )
+            return matched
+
         await page.evaluate(
             """
             () => {
@@ -108,10 +169,48 @@ async def main() -> int:
             """
         )
 
-        await page.wait_for_selector("#rv-shadow-host >> .rv-item", timeout=12000)
+        await run_with_diag_timeout(
+            "reply-initial-list-ready",
+            page.wait_for_selector("#rv-shadow-host >> .rv-item", timeout=12000),
+            page=page,
+            token=diag_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=13000,
+        )
+        open_after_seq = await latest_diag_seq(page, diag_token)
         await page.click("#rv-shadow-host >> .rv-item")
+        open_shell = await run_with_diag_timeout(
+            "reply-open-fast-shell",
+            wait_for_diagnostic_code(
+                page,
+                "O130",
+                token=diag_token,
+                run_type="open",
+                after_seq=open_after_seq,
+                timeout_ms=8000,
+            ),
+            page=page,
+            token=diag_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=9000,
+        )
+        open_run_id = str((open_shell.get("event") or {}).get("r") or "")
+        if open_run_id:
+            await run_with_diag_timeout(
+                "reply-open-run-terminal",
+                wait_for_run_terminal(
+                    page,
+                    open_run_id,
+                    token=diag_token,
+                    timeout_ms=10000,
+                    after_seq=open_shell.get("seq"),
+                ),
+                page=page,
+                token=diag_token,
+                artifacts_dir=artifacts_dir,
+                timeout_ms=11000,
+            )
         await page.wait_for_selector("#rv-shadow-host >> .rv-thread-input", timeout=12000)
-        await page.wait_for_timeout(1600)
         initial_thread_result = await page.evaluate(
             """
             () => {
@@ -130,6 +229,7 @@ async def main() -> int:
         # Enter key path should succeed from list-like hash by forcing thread-context open first.
         await page.evaluate("() => { window.location.hash = '#inbox'; }")
         await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-enter")
+        enter_after_seq = await latest_diag_seq(page, diag_token)
         optimistic_enter_ms = await page.evaluate(
             """
             async () => {
@@ -165,16 +265,7 @@ async def main() -> int:
             }
             """
         )
-        for _ in range(3):
-            await page.wait_for_timeout(500)
-            call_count = await page.evaluate("() => Array.isArray(window.__replyCalls) ? window.__replyCalls.length : 0")
-            if call_count >= 1:
-                break
-
-        await page.wait_for_function(
-            "() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 1",
-            timeout=6000,
-        )
+        await wait_reply_terminal("reply-enter-success", enter_after_seq, expect_failure=False)
         await page.wait_for_function(
             "() => { const input = window.__reskinQuery('.rv-thread-input'); return input && !input.disabled; }",
             timeout=10000,
@@ -193,14 +284,10 @@ async def main() -> int:
 
         # Button success path should also work from list-like hash.
         await page.evaluate("() => { window.location.hash = '#inbox'; }")
-        for _ in range(4):
-            await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-click")
-            await page.click("#rv-shadow-host >> .rv-thread-send")
-            await page.wait_for_timeout(500)
-            call_count = await page.evaluate("() => Array.isArray(window.__replyCalls) ? window.__replyCalls.length : 0")
-            if call_count >= 2:
-                break
-        await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 2", timeout=10000)
+        await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-click")
+        click_after_seq = await latest_diag_seq(page, diag_token)
+        await page.click("#rv-shadow-host >> .rv-thread-send")
+        await wait_reply_terminal("reply-click-success", click_after_seq, expect_failure=False)
         await page.wait_for_function(
             "() => { const input = window.__reskinQuery('.rv-thread-input'); return input && !input.disabled; }",
             timeout=10000,
@@ -219,15 +306,17 @@ async def main() -> int:
         # Same-text sends should remain as distinct bubbles.
         await page.evaluate("() => { window.__replyMode = 'ok'; window.__replyDelayMs = 420; window.location.hash = '#inbox'; }")
         await page.fill("#rv-shadow-host >> .rv-thread-input", "repeat-text")
+        repeat_one_after_seq = await latest_diag_seq(page, diag_token)
         await page.click("#rv-shadow-host >> .rv-thread-send")
-        await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 3", timeout=10000)
+        await wait_reply_terminal("reply-repeat-first", repeat_one_after_seq, expect_failure=False)
         await page.wait_for_function(
             "() => { const btn = window.__reskinQuery('.rv-thread-send'); return btn && !btn.disabled; }",
             timeout=10000,
         )
         await page.fill("#rv-shadow-host >> .rv-thread-input", "repeat-text")
+        repeat_two_after_seq = await latest_diag_seq(page, diag_token)
         await page.click("#rv-shadow-host >> .rv-thread-send")
-        await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 4", timeout=10000)
+        await wait_reply_terminal("reply-repeat-second", repeat_two_after_seq, expect_failure=False)
         repeat_result = await page.evaluate(
             """
             () => {
@@ -252,8 +341,9 @@ async def main() -> int:
             """
         )
         await page.fill("#rv-shadow-host >> .rv-thread-input", "hello-fail")
+        fail_after_seq = await latest_diag_seq(page, diag_token)
         await page.click("#rv-shadow-host >> .rv-thread-send")
-        await page.wait_for_function("() => Array.isArray(window.__replyCalls) && window.__replyCalls.length >= 3", timeout=10000)
+        await wait_reply_terminal("reply-click-failure", fail_after_seq, expect_failure=True)
         saw_retry = False
         try:
           await page.wait_for_function(

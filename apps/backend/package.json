@@ -1,0 +1,19 @@
+{
+  "name": "gmail-unified-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "test:imap": "node test-imap.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.50.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "imapflow": "^1.0.189",
+    "mailparser": "^3.7.4"
+  }
+}

@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Gmail Unified Setup</title>
+    <style>
+      body {
+        font-family: 'Google Sans', Roboto, Arial, sans-serif;
+        margin: 0;
+        width: 320px;
+        background: #fff;
+        color: #202124;
+      }
+
+      .wrap {
+        padding: 16px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 16px;
+      }
+
+      .instructions {
+        font-size: 12px;
+        line-height: 1.4;
+        margin-bottom: 12px;
+      }
+
+      label {
+        font-size: 12px;
+        display: block;
+        margin: 8px 0 4px;
+      }
+
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 10px;
+        border: 0;
+        border-radius: 8px;
+        padding: 10px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: #1a73e8;
+        color: #fff;
+      }
+
+      .secondary {
+        background: #f1f3f4;
+        color: #202124;
+      }
+
+      .status {
+        margin-top: 10px;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .status.error {
+        color: #b3261e;
+      }
+
+      .status.success {
+        color: #137333;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .connected-email {
+        margin: 10px 0;
+        font-size: 13px;
+      }
+
+      .cold-start-box {
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid #f9ab00;
+        border-radius: 8px;
+        background: #fff8e1;
+        font-size: 12px;
+      }
+
+      .small {
+        font-size: 11px;
+        color: #5f6368;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <section id="setupView" class="hidden">
+        <h1>Gmail Unified Setup</h1>
+        <div class="instructions">
+          1. Enable IMAP in Gmail settings.<br />
+          2. Generate an App Password at myaccount.google.com/apppasswords.<br />
+          3. Use your Gmail address and the generated code below.
+        </div>
+        <label for="emailInput">Gmail Address</label>
+        <input id="emailInput" type="email" autocomplete="email" />
+        <label for="passwordInput">App Password</label>
+        <input id="passwordInput" type="password" autocomplete="off" />
+        <button id="connectBtn" class="primary">Connect</button>
+        <button id="retryConnectBtn" class="secondary hidden">Retry Connection</button>
+        <div id="setupStatus" class="status"></div>
+        <div id="setupColdStart" class="cold-start-box hidden">
+          Backend server is starting up, please wait 60 seconds and try again.
+        </div>
+      </section>
+
+      <section id="connectedView" class="hidden">
+        <h1>Gmail Unified</h1>
+        <div class="status success">Connected</div>
+        <div id="connectedEmail" class="connected-email"></div>
+        <div id="lastSync" class="small">Last synced: Never</div>
+        <button id="syncBtn" class="primary">Sync Now</button>
+        <button id="disconnectBtn" class="secondary">Disconnect</button>
+        <button id="retrySyncBtn" class="secondary hidden">Retry Sync</button>
+        <div id="connectedStatus" class="status"></div>
+        <div id="connectedColdStart" class="cold-start-box hidden">
+          Backend server is starting up, please wait 60 seconds and try again.
+        </div>
+      </section>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

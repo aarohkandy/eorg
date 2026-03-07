@@ -9,17 +9,17 @@
     "https://YOUR-APP-NAME.onrender.com/*"
   ],
   "background": {
-    "service_worker": "apps/extension/background/service-worker.js"
+    "service_worker": "background/service-worker.js"
   },
   "content_scripts": [
     {
       "matches": ["https://mail.google.com/*"],
-      "js": ["apps/extension/content/gmail-inject.js"],
-      "css": ["apps/extension/content/styles.css"],
+      "js": ["content/gmail-inject.js"],
+      "css": ["content/styles.css"],
       "run_at": "document_idle"
     }
   ],
   "action": {
-    "default_popup": "apps/extension/popup/popup.html"
+    "default_popup": "popup/popup.html"
   }
 }

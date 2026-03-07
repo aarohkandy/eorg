@@ -1,0 +1,78 @@
+{
+  "manifest_version": 3,
+  "name": "Gmail Hard Reskin",
+  "description": "A resilient visual Gmail overlay that survives SPA rerenders.",
+  "version": "1.2.20",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://mail.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://mail.google.com/*"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "js": [
+        "inboxsdk.js",
+        "ai.js",
+        "triage.js",
+        "compose.js",
+        "content-modules/module-registry.js",
+        "content-modules/runtime-core.js",
+        "content-modules/conversation-context.js",
+        "content-modules/message-normalization.js",
+        "content-modules/message-normalization-forwarders.js",
+        "content-modules/navigation-thread-context.js",
+        "content-modules/sidebar-persistence.js",
+        "content-modules/right-rail-sync.js",
+        "content-modules/inbox-sdk.js",
+        "content-modules/send-refresh.js",
+        "content-modules/scheduler.js",
+        "content-modules/diagnostics-core.js",
+        "content-modules/debug.js",
+        "content-modules/perf.js",
+        "content-modules/mailbox-data.js",
+        "content-modules/contact-timeline-core.js",
+        "content-modules/contact-timeline-state.js",
+        "content-modules/contact-open.js",
+        "content-modules/contact-open-legacy.js",
+        "content-modules/contact-chat-hydration.js",
+        "content-modules/thread-reply.js",
+        "content-modules/mailbox-dom-scan.js",
+        "content-modules/mailbox-dom-forwarders.js",
+        "content-modules/thread-dom-extract.js",
+        "content-modules/thread-hydration.js",
+        "content-modules/ui-controls.js",
+        "content-modules/thread-html-utils.js",
+        "content-modules/ui-thread-list.js",
+        "content-modules/bootstrap-runtime.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "styles.css",
+        "styles-shell.css",
+        "styles-thread.css",
+        "page-debug-bridge.js",
+        "pageWorld.js"
+      ],
+      "matches": [
+        "*://mail.google.com/*"
+      ]
+    }
+  ]
+}

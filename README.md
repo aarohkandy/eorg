@@ -1,96 +1,58 @@
-# Gmail Hard Reskin
+# Gmail Unified (IMAP Rebuild)
 
-A Manifest V3 Chrome extension that overlays Gmail with a custom full-screen viewer while still using Gmail's native data and navigation.
+This repository now uses a three-part architecture:
 
-## What It Does
+1. `apps/backend` - Node.js/Express IMAP backend with Supabase cache.
+2. `apps/extension` - Chrome extension (MV3) injected into Gmail.
+3. `legacy/gmail-dom-v1` - archived selector-based Gmail DOM implementation.
 
-- Replaces Gmail's visible UI with a custom "Mailita" surface.
-- Extracts thread metadata (sender, subject, date) from Gmail DOM with resilient selector fallbacks.
-- Uses contact-first list rows for Inbox/Sent (one row per contact) and opens merged contact chat on click.
-- Builds contact timelines from row/cache sources (Inbox + Sent) with deterministic merge/dedupe ordering.
-- Adds AI inbox triage and Ask Inbox Q&A (manual/explicit runs; background AI automation is off in core phase).
-- Persists local triage state so badges/filters still work even if Gmail label sync fails.
+## Why this rebuild
 
-## Project Structure
+The legacy DOM selector extraction was removed from active runtime. The current extension gets data from the backend via IMAP (`imap.gmail.com:993`) and no longer depends on Gmail internal class names.
 
-- `manifest.json`: Extension manifest and content script wiring.
-- `content.js`: Active runtime for Gmail detection, extraction, rendering, and interaction.
-- `ai.js`: Provider settings and AI request pipeline (Groq/OpenRouter/Ollama).
-- `triage.js`: Gmail label apply + fallback logic and triage label detection.
-- `styles.css`: Full visual reskin and layout styling.
-- `compose.js`: Compose/send automation helper module used by thread reply send flow.
-- `threads.js`: Alternate thread extraction helper module (currently not wired in `manifest.json`).
-- `tests/headless/`: Playwright harnesses for triage and Ask Inbox regression tests.
-- `docs/tooling.md`: WXT/Playwright integration notes.
+## Active extension behavior
 
-## Install Locally
+- Injects a right sidebar into Gmail (`mail.google.com`).
+- Shows Inbox + Sent in a unified timeline with thread grouping.
+- Supports filters (All/Inbox/Sent), search, sync, unread hints, and auto-refresh.
+- Handles Render cold starts with a dedicated user-visible message:
 
-1. Open `chrome://extensions`.
-2. Enable **Developer mode**.
-3. Click **Load unpacked**.
-4. Select this project directory.
-5. Open Gmail at `https://mail.google.com/mail/u/0/#inbox`.
+`Backend server is starting up, please wait 60 seconds and try again.`
 
-## Usage
+## Directory map
 
-- The custom viewer mounts automatically when Gmail is ready.
-- Contact-first list and scan status run from the left sidebar.
-- AI triage is available from sidebar actions, but auto background AI kicks are disabled in this phase.
-- Ask Inbox runs from the right rail chat panel.
+- `/apps/backend/server.js` - API server + keep-alive timers.
+- `/apps/backend/routes` - auth/messages/health endpoints.
+- `/apps/backend/lib` - IMAP, crypto, Supabase, normalization helpers.
+- `/apps/extension/background/service-worker.js` - API proxy + error classifier.
+- `/apps/extension/content/gmail-inject.js` - Gmail sidebar UI.
+- `/apps/extension/popup` - setup/connect/sync/disconnect UI.
+- `/manifest.json` - active extension manifest pointing to `apps/extension/*`.
 
-## Debugging
+## Backend quick start
 
-Use DevTools Console on Gmail and filter by `[reskin]`.
+```bash
+cd apps/backend
+npm install
+cp .env.example .env
+npm run test:imap
+npm run dev
+```
 
-Page-console bridge (works from normal DevTools page context):
+## Extension quick start
 
-- `await window.ReskinChatDebug.enable()`
-- `await window.ReskinChatDebug.dumpState()`
-- `await window.ReskinChatDebug.dumpMailboxCache()`
-- `await window.ReskinChatDebug.dumpAccountState()`
-- `await window.ReskinChatDebug.dumpReplyDebug()`
+1. Update backend URL in `apps/extension/background/service-worker.js`.
+2. Open `chrome://extensions`.
+3. Enable Developer mode.
+4. Load unpacked from repository root (`/Users/a_a_k/Downloads/EORG`).
+5. Open Gmail and use the popup to connect with Gmail + App Password.
 
-Expected lifecycle logs:
+## Supabase setup
 
-- `Waiting for Gmail landmarks...`
-- `Gmail ready. Applying viewer.`
-- `Extractor source: rows|links|rows+links`
-- `Rendered N messages`
-- `Mutation observer started (debounced 75ms).`
-- `thread-extract:source` and `thread-render:timeline` while opening a thread
-- `contact-v2:open`, `contact-v2:scope`, `contact-v2:timeline-built`, `contact-v2:cache-refresh` for contact timeline v2
-- `interaction:epoch` and scheduler fields from `dumpState()` for scan preemption/debug
-- `startup-filter:default-all` when first inbox load defaults to unfiltered view
+Run `/infra/supabase-schema.sql` in your Supabase SQL editor.
 
-`InboxSDK` injection errors can appear in console on some Gmail builds. They are non-fatal for timeline
-rendering: the extension automatically falls back to DOM extraction (`inboxsdk:fallback-dom`).
+## Notes
 
-If you see `No messages captured. Gmail selectors did not match this view.`:
-
-1. Reload the extension from `chrome://extensions`.
-2. Hard refresh Gmail (`Ctrl+Shift+R` / `Cmd+Shift+R`).
-3. Use overlay **Refresh** button.
-4. Capture a fresh console dump plus current Gmail URL hash for selector tuning.
-
-## Development Notes
-
-- Gmail DOM is highly dynamic and class names are obfuscated.
-- Prefer stable attributes (`role`, `aria-*`, `data-thread-id`, `data-legacy-thread-id`, `href` patterns).
-- Keep extraction logic defensive and non-destructive.
-- Avoid mutating Gmail nodes; render custom nodes under `#reskin-root`.
-
-## Known Limitations
-
-- Gmail DOM changes can still break extraction and require selector updates.
-- The extension currently targets Chromium-based browsers.
-- `threads.js` is a helper module and not part of current runtime unless added to `manifest.json`.
-
-## Security and Privacy
-
-- Runs only on `https://mail.google.com/*`.
-- AI triage/Q&A sends selected inbox content to configured provider only when enabled + consented in Settings.
-- Operates in-page through content script DOM reads/writes for Gmail interactions.
-
-## Release
-
-See `PUBLISHING.md` for a step-by-step GitHub publishing flow.
+- No Gmail API/OAuth is used.
+- App Password is encrypted server-side and never stored in extension storage.
+- Known old DOM implementation remains archived under `/legacy/gmail-dom-v1` for reference only.

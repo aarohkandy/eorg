@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 import asyncio
 from pathlib import Path
+
 from playwright.async_api import async_playwright
 
+from diag_client import (
+    enable_e2e_diag,
+    get_recent_diag,
+    run_with_diag_timeout,
+    set_diag_mode,
+    wait_for_diagnostic_code,
+    wait_for_run_terminal,
+    new_diag_token,
+)
+from harness_loader import inject_content_runtime
 
 STUB_AI = r'''
 (() => {
@@ -35,20 +46,32 @@ STUB_AI = r'''
 '''
 
 
+async def latest_diag_seq(page, token: str) -> int:
+    recent = await get_recent_diag(page, token, limit=1)
+    if not recent:
+        return 0
+    event = recent[-1] if isinstance(recent[-1], dict) else {}
+    try:
+        return int(event.get("seq") or 0)
+    except Exception:
+        return 0
+
+
 async def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     html_path = repo_root / "tests" / "headless" / "chat_harness.html"
-    content_path = repo_root / "content.js"
-    triage_path = repo_root / "triage.js"
+    artifacts_dir = repo_root / "tests" / "headless" / "artifacts"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         page.on("console", lambda msg: print(f"CONSOLE[{msg.type}] {msg.text}"))
         await page.goto(html_path.as_uri() + "#inbox")
+        await inject_content_runtime(page, repo_root, skip_files={"inboxsdk.js"})
         await page.add_script_tag(content=STUB_AI)
-        await page.add_script_tag(content=triage_path.read_text(encoding="utf-8"))
-        await page.add_script_tag(content=content_path.read_text(encoding="utf-8"))
+        diag_token = new_diag_token("chat")
+        await enable_e2e_diag(page, diag_token, ttl_ms=10 * 60 * 1000)
+        await set_diag_mode(page, "important", diag_token)
         await page.evaluate(
             """
             () => {
@@ -69,7 +92,14 @@ async def main() -> int:
             """
         )
 
-        await page.wait_for_selector("#rv-shadow-host >> .rv-ai-qa-input", timeout=10000)
+        await run_with_diag_timeout(
+            "chat-initial-ui-ready",
+            page.wait_for_selector("#rv-shadow-host >> .rv-ai-qa-input", timeout=10000),
+            page=page,
+            token=diag_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=11000,
+        )
         debug_bridge_result = await page.evaluate(
             """
             async () => {
@@ -281,6 +311,7 @@ async def main() -> int:
             }
             """
         )
+        open_after_seq = await latest_diag_seq(page, diag_token)
         clicked_aaroh = await page.evaluate(
             """
             () => {
@@ -299,6 +330,37 @@ async def main() -> int:
             }
             """
         )
+        open_shell = await run_with_diag_timeout(
+            "chat-open-fast-shell",
+            wait_for_diagnostic_code(
+                page,
+                "O130",
+                token=diag_token,
+                run_type="open",
+                after_seq=open_after_seq,
+                timeout_ms=8000,
+            ),
+            page=page,
+            token=diag_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=9000,
+        )
+        open_run_id = str((open_shell.get("event") or {}).get("r") or "")
+        if open_run_id:
+            await run_with_diag_timeout(
+                "chat-open-run-terminal",
+                wait_for_run_terminal(
+                    page,
+                    open_run_id,
+                    token=diag_token,
+                    timeout_ms=10000,
+                    after_seq=open_shell.get("seq"),
+                ),
+                page=page,
+                token=diag_token,
+                artifacts_dir=artifacts_dir,
+                timeout_ms=11000,
+            )
         await page.wait_for_selector("#rv-shadow-host >> .rv-thread-msg", timeout=12000)
         await page.wait_for_function(
             """

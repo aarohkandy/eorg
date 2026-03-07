@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 import asyncio
 from pathlib import Path
+
 from playwright.async_api import async_playwright
 
+from diag_client import (
+    enable_e2e_diag,
+    get_recent_diag,
+    run_with_diag_timeout,
+    set_diag_mode,
+    wait_for_diagnostic_code,
+    wait_for_run_terminal,
+    new_diag_token,
+)
+from harness_loader import inject_content_runtime
 
 EMPTY_THEN_ROWS_SCRIPT = r'''
 (() => {
@@ -272,10 +283,10 @@ SCAN_PREEMPTION_SCRIPT = r'''
 '''
 
 
-async def run_case(page, html_uri: str, content_js: str, model_script: str):
+async def run_case(page, repo_root: Path, html_uri: str, model_script: str):
     await page.goto(html_uri + '#inbox')
     await page.add_script_tag(content=model_script)
-    await page.add_script_tag(content=content_js)
+    await inject_content_runtime(page, repo_root, skip_files={"inboxsdk.js"})
     await page.evaluate(
         """
         () => {
@@ -297,12 +308,22 @@ async def run_case(page, html_uri: str, content_js: str, model_script: str):
     )
 
 
+async def latest_diag_seq(page, token: str) -> int:
+    recent = await get_recent_diag(page, token, limit=1)
+    if not recent:
+        return 0
+    event = recent[-1] if isinstance(recent[-1], dict) else {}
+    try:
+        return int(event.get("seq") or 0)
+    except Exception:
+        return 0
+
+
 async def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     html_path = repo_root / 'tests' / 'headless' / 'chat_harness.html'
-    content_path = repo_root / 'content.js'
+    artifacts_dir = repo_root / 'tests' / 'headless' / 'artifacts'
     html_uri = html_path.as_uri()
-    content_js = content_path.read_text(encoding='utf-8')
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -310,8 +331,18 @@ async def main() -> int:
         # Case 1: initial empty render self-recovers without filter hopping.
         page_empty = await browser.new_page()
         page_empty.on('console', lambda msg: print(f"EMPTY_CONSOLE[{msg.type}] {msg.text}"))
-        await run_case(page_empty, html_uri, content_js, EMPTY_THEN_ROWS_SCRIPT)
-        await page_empty.wait_for_selector('#rv-shadow-host >> .rv-list', timeout=12000)
+        await run_case(page_empty, repo_root, html_uri, EMPTY_THEN_ROWS_SCRIPT)
+        empty_token = new_diag_token("pagination-empty")
+        await enable_e2e_diag(page_empty, empty_token, ttl_ms=10 * 60 * 1000)
+        await set_diag_mode(page_empty, "important", empty_token)
+        await run_with_diag_timeout(
+            "pagination-empty-ui-ready",
+            page_empty.wait_for_selector('#rv-shadow-host >> .rv-list', timeout=12000),
+            page=page_empty,
+            token=empty_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=13000,
+        )
         empty_initial = await page_empty.evaluate(
             """
             () => ({
@@ -344,18 +375,44 @@ async def main() -> int:
         # Case 2: full pagination scan goes beyond first 50.
         page_pagination = await browser.new_page()
         page_pagination.on('console', lambda msg: print(f"PAGINATION_CONSOLE[{msg.type}] {msg.text}"))
-        await run_case(page_pagination, html_uri, content_js, PAGINATION_SCRIPT)
-        await page_pagination.wait_for_selector('#rv-shadow-host >> .rv-item', timeout=12000)
-        await page_pagination.wait_for_function(
-            """
-            () => {
-              const count = window.__reskinQueryAll('.rv-item').length;
-              const statusNode = window.__reskinQuery('.rv-triage-status:last-child');
-              const status = ((statusNode && statusNode.textContent) || '').toLowerCase();
-              return count >= 117 || status.includes('cached 117') || status.includes('117 emails');
-            }
-            """,
-            timeout=45000,
+        await run_case(page_pagination, repo_root, html_uri, PAGINATION_SCRIPT)
+        pagination_token = new_diag_token("pagination-main")
+        await enable_e2e_diag(page_pagination, pagination_token, ttl_ms=10 * 60 * 1000)
+        await set_diag_mode(page_pagination, "important", pagination_token)
+        await run_with_diag_timeout(
+            "pagination-main-list-ready",
+            page_pagination.wait_for_selector('#rv-shadow-host >> .rv-item', timeout=12000),
+            page=page_pagination,
+            token=pagination_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=13000,
+        )
+        scan_start = await run_with_diag_timeout(
+            "pagination-scan-start",
+            wait_for_diagnostic_code(
+                page_pagination,
+                "S100",
+                token=pagination_token,
+                timeout_ms=25000,
+            ),
+            page=page_pagination,
+            token=pagination_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=26000,
+        )
+        await run_with_diag_timeout(
+            "pagination-scan-done",
+            wait_for_diagnostic_code(
+                page_pagination,
+                "S180",
+                token=pagination_token,
+                after_seq=scan_start.get("seq"),
+                timeout_ms=45000,
+            ),
+            page=page_pagination,
+            token=pagination_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=46000,
         )
         pagination_result = await page_pagination.evaluate(
             """
@@ -376,8 +433,18 @@ async def main() -> int:
         # Case 3: scan preemption while opening conversation.
         page_preempt = await browser.new_page()
         page_preempt.on('console', lambda msg: print(f"PREEMPT_CONSOLE[{msg.type}] {msg.text}"))
-        await run_case(page_preempt, html_uri, content_js, SCAN_PREEMPTION_SCRIPT)
-        await page_preempt.wait_for_selector('#rv-shadow-host >> .rv-item', timeout=12000)
+        await run_case(page_preempt, repo_root, html_uri, SCAN_PREEMPTION_SCRIPT)
+        preempt_token = new_diag_token("pagination-preempt")
+        await enable_e2e_diag(page_preempt, preempt_token, ttl_ms=10 * 60 * 1000)
+        await set_diag_mode(page_preempt, "important", preempt_token)
+        await run_with_diag_timeout(
+            "pagination-preempt-list-ready",
+            page_preempt.wait_for_selector('#rv-shadow-host >> .rv-item', timeout=12000),
+            page=page_preempt,
+            token=preempt_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=13000,
+        )
         await page_preempt.wait_for_function(
             """
             () => (typeof window.__scanNextClicks === 'number') && window.__scanNextClicks >= 1
@@ -392,9 +459,40 @@ async def main() -> int:
             })
             """
         )
+        preempt_after_seq = await latest_diag_seq(page_preempt, preempt_token)
         await page_preempt.click('#rv-shadow-host >> .rv-item')
-        await page_preempt.wait_for_selector('#rv-shadow-host >> .rv-thread-msg', timeout=12000)
-        await page_preempt.wait_for_timeout(1200)
+        open_shell = await run_with_diag_timeout(
+            "pagination-preempt-open-shell",
+            wait_for_diagnostic_code(
+                page_preempt,
+                "O130",
+                token=preempt_token,
+                run_type="open",
+                after_seq=preempt_after_seq,
+                timeout_ms=8000,
+            ),
+            page=page_preempt,
+            token=preempt_token,
+            artifacts_dir=artifacts_dir,
+            timeout_ms=9000,
+        )
+        open_run_id = str((open_shell.get("event") or {}).get("r") or "")
+        if open_run_id:
+            await run_with_diag_timeout(
+                "pagination-preempt-open-terminal",
+                wait_for_run_terminal(
+                    page_preempt,
+                    open_run_id,
+                    token=preempt_token,
+                    timeout_ms=10000,
+                    after_seq=open_shell.get("seq"),
+                ),
+                page=page_preempt,
+                token=preempt_token,
+                artifacts_dir=artifacts_dir,
+                timeout_ms=11000,
+            )
+        await page.wait_for_selector('#rv-shadow-host >> .rv-thread-msg', timeout=12000)
         preempt_result = await page_preempt.evaluate(
             """
             async () => {
