@@ -8,8 +8,47 @@ const state = {
   searchQuery: '',
   retrySeconds: 0,
   retryTimer: null,
-  autoRefreshTimer: null
+  autoRefreshTimer: null,
+  guideOpen: false
 };
+
+function isGmailSetupRoute() {
+  const hash = String(window.location.hash || '').toLowerCase();
+  return hash.startsWith('#settings');
+}
+
+function updateMainPanelVisibility() {
+  const detail = document.getElementById('gmailUnifiedDetail');
+  const empty = document.getElementById('gmailUnifiedMainEmpty');
+  if (!detail || !empty) return;
+
+  const showDetail = detail.style.display !== 'none' && Boolean(state.selectedThreadId);
+  empty.style.display = showDetail ? 'none' : 'flex';
+}
+
+function setGuideOpen(nextOpen) {
+  state.guideOpen = Boolean(nextOpen);
+  const panel = document.getElementById('gmailUnifiedGuide');
+  const trigger = document.getElementById('gmailUnifiedGuideBtn');
+  if (!panel || !trigger) return;
+  panel.hidden = !state.guideOpen;
+  trigger.classList.toggle('is-active', state.guideOpen);
+  trigger.setAttribute('aria-expanded', state.guideOpen ? 'true' : 'false');
+}
+
+function applyRouteMode() {
+  const setupMode = isGmailSetupRoute();
+  const sidebar = document.getElementById('gmailUnifiedSidebar');
+
+  document.body.classList.toggle('gmail-unified-fullscreen', !setupMode);
+  if (sidebar) {
+    sidebar.classList.toggle('gmail-unified-setup-mode', setupMode);
+  }
+
+  if (setupMode) {
+    setGuideOpen(true);
+  }
+}
 
 function waitForGmail(callback) {
   const check = () => {
@@ -113,6 +152,8 @@ function setStateCard(type, text, retryVisible = false) {
     list.style.display = 'none';
     detail.style.display = 'none';
   }
+
+  updateMainPanelVisibility();
 }
 
 function renderThreads() {
@@ -198,6 +239,8 @@ function renderThreadDetail(group) {
 
     body.appendChild(item);
   });
+
+  updateMainPanelVisibility();
 }
 
 function clearRetryTimer() {
@@ -303,43 +346,90 @@ async function handleSearch(query) {
 function buildSidebar() {
   if (document.getElementById('gmailUnifiedSidebar')) return;
 
+  applyRouteMode();
+
   const sidebar = document.createElement('aside');
   sidebar.id = 'gmailUnifiedSidebar';
   sidebar.innerHTML = `
-    <button id="gmailUnifiedToggle" class="gmail-unified-toggle" aria-label="Toggle sidebar">◀</button>
-    <div class="gmail-unified-header">
-      <h3>Gmail Unified</h3>
-      <button id="gmailUnifiedSync" class="gmail-unified-sync">↻ Sync</button>
-    </div>
-    <div class="gmail-unified-search">
-      <input id="gmailUnifiedSearchInput" type="text" placeholder="Search messages..." />
-    </div>
-    <div class="gmail-unified-filters">
-      <button class="gmail-unified-filter-btn active" data-filter="all">All</button>
-      <button class="gmail-unified-filter-btn" data-filter="inbox">Inbox</button>
-      <button class="gmail-unified-filter-btn" data-filter="sent">Sent</button>
-    </div>
-    <div id="gmailUnifiedStateCard" class="gmail-unified-state-card" data-state="loading">
-      <div id="gmailUnifiedStateText">Connecting to Gmail...</div>
-      <button id="gmailUnifiedRetryBtn" class="gmail-unified-retry" type="button">Retry now</button>
-      <div id="gmailUnifiedCountdown" class="gmail-unified-countdown"></div>
-    </div>
-    <div id="gmailUnifiedList" class="gmail-unified-list"></div>
-    <section id="gmailUnifiedDetail" class="gmail-unified-detail" style="display:none;">
-      <div class="gmail-unified-detail-head">
-        <button id="gmailUnifiedBackBtn" class="gmail-unified-back">← Back</button>
-        <div id="gmailUnifiedDetailHeader"></div>
+    <div class="gmail-unified-shell">
+      <section class="gmail-unified-left">
+        <div class="gmail-unified-header">
+          <h3>Gmail Unified</h3>
+          <div class="gmail-unified-header-actions">
+            <button id="gmailUnifiedGuideBtn" class="gmail-unified-guide-btn" aria-expanded="false">Guide me</button>
+            <button id="gmailUnifiedSync" class="gmail-unified-sync">↻ Sync</button>
+          </div>
+        </div>
+        <div class="gmail-unified-search">
+          <input id="gmailUnifiedSearchInput" type="text" placeholder="Search messages..." />
+        </div>
+        <div class="gmail-unified-filters">
+          <button class="gmail-unified-filter-btn active" data-filter="all">All</button>
+          <button class="gmail-unified-filter-btn" data-filter="inbox">Inbox</button>
+          <button class="gmail-unified-filter-btn" data-filter="sent">Sent</button>
+        </div>
+        <section id="gmailUnifiedGuide" class="gmail-unified-guide" hidden>
+          <div class="gmail-unified-guide-head">
+            <span>Setup guide</span>
+            <button id="gmailUnifiedGuideClose" class="gmail-unified-guide-close" type="button">×</button>
+          </div>
+          <ol class="gmail-unified-guide-steps">
+            <li>Click the extension icon in Chrome and connect your Gmail account.</li>
+            <li>Enable IMAP in Gmail settings.</li>
+            <li>Create a Google App Password named <strong>Gmail Unified</strong>.</li>
+            <li>Come back here and click <strong>Retry now</strong> or <strong>Sync</strong>.</li>
+          </ol>
+          <div class="gmail-unified-guide-links">
+            <button id="gmailUnifiedGuideImap" type="button">Open Gmail IMAP settings</button>
+            <button id="gmailUnifiedGuideAppPassword" type="button">Open App Passwords</button>
+            <button id="gmailUnifiedGuide2fa" type="button">Open 2FA settings</button>
+            <button id="gmailUnifiedGuideInbox" type="button">Back to inbox</button>
+          </div>
+        </section>
+        <div id="gmailUnifiedStateCard" class="gmail-unified-state-card" data-state="loading">
+          <div id="gmailUnifiedStateText">Connecting to Gmail...</div>
+          <button id="gmailUnifiedRetryBtn" class="gmail-unified-retry" type="button">Retry now</button>
+          <div id="gmailUnifiedCountdown" class="gmail-unified-countdown"></div>
+        </div>
+        <div id="gmailUnifiedList" class="gmail-unified-list"></div>
+      </section>
+      <section class="gmail-unified-main">
+        <div id="gmailUnifiedMainEmpty" class="gmail-unified-main-empty">Select a conversation</div>
+        <section id="gmailUnifiedDetail" class="gmail-unified-detail" style="display:none;">
+          <div class="gmail-unified-detail-head">
+            <button id="gmailUnifiedBackBtn" class="gmail-unified-back">← Back</button>
+            <div id="gmailUnifiedDetailHeader"></div>
+          </div>
+          <div id="gmailUnifiedDetailBody" class="gmail-unified-detail-body"></div>
+        </section>
       </div>
-      <div id="gmailUnifiedDetailBody" class="gmail-unified-detail-body"></div>
-    </section>
+    </div>
   `;
 
   document.body.appendChild(sidebar);
 
-  const toggle = sidebar.querySelector('#gmailUnifiedToggle');
-  toggle.addEventListener('click', () => {
-    sidebar.classList.toggle('collapsed');
-    toggle.textContent = sidebar.classList.contains('collapsed') ? '▶' : '◀';
+  sidebar.querySelector('#gmailUnifiedGuideBtn').addEventListener('click', () => {
+    setGuideOpen(!state.guideOpen);
+  });
+  sidebar.querySelector('#gmailUnifiedGuideClose').addEventListener('click', () => {
+    setGuideOpen(false);
+  });
+  sidebar.querySelector('#gmailUnifiedGuideImap').addEventListener('click', () => {
+    window.open('https://mail.google.com/#settings/fwdandpop', '_blank', 'noopener,noreferrer');
+  });
+  sidebar.querySelector('#gmailUnifiedGuideAppPassword').addEventListener('click', () => {
+    window.open('https://myaccount.google.com/apppasswords', '_blank', 'noopener,noreferrer');
+  });
+  sidebar.querySelector('#gmailUnifiedGuide2fa').addEventListener('click', () => {
+    window.open(
+      'https://myaccount.google.com/signinoptions/two-step-verification',
+      '_blank',
+      'noopener,noreferrer'
+    );
+  });
+  sidebar.querySelector('#gmailUnifiedGuideInbox').addEventListener('click', () => {
+    window.location.hash = '#inbox';
+    applyRouteMode();
   });
 
   sidebar.querySelector('#gmailUnifiedSync').addEventListener('click', async () => {
@@ -377,7 +467,12 @@ function buildSidebar() {
   sidebar.querySelector('#gmailUnifiedBackBtn').addEventListener('click', () => {
     state.selectedThreadId = '';
     document.getElementById('gmailUnifiedDetail').style.display = 'none';
+    updateMainPanelVisibility();
   });
+
+  updateMainPanelVisibility();
+  setGuideOpen(false);
+  applyRouteMode();
 }
 
 function startAutoRefresh() {
@@ -393,4 +488,5 @@ waitForGmail(() => {
   buildSidebar();
   loadMessages();
   startAutoRefresh();
+  window.addEventListener('hashchange', applyRouteMode);
 });

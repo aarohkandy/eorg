@@ -1,22 +1,46 @@
 {
   "manifest_version": 3,
   "name": "Gmail Unified",
-  "version": "1.0.0",
-  "description": "View all your Gmail sent and received messages in one place",
-  "permissions": ["storage", "scripting"],
+  "description": "Full-screen Gmail replacement with backend Inbox + Sent sync.",
+  "version": "1.2.20",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "scripting"
+  ],
   "host_permissions": [
-    "https://mail.google.com/*",
-    "https://YOUR-APP-NAME.onrender.com/*"
+    "*://mail.google.com/*",
+    "https://email-bcknd.onrender.com/*"
   ],
   "background": {
-    "service_worker": "apps/extension/background/service-worker.js"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*"],
-      "js": ["apps/extension/content/gmail-inject.js"],
-      "css": ["apps/extension/content/styles.css"],
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": [
+        "content/gmail-inject.js"
+      ],
+      "css": [
+        "content/styles.css"
+      ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "styles.css",
+        "styles-shell.css",
+        "styles-thread.css",
+        "page-debug-bridge.js",
+        "pageWorld.js"
+      ],
+      "matches": [
+        "*://mail.google.com/*"
+      ]
     }
   ],
   "action": {

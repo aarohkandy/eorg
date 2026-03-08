@@ -1,12 +1,25 @@
 {
-  "name": "gmail-unified-monorepo",
-  "version": "1.0.0",
+  "name": "eorg",
+  "version": "1.1.6",
   "private": true,
-  "description": "Gmail Unified extension + IMAP backend",
+  "type": "module",
+  "description": "Gmail Hard Reskin extension with AI triage + InboxSDK + headless tests",
   "scripts": {
-    "setup:backend": "npm --prefix apps/backend install",
-    "dev:backend": "npm --prefix apps/backend run dev",
-    "start:backend": "npm --prefix apps/backend run start",
-    "test:imap": "npm --prefix apps/backend run test:imap"
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "typecheck": "tsc --noEmit",
+    "test:headless": "bash tests/headless/run_all.sh",
+    "test:triage": ".venv/bin/python3 tests/headless/run_triage_harness.py",
+    "test:chat": ".venv/bin/python3 tests/headless/run_chat_harness.py",
+    "test:compose": ".venv/bin/python3 tests/headless/run_compose_harness.py",
+    "test:reply": ".venv/bin/python3 tests/headless/run_reply_harness.py"
+  },
+  "devDependencies": {
+    "@inboxsdk/core": "2.2.11",
+    "@types/chrome": "latest",
+    "playwright": "latest",
+    "typescript": "latest",
+    "wxt": "latest"
   }
 }

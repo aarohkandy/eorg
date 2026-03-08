@@ -1,19 +1,32 @@
-# Gmail Unified Extension
+# Gmail Unified Extension (Active Runtime)
 
-Manifest V3 extension that runs directly in Gmail and fetches messages through the background service worker.
+This is the active Chrome extension package.
 
-## Key behavior
+## Key Behavior
 
-- Sidebar in `mail.google.com`
-- Filters: All / Inbox / Sent
-- Search with debounce
-- Force sync action
-- Cold-start state handling for Render wake-up delays
+- Runs only on `https://mail.google.com/*`
+- Replaces visible Gmail with a full-screen custom shell
+- Loads Inbox/Sent from backend through service worker actions
+- Uses popup onboarding for first-time setup
+- Shows explicit Render cold-start guidance
 
-## Cold start UX
+## Backend URL
 
-When backend is waking, the UI shows:
+- `https://email-bcknd.onrender.com`
 
-"Backend server is starting up, please wait 60 seconds and try again."
+## Cold Start UX
 
-with manual retry and automatic retry countdown.
+When Render is asleep, extension responses are normalized as `BACKEND_COLD_START` and the UI shows:
+
+> Backend server is starting up, please wait 60 seconds and try again.
+
+## Main User Flow
+
+1. Popup onboarding (IMAP + App Password)
+2. Open Gmail full-screen shell
+3. In Settings: Check backend status -> Sync now -> Reload mailbox
+4. Use Inbox/Sent and thread reply normally
+
+## Non-Goals (Current Build)
+
+- AI triage and inbox Q&A are disabled.

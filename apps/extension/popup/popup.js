@@ -1,12 +1,24 @@
-const setupView = document.getElementById('setupView');
+const onboardingView = document.getElementById('onboardingView');
 const connectedView = document.getElementById('connectedView');
 
-const emailInput = document.getElementById('emailInput');
-const passwordInput = document.getElementById('passwordInput');
-const connectBtn = document.getElementById('connectBtn');
-const retryConnectBtn = document.getElementById('retryConnectBtn');
-const setupStatus = document.getElementById('setupStatus');
-const setupColdStart = document.getElementById('setupColdStart');
+const wizardStepText = document.getElementById('wizardStepText');
+const wizardDots = [...document.querySelectorAll('.wizard-dot')];
+const wizardSteps = [...document.querySelectorAll('.wizard-step')];
+
+const step1Next = document.getElementById('step1Next');
+const step2Back = document.getElementById('step2Back');
+const step2Open = document.getElementById('step2Open');
+const step2Skip = document.getElementById('step2Skip');
+const step3Back = document.getElementById('step3Back');
+const step3Open = document.getElementById('step3Open');
+const step3Next = document.getElementById('step3Next');
+const step4Back = document.getElementById('step4Back');
+
+const onboardingEmailInput = document.getElementById('onboardingEmailInput');
+const onboardingPasswordInput = document.getElementById('onboardingPasswordInput');
+const onboardingConnectBtn = document.getElementById('onboardingConnectBtn');
+const onboardingError = document.getElementById('onboardingError');
+const onboardingSuccess = document.getElementById('onboardingSuccess');
 
 const connectedEmail = document.getElementById('connectedEmail');
 const lastSync = document.getElementById('lastSync');
@@ -16,10 +28,16 @@ const retrySyncBtn = document.getElementById('retrySyncBtn');
 const connectedStatus = document.getElementById('connectedStatus');
 const connectedColdStart = document.getElementById('connectedColdStart');
 
-let pendingConnectPayload = null;
+let currentWizardStep = 1;
+let reconnectMode = false;
+let connectInFlight = false;
 
 function setVisible(element, visible) {
   element.classList.toggle('hidden', !visible);
+}
+
+function setPopupMode(mode) {
+  document.body.classList.toggle('onboarding', mode === 'onboarding');
 }
 
 function toRelativeTime(isoString) {
@@ -35,9 +53,70 @@ function toRelativeTime(isoString) {
   return `${hours} hours ago`;
 }
 
-function showSetupStatus(message, isError = false) {
-  setupStatus.textContent = message || '';
-  setupStatus.className = `status ${isError ? 'error' : 'success'}`;
+function setWizardStep(step) {
+  currentWizardStep = Math.min(4, Math.max(1, Number(step) || 1));
+
+  wizardSteps.forEach((section) => {
+    const active = Number(section.dataset.step) === currentWizardStep;
+    section.classList.toggle('active', active);
+  });
+
+  wizardDots.forEach((dot, index) => {
+    dot.classList.toggle('active', index < currentWizardStep);
+  });
+
+  wizardStepText.textContent = `Step ${currentWizardStep} of 4`;
+
+  if (reconnectMode) {
+    step4Back.classList.add('hidden');
+  } else {
+    step4Back.classList.remove('hidden');
+  }
+}
+
+function showOnboarding(step = 1, useReconnectMode = false) {
+  reconnectMode = useReconnectMode;
+  setPopupMode('onboarding');
+  setVisible(onboardingView, true);
+  setVisible(connectedView, false);
+  setWizardStep(step);
+}
+
+function showConnected(state) {
+  setPopupMode('connected');
+  setVisible(onboardingView, false);
+  setVisible(connectedView, true);
+
+  connectedEmail.textContent = `Connected: ${state.userEmail || ''}`;
+  lastSync.textContent = `Last synced: ${toRelativeTime(state.lastSyncTime)}`;
+}
+
+function showOnboardingError(message) {
+  onboardingError.textContent = message;
+  setVisible(onboardingError, true);
+  setVisible(onboardingSuccess, false);
+}
+
+function showOnboardingSuccess(message) {
+  onboardingSuccess.textContent = message;
+  setVisible(onboardingSuccess, true);
+  setVisible(onboardingError, false);
+}
+
+function clearOnboardingMessages() {
+  setVisible(onboardingError, false);
+  setVisible(onboardingSuccess, false);
+}
+
+function setConnectButtonLoading(loading) {
+  connectInFlight = loading;
+  onboardingConnectBtn.disabled = loading;
+
+  if (loading) {
+    onboardingConnectBtn.innerHTML = '<span class="spinner"></span>Connecting...';
+  } else {
+    onboardingConnectBtn.textContent = 'Connect My Account';
+  }
 }
 
 function showConnectedStatus(message, isError = false) {
@@ -45,67 +124,171 @@ function showConnectedStatus(message, isError = false) {
   connectedStatus.className = `status ${isError ? 'error' : 'success'}`;
 }
 
-async function callWorker(action, payload = {}) {
-  return chrome.runtime.sendMessage({ action, payload });
-}
-
-async function refreshView() {
-  const state = await callWorker('GET_STORAGE');
-  const connected = Boolean(state?.userId);
-
-  setVisible(setupView, !connected);
-  setVisible(connectedView, connected);
-
-  if (connected) {
-    connectedEmail.textContent = `Connected: ${state.userEmail}`;
-    lastSync.textContent = `Last synced: ${toRelativeTime(state.lastSyncTime)}`;
-  }
-}
-
 function showColdStart(target, show) {
   setVisible(target, show);
 }
 
-async function connect(payload) {
-  showSetupStatus('Connecting...', false);
-  showColdStart(setupColdStart, false);
+function mapConnectError(response) {
+  if (response?.code === 'AUTH_FAILED') {
+    return 'Wrong email or App Password. Double-check the code from Google and try again.';
+  }
 
-  const response = await callWorker('CONNECT', payload);
-  if (!response?.success) {
-    if (response.code === 'BACKEND_COLD_START') {
-      showSetupStatus('', false);
-      showColdStart(setupColdStart, true);
-      setVisible(retryConnectBtn, true);
-      pendingConnectPayload = payload;
+  if (response?.code === 'CONNECTION_FAILED') {
+    return "Can't reach Gmail. Check your internet connection.";
+  }
+
+  if (response?.code === 'BACKEND_COLD_START') {
+    return 'The server is waking up (this takes ~60 seconds). Please wait and try again.';
+  }
+
+  return 'Something went wrong. Please try again.';
+}
+
+async function callWorker(action, payload = {}) {
+  return chrome.runtime.sendMessage({ action, payload });
+}
+
+async function refreshPopupState() {
+  const state = await chrome.storage.local.get([
+    'userId',
+    'userEmail',
+    'lastSyncTime',
+    'onboardingComplete',
+    'pinReminderShown'
+  ]);
+
+  if (state.userId && state.onboardingComplete === true) {
+    showConnected(state);
+    return;
+  }
+
+  if (state.userId && !state.onboardingComplete) {
+    await chrome.storage.local.set({ onboardingComplete: true });
+    showConnected({ ...state, onboardingComplete: true });
+    return;
+  }
+
+  if (!state.userId && !state.onboardingComplete) {
+    showOnboarding(1, false);
+    return;
+  }
+
+  // Safety fallback: onboarding was completed before but userId is missing.
+  showOnboarding(4, true);
+}
+
+async function connectFromOnboarding() {
+  if (connectInFlight) return;
+
+  clearOnboardingMessages();
+
+  const email = String(onboardingEmailInput.value || '').trim();
+  const appPassword = String(onboardingPasswordInput.value || '').trim();
+
+  if (!email || !appPassword) {
+    showOnboardingError('Please provide both Gmail address and App Password.');
+    return;
+  }
+
+  setConnectButtonLoading(true);
+
+  try {
+    const response = await callWorker('CONNECT', { email, appPassword });
+
+    if (!response?.success) {
+      showOnboardingError(mapConnectError(response));
       return;
     }
 
-    showSetupStatus(response?.error || 'Connection failed.', true);
-    return;
-  }
+    onboardingPasswordInput.value = '';
 
-  showSetupStatus('Connected successfully.', false);
-  pendingConnectPayload = null;
-  setVisible(retryConnectBtn, false);
-  await refreshView();
+    const existing = await chrome.storage.local.get(['pinReminderShown']);
+    const updates = {
+      onboardingComplete: true,
+      userId: response.userId,
+      userEmail: response.email
+    };
+
+    if (!existing.pinReminderShown) {
+      updates.pinReminderShown = true;
+    }
+
+    await chrome.storage.local.set(updates);
+
+    let successMessage = '✓ Connected! Loading your messages...';
+    if (!existing.pinReminderShown) {
+      successMessage +=
+        '\n\n💡 Tip: Pin this extension to your toolbar so it is always one click away. Right-click the puzzle piece 🧩 in Chrome\'s toolbar, find Gmail Unified, then click the pin icon.';
+    }
+
+    showOnboardingSuccess(successMessage);
+
+    setTimeout(async () => {
+      const state = await chrome.storage.local.get([
+        'userId',
+        'userEmail',
+        'lastSyncTime',
+        'onboardingComplete'
+      ]);
+      showConnected(state);
+      showConnectedStatus('Connected successfully.', false);
+    }, 1500);
+  } finally {
+    setConnectButtonLoading(false);
+  }
 }
 
-connectBtn.addEventListener('click', async () => {
-  const email = String(emailInput.value || '').trim();
-  const appPassword = String(passwordInput.value || '').trim();
-  passwordInput.value = '';
-
-  if (!email || !appPassword) {
-    showSetupStatus('Please provide both Gmail address and App Password.', true);
-    return;
-  }
-
-  await connect({ email, appPassword });
+step1Next.addEventListener('click', () => {
+  clearOnboardingMessages();
+  setWizardStep(2);
 });
 
-retryConnectBtn.addEventListener('click', async () => {
-  if (pendingConnectPayload) {
-    await connect(pendingConnectPayload);
+step2Back.addEventListener('click', () => {
+  clearOnboardingMessages();
+  setWizardStep(1);
+});
+
+step2Open.addEventListener('click', async () => {
+  await chrome.tabs.create({ url: 'https://mail.google.com/#settings/fwdandpop' });
+  setTimeout(() => {
+    clearOnboardingMessages();
+    setWizardStep(3);
+  }, 2000);
+});
+
+step2Skip.addEventListener('click', () => {
+  clearOnboardingMessages();
+  setWizardStep(3);
+});
+
+step3Back.addEventListener('click', () => {
+  clearOnboardingMessages();
+  setWizardStep(2);
+});
+
+step3Open.addEventListener('click', async () => {
+  await chrome.tabs.create({ url: 'https://myaccount.google.com/apppasswords' });
+});
+
+step3Next.addEventListener('click', () => {
+  clearOnboardingMessages();
+  setWizardStep(4);
+});
+
+step4Back.addEventListener('click', () => {
+  if (reconnectMode) return;
+  clearOnboardingMessages();
+  setWizardStep(3);
+});
+
+onboardingConnectBtn.addEventListener('click', async () => {
+  await connectFromOnboarding();
+});
+
+onboardingPasswordInput.addEventListener('keydown', async (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    await connectFromOnboarding();
   }
 });
 
@@ -128,11 +311,11 @@ syncBtn.addEventListener('click', async () => {
 
   showConnectedStatus(`Done! ${response.synced} messages synced.`, false);
   setVisible(retrySyncBtn, false);
-  await refreshView();
+  await refreshPopupState();
 });
 
 retrySyncBtn.addEventListener('click', async () => {
-  syncBtn.click();
+  await syncBtn.click();
 });
 
 disconnectBtn.addEventListener('click', async () => {
@@ -144,7 +327,7 @@ disconnectBtn.addEventListener('click', async () => {
   }
 
   showConnectedStatus('Disconnected.', false);
-  await refreshView();
+  await refreshPopupState();
 });
 
-refreshView();
+refreshPopupState();
