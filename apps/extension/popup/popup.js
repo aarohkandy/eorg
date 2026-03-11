@@ -8,10 +8,8 @@ const wizardSteps = [...document.querySelectorAll('.wizard-step')];
 const step1Next = document.getElementById('step1Next');
 const step2Back = document.getElementById('step2Back');
 const step2Open = document.getElementById('step2Open');
-const step2Skip = document.getElementById('step2Skip');
 const step3Back = document.getElementById('step3Back');
 const step3Open = document.getElementById('step3Open');
-const step3Next = document.getElementById('step3Next');
 const step4Back = document.getElementById('step4Back');
 
 const onboardingEmailInput = document.getElementById('onboardingEmailInput');
@@ -27,6 +25,8 @@ const disconnectBtn = document.getElementById('disconnectBtn');
 const retrySyncBtn = document.getElementById('retrySyncBtn');
 const connectedStatus = document.getElementById('connectedStatus');
 const connectedColdStart = document.getElementById('connectedColdStart');
+
+const GUIDE_STEP_KEYS = ['welcome', 'enable_imap', 'generate_app_password', 'connect_account'];
 
 let currentWizardStep = 1;
 let reconnectMode = false;
@@ -72,6 +72,17 @@ function setWizardStep(step) {
   } else {
     step4Back.classList.remove('hidden');
   }
+}
+
+function wizardStepFromKey(stepKey) {
+  const index = GUIDE_STEP_KEYS.indexOf(stepKey);
+  return index >= 0 ? index + 1 : 1;
+}
+
+function applyGuideStateToWizard(guideState) {
+  if (!guideState || typeof guideState !== 'object') return;
+  const step = wizardStepFromKey(guideState.step);
+  setWizardStep(step);
 }
 
 function showOnboarding(step = 1, useReconnectMode = false) {
@@ -148,6 +159,27 @@ async function callWorker(action, payload = {}) {
   return chrome.runtime.sendMessage({ action, payload });
 }
 
+async function fetchGuideState() {
+  const response = await callWorker('GUIDE_GET_STATE');
+  return response?.success ? response.guideState : null;
+}
+
+async function navigateGuideStep(stepKey) {
+  const response = await callWorker('GUIDE_NAVIGATE_TO_STEP', { step: stepKey });
+  if (response?.success && response.guideState) {
+    applyGuideStateToWizard(response.guideState);
+  }
+  return response;
+}
+
+async function confirmGuideStep(stepKey) {
+  const response = await callWorker('GUIDE_CONFIRM_STEP', { step: stepKey });
+  if (response?.success && response.guideState) {
+    applyGuideStateToWizard(response.guideState);
+  }
+  return response;
+}
+
 async function refreshPopupState() {
   const state = await chrome.storage.local.get([
     'userId',
@@ -169,12 +201,14 @@ async function refreshPopupState() {
   }
 
   if (!state.userId && !state.onboardingComplete) {
-    showOnboarding(1, false);
+    const guideState = await fetchGuideState();
+    showOnboarding(wizardStepFromKey(guideState?.step || 'welcome'), false);
     return;
   }
 
   // Safety fallback: onboarding was completed before but userId is missing.
-  showOnboarding(4, true);
+  const guideState = await fetchGuideState();
+  showOnboarding(wizardStepFromKey(guideState?.step || 'connect_account'), true);
 }
 
 async function connectFromOnboarding() {
@@ -201,6 +235,7 @@ async function connectFromOnboarding() {
     }
 
     onboardingPasswordInput.value = '';
+    await confirmGuideStep('connect_account');
 
     const existing = await chrome.storage.local.get(['pinReminderShown']);
     const updates = {
@@ -234,13 +269,16 @@ async function connectFromOnboarding() {
       showConnectedStatus('Connected successfully.', false);
     }, 1500);
   } finally {
+    onboardingPasswordInput.value = '';
     setConnectButtonLoading(false);
   }
 }
 
 step1Next.addEventListener('click', () => {
   clearOnboardingMessages();
-  setWizardStep(2);
+  confirmGuideStep('welcome').catch(() => {
+    setWizardStep(2);
+  });
 });
 
 step2Back.addEventListener('click', () => {
@@ -249,16 +287,8 @@ step2Back.addEventListener('click', () => {
 });
 
 step2Open.addEventListener('click', async () => {
-  await chrome.tabs.create({ url: 'https://mail.google.com/#settings/fwdandpop' });
-  setTimeout(() => {
-    clearOnboardingMessages();
-    setWizardStep(3);
-  }, 2000);
-});
-
-step2Skip.addEventListener('click', () => {
   clearOnboardingMessages();
-  setWizardStep(3);
+  await navigateGuideStep('enable_imap');
 });
 
 step3Back.addEventListener('click', () => {
@@ -267,12 +297,8 @@ step3Back.addEventListener('click', () => {
 });
 
 step3Open.addEventListener('click', async () => {
-  await chrome.tabs.create({ url: 'https://myaccount.google.com/apppasswords' });
-});
-
-step3Next.addEventListener('click', () => {
   clearOnboardingMessages();
-  setWizardStep(4);
+  await navigateGuideStep('generate_app_password');
 });
 
 step4Back.addEventListener('click', () => {
@@ -331,3 +357,10 @@ disconnectBtn.addEventListener('click', async () => {
 });
 
 refreshPopupState();
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return;
+  if (changes.onboardingGuideState || changes.userId || changes.onboardingComplete) {
+    refreshPopupState().catch(() => {});
+  }
+});

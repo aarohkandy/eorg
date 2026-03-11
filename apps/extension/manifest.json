@@ -3,14 +3,18 @@
   "name": "Gmail Unified",
   "description": "Full-screen Gmail replacement with backend Inbox + Sent sync.",
   "version": "1.2.20",
-  "permissions": ["storage", "unlimitedStorage", "scripting"],
-  "host_permissions": ["*://mail.google.com/*", "https://email-bcknd.onrender.com/*"],
+  "permissions": ["storage", "unlimitedStorage", "scripting", "tabs"],
+  "host_permissions": [
+    "*://mail.google.com/*",
+    "https://myaccount.google.com/*",
+    "https://email-bcknd.onrender.com/*"
+  ],
   "background": {
     "service_worker": "background/service-worker.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*"],
+      "matches": ["https://mail.google.com/*", "https://myaccount.google.com/*"],
       "js": ["content/gmail-inject.js"],
       "css": ["content/styles.css"],
       "run_at": "document_idle"
