@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import os
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -423,4 +424,9 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    timeout_seconds = max(30, int(os.environ.get("REPLY_HARNESS_TIMEOUT_SEC", "240")))
+    try:
+        raise SystemExit(asyncio.run(asyncio.wait_for(main(), timeout=timeout_seconds)))
+    except asyncio.TimeoutError:
+        print(f"REPLY_HARNESS_TIMEOUT exceeded {timeout_seconds}s")
+        raise SystemExit(1)

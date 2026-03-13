@@ -8,6 +8,46 @@ export class AppError extends Error {
   }
 }
 
+const CONNECT_ERROR_DEFAULT_MESSAGE =
+  'Wrong email or App Password. Enable IMAP in Gmail settings and generate a valid App Password.';
+
+export function buildConnectFailure(code, message) {
+  const normalizedCode = String(code || 'AUTH_FAILED').trim() || 'AUTH_FAILED';
+  const normalizedMessage = String(message || '').trim();
+
+  if (normalizedCode === 'AUTH_FAILED' || normalizedCode === 'NOT_CONNECTED') {
+    return new AppError(
+      normalizedCode,
+      normalizedMessage || CONNECT_ERROR_DEFAULT_MESSAGE,
+      401
+    );
+  }
+
+  if (normalizedCode === 'FOLDER_NOT_FOUND') {
+    return new AppError(
+      normalizedCode,
+      normalizedMessage || 'Required Gmail folders are not available for this account.',
+      400
+    );
+  }
+
+  if (normalizedCode === 'CONNECTION_FAILED') {
+    return new AppError(
+      normalizedCode,
+      normalizedMessage || 'Cannot reach imap.gmail.com. Check network connectivity and try again.',
+      503,
+      { retriable: true, retryAfterSec: 60 }
+    );
+  }
+
+  return new AppError(
+    normalizedCode,
+    normalizedMessage || 'Unable to verify Gmail connection right now.',
+    503,
+    { retriable: true, retryAfterSec: 60 }
+  );
+}
+
 export function buildErrorResponse(error) {
   if (error instanceof AppError) {
     return {

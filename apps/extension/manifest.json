@@ -2,11 +2,10 @@
   "manifest_version": 3,
   "name": "Gmail Unified",
   "description": "Full-screen Gmail replacement with backend Inbox + Sent sync.",
-  "version": "1.2.20",
-  "permissions": ["storage", "unlimitedStorage", "scripting", "tabs"],
+  "version": "1.2.21",
+  "permissions": ["storage", "unlimitedStorage", "tabs"],
   "host_permissions": [
-    "*://mail.google.com/*",
-    "https://myaccount.google.com/*",
+    "https://mail.google.com/*",
     "https://email-bcknd.onrender.com/*"
   ],
   "background": {
@@ -14,22 +13,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*", "https://myaccount.google.com/*"],
+      "matches": ["https://mail.google.com/*"],
       "js": ["content/gmail-inject.js"],
       "css": ["content/styles.css"],
       "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "styles.css",
-        "styles-shell.css",
-        "styles-thread.css",
-        "page-debug-bridge.js",
-        "pageWorld.js"
-      ],
-      "matches": ["*://mail.google.com/*"]
     }
   ],
   "action": {

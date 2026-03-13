@@ -5,12 +5,8 @@ const wizardStepText = document.getElementById('wizardStepText');
 const wizardDots = [...document.querySelectorAll('.wizard-dot')];
 const wizardSteps = [...document.querySelectorAll('.wizard-step')];
 
-const step1Next = document.getElementById('step1Next');
+const step1Continue = document.getElementById('step1Continue');
 const step2Back = document.getElementById('step2Back');
-const step2Open = document.getElementById('step2Open');
-const step3Back = document.getElementById('step3Back');
-const step3Open = document.getElementById('step3Open');
-const step4Back = document.getElementById('step4Back');
 
 const onboardingEmailInput = document.getElementById('onboardingEmailInput');
 const onboardingPasswordInput = document.getElementById('onboardingPasswordInput');
@@ -25,8 +21,13 @@ const disconnectBtn = document.getElementById('disconnectBtn');
 const retrySyncBtn = document.getElementById('retrySyncBtn');
 const connectedStatus = document.getElementById('connectedStatus');
 const connectedColdStart = document.getElementById('connectedColdStart');
+const step1OpenTwoFactor = document.getElementById('step1OpenTwoFactor');
+const step2OpenAppPasswords = document.getElementById('step2OpenAppPasswords');
+const step2OpenTwoFactor = document.getElementById('step2OpenTwoFactor');
 
-const GUIDE_STEP_KEYS = ['welcome', 'enable_imap', 'generate_app_password', 'connect_account'];
+const GUIDE_STEP_KEYS = ['welcome', 'connect_account'];
+const APP_PASSWORDS_URL = 'https://myaccount.google.com/apppasswords';
+const TWO_STEP_VERIFICATION_URL = 'https://myaccount.google.com/signinoptions/two-step-verification';
 
 let currentWizardStep = 1;
 let reconnectMode = false;
@@ -54,7 +55,7 @@ function toRelativeTime(isoString) {
 }
 
 function setWizardStep(step) {
-  currentWizardStep = Math.min(4, Math.max(1, Number(step) || 1));
+  currentWizardStep = Math.min(2, Math.max(1, Number(step) || 1));
 
   wizardSteps.forEach((section) => {
     const active = Number(section.dataset.step) === currentWizardStep;
@@ -65,13 +66,8 @@ function setWizardStep(step) {
     dot.classList.toggle('active', index < currentWizardStep);
   });
 
-  wizardStepText.textContent = `Step ${currentWizardStep} of 4`;
-
-  if (reconnectMode) {
-    step4Back.classList.add('hidden');
-  } else {
-    step4Back.classList.remove('hidden');
-  }
+  wizardStepText.textContent = `Step ${currentWizardStep} of 2`;
+  step2Back.classList.toggle('hidden', reconnectMode);
 }
 
 function wizardStepFromKey(stepKey) {
@@ -159,21 +155,17 @@ async function callWorker(action, payload = {}) {
   return chrome.runtime.sendMessage({ action, payload });
 }
 
+async function openExternalTab(url) {
+  await chrome.tabs.create({ url });
+}
+
 async function fetchGuideState() {
   const response = await callWorker('GUIDE_GET_STATE');
   return response?.success ? response.guideState : null;
 }
 
-async function navigateGuideStep(stepKey) {
-  const response = await callWorker('GUIDE_NAVIGATE_TO_STEP', { step: stepKey });
-  if (response?.success && response.guideState) {
-    applyGuideStateToWizard(response.guideState);
-  }
-  return response;
-}
-
-async function confirmGuideStep(stepKey) {
-  const response = await callWorker('GUIDE_CONFIRM_STEP', { step: stepKey });
+async function confirmGuideStep(stepKey, payload = {}) {
+  const response = await callWorker('GUIDE_CONFIRM_STEP', { step: stepKey, ...payload });
   if (response?.success && response.guideState) {
     applyGuideStateToWizard(response.guideState);
   }
@@ -235,7 +227,16 @@ async function connectFromOnboarding() {
     }
 
     onboardingPasswordInput.value = '';
-    await confirmGuideStep('connect_account');
+    await confirmGuideStep('connect_account', {
+      substep: 'connect_submitted',
+      reason: 'connect_submitted',
+      evidence: {
+        appPassword: {
+          generatedAt: new Date().toISOString(),
+          source: 'connect_submit'
+        }
+      }
+    });
 
     const existing = await chrome.storage.local.get(['pinReminderShown']);
     const updates = {
@@ -250,65 +251,59 @@ async function connectFromOnboarding() {
 
     await chrome.storage.local.set(updates);
 
-    let successMessage = '✓ Connected! Loading your messages...';
+    let successMessage = 'Connected. Loading your messages...';
     if (!existing.pinReminderShown) {
       successMessage +=
-        '\n\n💡 Tip: Pin this extension to your toolbar so it is always one click away. Right-click the puzzle piece 🧩 in Chrome\'s toolbar, find Gmail Unified, then click the pin icon.';
+        '\n\nTip: Pin this extension to your toolbar so it is always one click away.';
     }
 
     showOnboardingSuccess(successMessage);
 
     setTimeout(async () => {
-      const state = await chrome.storage.local.get([
+      const nextState = await chrome.storage.local.get([
         'userId',
         'userEmail',
         'lastSyncTime',
         'onboardingComplete'
       ]);
-      showConnected(state);
+      showConnected(nextState);
       showConnectedStatus('Connected successfully.', false);
-    }, 1500);
+    }, 900);
   } finally {
     onboardingPasswordInput.value = '';
     setConnectButtonLoading(false);
   }
 }
 
-step1Next.addEventListener('click', () => {
+step1Continue.addEventListener('click', () => {
   clearOnboardingMessages();
-  confirmGuideStep('welcome').catch(() => {
-    setWizardStep(2);
-  });
+  openExternalTab(APP_PASSWORDS_URL)
+    .catch(() => {})
+    .then(() => confirmGuideStep('welcome'))
+    .then(() => setWizardStep(2))
+    .catch(() => setWizardStep(2));
+});
+
+step1OpenTwoFactor.addEventListener('click', async () => {
+  await openExternalTab(TWO_STEP_VERIFICATION_URL);
 });
 
 step2Back.addEventListener('click', () => {
+  if (reconnectMode) return;
   clearOnboardingMessages();
   setWizardStep(1);
 });
 
-step2Open.addEventListener('click', async () => {
-  clearOnboardingMessages();
-  await navigateGuideStep('enable_imap');
-});
-
-step3Back.addEventListener('click', () => {
-  clearOnboardingMessages();
-  setWizardStep(2);
-});
-
-step3Open.addEventListener('click', async () => {
-  clearOnboardingMessages();
-  await navigateGuideStep('generate_app_password');
-});
-
-step4Back.addEventListener('click', () => {
-  if (reconnectMode) return;
-  clearOnboardingMessages();
-  setWizardStep(3);
-});
-
 onboardingConnectBtn.addEventListener('click', async () => {
   await connectFromOnboarding();
+});
+
+step2OpenAppPasswords.addEventListener('click', async () => {
+  await openExternalTab(APP_PASSWORDS_URL);
+});
+
+step2OpenTwoFactor.addEventListener('click', async () => {
+  await openExternalTab(TWO_STEP_VERIFICATION_URL);
 });
 
 onboardingPasswordInput.addEventListener('keydown', async (event) => {

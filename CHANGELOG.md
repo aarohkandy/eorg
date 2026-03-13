@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.21 - 2026-03-11
+
+- Made `apps/extension/manifest.json` the canonical Gmail Unified runtime and aligned root `manifest.json` to delegate to it.
+- Removed legacy page-world InboxSDK injection path and dropped `scripting` permission/web-accessible legacy resources.
+- Added runtime contract checks (`tests/contracts/verify_runtime_contracts.mjs`) for backend URL pinning, runtime wiring, and client credential safety.
+- Added `docs/findings-resolution-log.md` for finding-to-fix traceability.
+
 ## v1.1.0 - 2026-02-25
 
 - **pre-discord state**: Snapshot before Discord-related experiment. Safe restore point.

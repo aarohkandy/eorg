@@ -5,46 +5,48 @@
     <title>Gmail Unified Setup</title>
     <style>
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
         margin: 0;
-        width: 320px;
-        background: #fff;
-        color: #202124;
+        width: 330px;
+        background: #090909;
+        color: #f4f4f4;
+        font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
       }
 
       body.onboarding {
-        width: 420px;
+        width: 430px;
       }
 
       .wrap {
         padding: 16px;
       }
 
-      h1 {
-        margin: 0 0 10px;
-        font-size: 18px;
-        line-height: 1.25;
-      }
-
-      h2 {
-        margin: 0 0 8px;
-        font-size: 16px;
-        line-height: 1.3;
-      }
-
-      p {
-        margin: 0;
-        line-height: 1.4;
-        font-size: 13px;
-        color: #3c4043;
-      }
-
       .hidden {
         display: none;
       }
 
+      h1 {
+        margin: 0;
+        font-size: 24px;
+        line-height: 1.1;
+        text-transform: uppercase;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.2;
+        text-transform: uppercase;
+      }
+
+      p {
+        margin: 0;
+        color: #c7c7c7;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
       .wizard-progress {
-        margin-bottom: 12px;
+        margin-bottom: 14px;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -52,24 +54,26 @@
 
       .wizard-step-text {
         font-size: 12px;
-        color: #5f6368;
-        font-weight: 600;
+        color: #b8b8b8;
+        letter-spacing: 0.04em;
       }
 
       .wizard-dots {
         display: flex;
-        gap: 6px;
+        gap: 7px;
       }
 
       .wizard-dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: #dadce0;
+        border: 1px solid #5d5d5d;
+        background: #1a1a1a;
       }
 
       .wizard-dot.active {
-        background: #1a73e8;
+        border-color: #ffffff;
+        background: #ffffff;
       }
 
       .wizard-step {
@@ -80,21 +84,18 @@
         display: block;
       }
 
-      .hero-icon {
-        width: 36px;
-        height: 36px;
-        border-radius: 10px;
-        background: #e8f0fe;
-        color: #1a73e8;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 18px;
-        margin-bottom: 10px;
+      .step-card {
+        border: 1px solid #383838;
+        border-radius: 14px;
+        background: #121212;
+        padding: 14px;
       }
 
-      .benefit-list,
-      .checklist {
+      .step-intro {
+        margin-top: 8px;
+      }
+
+      .instruction-list {
         margin: 10px 0 0;
         padding: 0;
         list-style: none;
@@ -102,34 +103,21 @@
         gap: 8px;
       }
 
-      .benefit-list li,
-      .checklist li {
-        border: 1px solid #e8eaed;
+      .instruction-list li {
+        border: 1px solid #2d2d2d;
         border-radius: 10px;
-        padding: 8px 10px;
+        background: #0e0e0e;
+        padding: 8px 9px;
         font-size: 13px;
-        line-height: 1.35;
-        background: #fff;
+        color: #d7d7d7;
       }
 
-      .checklist li {
-        display: grid;
-        grid-template-columns: 22px 1fr;
-        gap: 8px;
-        align-items: start;
-      }
-
-      .checklist-number {
-        width: 20px;
-        height: 20px;
-        border-radius: 50%;
-        background: #f1f3f4;
-        color: #3c4043;
-        display: inline-flex;
+      .helper-actions {
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 10px;
         align-items: center;
-        justify-content: center;
-        font-weight: 600;
-        font-size: 11px;
       }
 
       .wizard-actions {
@@ -146,60 +134,40 @@
 
       button {
         border: 0;
-        border-radius: 8px;
-        padding: 10px;
-        font-weight: 600;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
         cursor: pointer;
         font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
       }
 
       .primary {
-        background: #1a73e8;
-        color: #fff;
+        background: linear-gradient(180deg, #ffffff 0%, #d8d8d8 100%);
+        color: #0f0f0f;
       }
 
       .secondary {
-        background: #f1f3f4;
-        color: #202124;
+        background: #1d1d1d;
+        color: #f2f2f2;
+        border: 1px solid #4a4a4a;
       }
 
-      .outline {
-        background: #fff;
-        color: #1a73e8;
-        border: 1px solid #1a73e8;
-      }
-
-      .ghost-link {
+      .link-btn {
         border: 0;
-        background: transparent;
-        color: #1a73e8;
-        text-align: left;
         padding: 0;
+        background: transparent;
+        color: #f2f2f2;
         font-size: 12px;
-        font-weight: 500;
-        cursor: pointer;
+        text-decoration: underline;
+        text-underline-offset: 3px;
       }
 
       .helper {
         margin-top: 6px;
         font-size: 11px;
-        color: #5f6368;
-        line-height: 1.4;
-      }
-
-      .helper a {
-        color: #1a73e8;
-        text-decoration: none;
-      }
-
-      .warning-box {
-        margin-top: 10px;
-        background: #fff3cd;
-        border: 1px solid #ffc107;
-        color: #856404;
-        border-radius: 8px;
-        padding: 8px 10px;
-        font-size: 12px;
+        color: #9e9e9e;
         line-height: 1.4;
       }
 
@@ -211,44 +179,48 @@
         display: block;
         font-size: 12px;
         font-weight: 600;
-        margin-bottom: 4px;
+        margin-bottom: 5px;
+        color: #cdcdcd;
       }
 
       input {
         width: 100%;
         box-sizing: border-box;
         padding: 9px;
-        border: 1px solid #dadce0;
-        border-radius: 8px;
+        border: 1px solid #4a4a4a;
+        border-radius: 10px;
         font-size: 13px;
+        background: #101010;
+        color: #f2f2f2;
       }
 
       .error-box {
         margin-top: 10px;
-        background: #fce8e6;
-        border: 1px solid #d93025;
-        color: #c5221f;
+        border: 1px solid #7d2f2f;
+        color: #f0b5b5;
         border-radius: 8px;
         padding: 8px 10px;
         font-size: 12px;
         line-height: 1.4;
+        background: #2a1313;
       }
 
       .success-box {
         margin-top: 10px;
-        background: #e6f4ea;
-        color: #137333;
+        border: 1px solid #345a3d;
+        color: #bceac7;
         border-radius: 8px;
         padding: 8px 10px;
         font-size: 12px;
         line-height: 1.4;
+        background: #132017;
       }
 
       .spinner {
         width: 12px;
         height: 12px;
-        border: 2px solid rgba(255, 255, 255, 0.5);
-        border-top-color: #fff;
+        border: 2px solid rgba(15, 15, 15, 0.45);
+        border-top-color: #0f0f0f;
         border-radius: 50%;
         display: inline-block;
         vertical-align: middle;
@@ -272,30 +244,32 @@
       }
 
       .status.error {
-        color: #b3261e;
+        color: #f0b5b5;
       }
 
       .status.success {
-        color: #137333;
+        color: #bceac7;
       }
 
       .connected-email {
         margin: 10px 0;
         font-size: 13px;
+        color: #d7d7d7;
       }
 
       .cold-start-box {
         margin-top: 10px;
         padding: 10px;
-        border: 1px solid #f9ab00;
+        border: 1px solid #8b773a;
         border-radius: 8px;
-        background: #fff8e1;
+        background: #221d0f;
         font-size: 12px;
+        color: #ead9a8;
       }
 
       .small {
         font-size: 11px;
-        color: #5f6368;
+        color: #9e9e9e;
       }
     </style>
   </head>
@@ -303,112 +277,71 @@
     <div class="wrap">
       <section id="onboardingView" class="hidden">
         <div class="wizard-progress">
-          <div id="wizardStepText" class="wizard-step-text">Step 1 of 4</div>
+          <div id="wizardStepText" class="wizard-step-text">Step 1 of 2</div>
           <div class="wizard-dots">
             <span class="wizard-dot active" data-dot="1"></span>
             <span class="wizard-dot" data-dot="2"></span>
-            <span class="wizard-dot" data-dot="3"></span>
-            <span class="wizard-dot" data-dot="4"></span>
           </div>
         </div>
 
         <section class="wizard-step active" data-step="1">
-          <div class="hero-icon">✉</div>
-          <h1>Welcome to Gmail Unified</h1>
-          <p>See all your sent and received Gmail messages in one place, right inside Gmail.</p>
-          <ul class="benefit-list">
-            <li>✓ Unified inbox - sent + received together</li>
-            <li>✓ Search across all your messages</li>
-            <li>✓ Organized by thread, always in sync</li>
-          </ul>
-          <div class="wizard-actions">
-            <button id="step1Next" class="primary">Get Started →</button>
+          <div class="step-card">
+            <h1>Before You Connect</h1>
+            <p class="step-intro">We need one thing before you can sign in: a Google App Password for the Gmail account you want to sync.</p>
+            <ul class="instruction-list">
+              <li>Open <strong>App Passwords</strong> for the Google account you want to connect.</li>
+              <li>If Google says App Passwords is unavailable, turn on <strong>2-Step Verification</strong> first.</li>
+              <li>Create a new password for <strong>Gmail Unified</strong> and copy the 16-character code.</li>
+              <li>Come back here and paste that code on the next step.</li>
+            </ul>
+            <div class="helper-actions">
+              <span class="helper">Need 2-Step Verification first?</span>
+              <button id="step1OpenTwoFactor" class="link-btn" type="button">Open 2-Step Verification</button>
+            </div>
+            <div class="wizard-actions">
+              <button id="step1Continue" class="primary">Open App Passwords</button>
+            </div>
+            <p class="helper">After it opens, create the password there, then return here to connect.</p>
           </div>
         </section>
 
         <section class="wizard-step" data-step="2">
-          <h2>Step 1 of 3 - Enable IMAP in Gmail</h2>
-          <p>
-            Gmail Unified connects using IMAP, a standard email protocol. You need to turn it on in Gmail settings
-            first.
-          </p>
-          <ol class="checklist">
-            <li><span class="checklist-number">1</span><span>Open Gmail</span></li>
-            <li><span class="checklist-number">2</span><span>Click the gear icon ⚙️ (top right)</span></li>
-            <li><span class="checklist-number">3</span><span>Click "See all settings"</span></li>
-            <li><span class="checklist-number">4</span><span>Click the "Forwarding and POP/IMAP" tab</span></li>
-            <li><span class="checklist-number">5</span><span>Under "IMAP access", select "Enable IMAP"</span></li>
-            <li><span class="checklist-number">6</span><span>Click "Save Changes"</span></li>
-          </ol>
-          <div class="wizard-actions">
-            <div class="action-row">
-              <button id="step2Back" class="secondary">Back</button>
-              <button id="step2Open" class="outline">Open Gmail Settings ↗</button>
+          <div class="step-card">
+            <h2>Connect Account</h2>
+            <p class="step-intro">Enter the Gmail address you want to sync and the 16-character App Password from Google.</p>
+
+            <div class="field">
+              <label for="onboardingEmailInput">Gmail Address</label>
+              <input id="onboardingEmailInput" type="email" placeholder="you@gmail.com" autocomplete="email" />
             </div>
-            <p class="helper">We will detect this automatically after you save changes.</p>
-          </div>
-        </section>
 
-        <section class="wizard-step" data-step="3">
-          <h2>Step 2 of 3 - Generate an App Password</h2>
-          <p>
-            An App Password is a special code that lets Gmail Unified access your email. It's not your regular Gmail
-            password.
-          </p>
-          <ol class="checklist">
-            <li><span class="checklist-number">1</span><span>Click the button below to open Google App Passwords</span></li>
-            <li><span class="checklist-number">2</span><span>You may be asked to sign in to your Google account</span></li>
-            <li><span class="checklist-number">3</span><span>In the "App name" field, type: <strong>Gmail Unified</strong></span></li>
-            <li><span class="checklist-number">4</span><span>Click <strong>"Create"</strong></span></li>
-            <li><span class="checklist-number">5</span><span>Google will show you a <strong>16-character code</strong> - copy it</span></li>
-            <li><span class="checklist-number">6</span><span>Come back here and paste it in the next step</span></li>
-          </ol>
-          <div class="warning-box">⚠️ The code only appears once. Copy it before closing that page.</div>
-          <div class="wizard-actions">
-            <div class="action-row">
-              <button id="step3Back" class="secondary">Back</button>
-              <button id="step3Open" class="outline">Open App Passwords ↗</button>
+            <div class="field">
+              <label for="onboardingPasswordInput">App Password</label>
+              <input
+                id="onboardingPasswordInput"
+                type="password"
+                placeholder="xxxx xxxx xxxx xxxx"
+                autocomplete="off"
+              />
+              <div class="helper">For security, this password is not stored in extension storage.</div>
             </div>
-            <p class="helper">
-              App Passwords requires 2-factor authentication to be enabled on your Google account. If the page doesn't
-              work, enable 2FA first at
-              <a href="https://myaccount.google.com/signinoptions/two-step-verification" target="_blank" rel="noreferrer">
-                myaccount.google.com/signinoptions/two-step-verification
-              </a>
-            </p>
-            <p class="helper">We move you forward automatically when we detect the generated code or when you paste it.</p>
-          </div>
-        </section>
 
-        <section class="wizard-step" data-step="4">
-          <h2>Step 3 of 3 - Connect Your Account</h2>
-          <p>Paste the 16-character code you just generated.</p>
-
-          <div class="field">
-            <label for="onboardingEmailInput">Gmail Address</label>
-            <input id="onboardingEmailInput" type="email" placeholder="you@gmail.com" autocomplete="email" />
-          </div>
-
-          <div class="field">
-            <label for="onboardingPasswordInput">App Password - the 16-character code from Google</label>
-            <input
-              id="onboardingPasswordInput"
-              type="password"
-              placeholder="xxxx xxxx xxxx xxxx"
-              autocomplete="off"
-            />
-            <div class="helper">It may have spaces - that's fine, paste it exactly as shown.</div>
-          </div>
-
-          <div class="wizard-actions">
-            <div class="action-row">
-              <button id="step4Back" class="secondary">Back</button>
-              <button id="onboardingConnectBtn" class="primary">Connect My Account</button>
+            <div class="helper-actions">
+              <span class="helper">No App Password yet?</span>
+              <button id="step2OpenAppPasswords" class="link-btn" type="button">Open App Passwords</button>
+              <button id="step2OpenTwoFactor" class="link-btn" type="button">Open 2-Step Verification</button>
             </div>
-          </div>
 
-          <div id="onboardingError" class="error-box hidden"></div>
-          <div id="onboardingSuccess" class="success-box hidden"></div>
+            <div class="wizard-actions">
+              <div class="action-row">
+                <button id="step2Back" class="secondary">Back</button>
+                <button id="onboardingConnectBtn" class="primary">Connect My Account</button>
+              </div>
+            </div>
+
+            <div id="onboardingError" class="error-box hidden"></div>
+            <div id="onboardingSuccess" class="success-box hidden"></div>
+          </div>
         </section>
       </section>
 

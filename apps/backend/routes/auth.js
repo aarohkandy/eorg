@@ -2,9 +2,16 @@ import express from 'express';
 import { supabase } from '../lib/supabase.js';
 import { encrypt } from '../lib/crypto.js';
 import { testConnection } from '../lib/imap.js';
-import { AppError, buildErrorResponse } from '../lib/errors.js';
+import { AppError, buildConnectFailure, buildErrorResponse } from '../lib/errors.js';
 
 const router = express.Router();
+
+function maskEmail(email) {
+  const value = String(email || '').trim();
+  const at = value.indexOf('@');
+  if (at <= 1) return '***';
+  return `${value.slice(0, 1)}***${value.slice(at - 1)}`;
+}
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
@@ -21,7 +28,7 @@ router.post('/connect', async (req, res) => {
 
     const test = await testConnection(email, appPassword);
     if (!test.success) {
-      throw new AppError(test.code || 'AUTH_FAILED', test.error || 'IMAP authentication failed.', 401);
+      throw buildConnectFailure(test.code, test.error);
     }
 
     const encryptedPassword = encrypt(appPassword);
@@ -43,7 +50,7 @@ router.post('/connect', async (req, res) => {
       throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
     }
 
-    console.log(`[Auth] User connected: ${email} (userId: ${data.id})`);
+    console.log(`[Auth] User connected: ${maskEmail(email)} (userId: ${data.id})`);
     return res.status(200).json({
       success: true,
       userId: data.id,
@@ -81,7 +88,7 @@ router.delete('/disconnect', async (req, res) => {
       throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
     }
 
-    console.log(`[Auth] User disconnected: ${existing.email}`);
+    console.log(`[Auth] User disconnected: ${maskEmail(existing.email)}`);
     return res.status(200).json({ success: true });
   } catch (error) {
     const payload = buildErrorResponse(error);

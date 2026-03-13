@@ -10,6 +10,7 @@
     "zip": "wxt zip",
     "typecheck": "tsc --noEmit",
     "test:headless": "bash tests/headless/run_all.sh",
+    "test:contracts": "node tests/contracts/verify_runtime_contracts.mjs && node --test tests/contracts/guide-state-migration.test.mjs && node --test tests/manifest-runtime.test.mjs && node --test apps/backend/lib/errors.test.js",
     "test:triage": ".venv/bin/python3 tests/headless/run_triage_harness.py",
     "test:chat": ".venv/bin/python3 tests/headless/run_chat_harness.py",
     "test:compose": ".venv/bin/python3 tests/headless/run_compose_harness.py",

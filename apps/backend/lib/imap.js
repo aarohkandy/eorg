@@ -5,6 +5,13 @@ import { parseImapError } from './errors.js';
 const IMAP_HOST = 'imap.gmail.com';
 const IMAP_PORT = 993;
 
+function maskEmail(email) {
+  const value = String(email || '').trim();
+  const at = value.indexOf('@');
+  if (at <= 1) return '***';
+  return `${value.slice(0, 1)}***${value.slice(at - 1)}`;
+}
+
 function buildClient(email, appPassword) {
   return new ImapFlow({
     host: IMAP_HOST,
@@ -90,12 +97,13 @@ async function extractSnippet(client, message) {
 }
 
 export async function fetchMessages(email, appPassword, folder, limit = 50) {
-  console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${email}`);
+  const maskedEmail = maskEmail(email);
+  console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${maskedEmail}`);
   const client = buildClient(email, appPassword);
 
   try {
     await client.connect();
-    console.log(`[IMAP] Connected successfully for ${email}`);
+    console.log(`[IMAP] Connected successfully for ${maskedEmail}`);
 
     const lock = await client.getMailboxLock(folder);
     console.log(`[IMAP] Opened folder: ${folder}`);
@@ -139,17 +147,18 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
     } catch {
       // Ignore logout errors.
     }
-    console.log(`[IMAP] Connection closed for ${email}`);
+    console.log(`[IMAP] Connection closed for ${maskedEmail}`);
   }
 }
 
 export async function searchMessages(email, appPassword, folder, query, limit = 20) {
-  console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${email} (search)`);
+  const maskedEmail = maskEmail(email);
+  console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${maskedEmail} (search)`);
   const client = buildClient(email, appPassword);
 
   try {
     await client.connect();
-    console.log(`[IMAP] Connected successfully for ${email}`);
+    console.log(`[IMAP] Connected successfully for ${maskedEmail}`);
 
     const lock = await client.getMailboxLock(folder);
     console.log(`[IMAP] Opened folder: ${folder}`);
@@ -192,17 +201,18 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
     } catch {
       // Ignore logout errors.
     }
-    console.log(`[IMAP] Connection closed for ${email}`);
+    console.log(`[IMAP] Connection closed for ${maskedEmail}`);
   }
 }
 
 export async function testConnection(email, appPassword) {
-  console.log(`[IMAP] Testing connection for ${email}`);
+  const maskedEmail = maskEmail(email);
+  console.log(`[IMAP] Testing connection for ${maskedEmail}`);
   const client = buildClient(email, appPassword);
 
   try {
     await client.connect();
-    console.log(`[IMAP] Connection test PASSED for ${email}`);
+    console.log(`[IMAP] Connection test PASSED for ${maskedEmail}`);
     await client.logout();
     return { success: true };
   } catch (error) {

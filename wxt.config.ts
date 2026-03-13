@@ -2,11 +2,13 @@ import { defineConfig } from 'wxt';
 
 export default defineConfig({
   srcDir: 'src',
-  extensionApi: 'chrome',
   manifest: {
-    name: 'Gmail Hard Reskin',
-    description: 'A resilient visual Gmail overlay that survives SPA rerenders.',
-    permissions: ['storage'],
-    host_permissions: ['https://mail.google.com/*']
+    name: 'Gmail Unified',
+    description: 'Full-screen Gmail replacement with backend Inbox + Sent sync.',
+    permissions: ['storage', 'unlimitedStorage', 'tabs'],
+    host_permissions: [
+      'https://mail.google.com/*',
+      'https://email-bcknd.onrender.com/*'
+    ]
   }
 });

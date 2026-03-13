@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Headless Harness Runtime",
+  "version": "1.0.0",
+  "content_scripts": [
+    {
+      "matches": ["*://mail.google.com/*"],
+      "js": [
+        "content-modules/module-registry.js",
+        "content-modules/runtime-core.js",
+        "content-modules/scheduler.js",
+        "content-modules/diagnostics-core.js",
+        "content-modules/debug.js",
+        "content-modules/perf.js",
+        "content-modules/conversation-context.js",
+        "content-modules/inbox-sdk.js",
+        "content-modules/message-normalization.js",
+        "content-modules/message-normalization-forwarders.js",
+        "content-modules/send-refresh.js",
+        "content-modules/navigation-thread-context.js",
+        "content-modules/sidebar-persistence.js",
+        "content-modules/right-rail-sync.js",
+        "content-modules/bootstrap-runtime.js",
+        "content-modules/ui-controls.js",
+        "content-modules/thread-reply.js",
+        "content-modules/mailbox-dom-scan.js",
+        "content-modules/mailbox-dom-forwarders.js",
+        "content-modules/mailbox-data.js",
+        "content-modules/thread-dom-extract.js",
+        "content-modules/thread-hydration.js",
+        "content-modules/contact-chat-hydration.js",
+        "content-modules/contact-timeline-core.js",
+        "content-modules/contact-timeline-state.js",
+        "content-modules/contact-open.js",
+        "content-modules/contact-open-legacy.js",
+        "content-modules/thread-html-utils.js",
+        "content-modules/ui-thread-list.js",
+        "inboxsdk.js",
+        "ai.js",
+        "triage.js",
+        "compose.js",
+        "content.js"
+      ]
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+import '../../apps/extension/background/service-worker.js';
+
 export default defineBackground(() => {
-  // Reserved for future background tasks.
+  // Gmail Unified background runtime is loaded via side-effect import.
 });

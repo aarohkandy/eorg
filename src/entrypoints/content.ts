@@ -1,13 +1,9 @@
-import '../../inboxsdk.js';
-import '../../ai.js';
-import '../../triage.js';
-import '../../compose.js';
-import '../../content.js';
+import '../../apps/extension/content/gmail-inject.js';
 
 export default defineContentScript({
   matches: ['https://mail.google.com/*'],
   runAt: 'document_idle',
   main() {
-    // Legacy JS content stack bootstraps itself on load.
+    // Gmail Unified runtime bootstraps itself on load.
   }
 });

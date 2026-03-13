@@ -7,7 +7,7 @@ through an IMAP backend at [https://email-bcknd.onrender.com](https://email-bckn
 
 - Full-screen Mailita-style interface (native Gmail UI hidden while active)
 - Backend-driven mailbox sync (Inbox + Sent)
-- First-time popup onboarding for IMAP + App Password setup
+- First-time instruction-first onboarding (2 steps: prerequisites -> connect)
 - Settings actions in-app:
   - Check backend status
   - Sync now
@@ -19,9 +19,9 @@ through an IMAP backend at [https://email-bcknd.onrender.com](https://email-bckn
 
 1. Install extension from the Chrome Web Store and pin it.
 2. Open popup and complete onboarding:
-   - Enable IMAP
-   - Generate Gmail App Password
-   - Connect account
+   - Open App Passwords
+   - Turn on 2-Step Verification first if Google requires it
+   - Connect with Gmail address + App Password
 3. Open Gmail (`https://mail.google.com`).
 4. Open in-app **Settings** (bottom-left):
    - Run **Check backend status**
@@ -41,6 +41,13 @@ If backend is cold, the UI shows:
 - `apps/backend/` — Express + IMAP + Supabase backend
 - `apps/extension/` — MV3 extension (popup, service worker, full-screen Gmail UI)
 - `legacy/gmail-dom-v1/` — archived legacy implementation
+
+## Runtime Authority
+
+- Canonical extension runtime manifest: `apps/extension/manifest.json`
+- Root `manifest.json` is a wrapper that delegates to `apps/extension/*` paths.
+- Headless legacy harnesses read `tests/headless/runtime-manifest.json` to avoid coupling
+  test scaffolding to production runtime manifest wiring.
 
 ## Notes
 
