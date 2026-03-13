@@ -96,6 +96,44 @@ async function extractSnippet(client, message) {
   }
 }
 
+async function attachSnippets(email, appPassword, folder, messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return messages || [];
+  }
+
+  const client = buildClient(email, appPassword);
+
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock(folder);
+
+    try {
+      for (const message of messages) {
+        message.snippet = await extractSnippet(client, message);
+      }
+    } finally {
+      lock.release();
+    }
+  } catch (error) {
+    console.warn(
+      `[IMAP] Failed to attach snippets in ${folder}: ${error?.message || String(error)}`
+    );
+    for (const message of messages) {
+      message.snippet ||= '';
+    }
+  } finally {
+    try {
+      if (client.usable) {
+        await client.logout();
+      }
+    } catch {
+      // Ignore logout errors.
+    }
+  }
+
+  return messages;
+}
+
 export async function fetchMessages(email, appPassword, folder, limit = 50) {
   const maskedEmail = maskEmail(email);
   console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${maskedEmail}`);
@@ -107,6 +145,7 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
 
     const lock = await client.getMailboxLock(folder);
     console.log(`[IMAP] Opened folder: ${folder}`);
+    let collected = [];
 
     try {
       const totalMessages = client.mailbox.exists || 0;
@@ -117,7 +156,6 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
       }
 
       const range = `*:-${Math.max(1, Number(limit) || 50)}`;
-      const collected = [];
       for await (const message of client.fetch(range, {
         envelope: true,
         bodyStructure: true,
@@ -126,15 +164,15 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
         uid: true,
         headers: ['references', 'in-reply-to']
       })) {
-        const snippet = await extractSnippet(client, message);
-        collected.push({ ...message, snippet });
+        collected.push({ ...message });
       }
 
-      console.log(`[IMAP] Fetched ${collected.length} messages from ${folder}`);
-      return collected;
+      console.log(`[IMAP] Fetched ${collected.length} message envelopes from ${folder}`);
     } finally {
       lock.release();
     }
+
+    return await attachSnippets(email, appPassword, folder, collected);
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
@@ -162,6 +200,7 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
 
     const lock = await client.getMailboxLock(folder);
     console.log(`[IMAP] Opened folder: ${folder}`);
+    let messages = [];
 
     try {
       const matchedUids = await client.search({ body: query });
@@ -171,7 +210,6 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
         return [];
       }
 
-      const messages = [];
       for await (const message of client.fetch(slice, {
         envelope: true,
         bodyStructure: true,
@@ -180,15 +218,15 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
         uid: true,
         headers: ['references', 'in-reply-to']
       })) {
-        const snippet = await extractSnippet(client, message);
-        messages.push({ ...message, snippet });
+        messages.push({ ...message });
       }
 
-      console.log(`[IMAP] Search fetched ${messages.length} messages from ${folder}`);
-      return messages;
+      console.log(`[IMAP] Search fetched ${messages.length} message envelopes from ${folder}`);
     } finally {
       lock.release();
     }
+
+    return await attachSnippets(email, appPassword, folder, messages);
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
