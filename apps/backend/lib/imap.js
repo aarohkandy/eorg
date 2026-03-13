@@ -162,9 +162,10 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
         internalDate: true,
         flags: true,
         uid: true,
-        headers: ['references', 'in-reply-to']
+        headers: ['references', 'in-reply-to'],
+        gmailThreadId: true
       })) {
-        collected.push({ ...message });
+        collected.push({ ...message, snippet: '' });
       }
 
       console.log(`[IMAP] Fetched ${collected.length} message envelopes from ${folder}`);
@@ -172,7 +173,7 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
       lock.release();
     }
 
-    return await attachSnippets(email, appPassword, folder, collected);
+    return collected;
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
@@ -216,7 +217,8 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
         internalDate: true,
         flags: true,
         uid: true,
-        headers: ['references', 'in-reply-to']
+        headers: ['references', 'in-reply-to'],
+        gmailThreadId: true
       })) {
         messages.push({ ...message });
       }
