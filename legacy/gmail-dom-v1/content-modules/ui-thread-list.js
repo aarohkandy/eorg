@@ -134,6 +134,154 @@
     };
   }
 
+  function extensionMessagingAvailable() {
+    return Boolean(
+      typeof chrome !== "undefined"
+      && chrome.runtime
+      && typeof chrome.runtime.sendMessage === "function"
+    );
+  }
+
+  function formatBackendDateToken(value) {
+    const date = new Date(value || 0);
+    if (!Number.isFinite(date.getTime())) return "";
+    const now = new Date();
+    if (date.toDateString() === now.toDateString()) {
+      return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    }
+    if (date.getFullYear() === now.getFullYear()) {
+      return date.toLocaleDateString([], { month: "short", day: "numeric" });
+    }
+    return date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  }
+
+  function backendThreadId(rawThreadId, fallbackToken = "") {
+    const raw = normalize(rawThreadId || "");
+    if (/^(?:thread-)?f:[A-Za-z0-9_-]+$/i.test(raw)) return raw;
+    const compact = raw
+      .replace(/^<|>$/g, "")
+      .replace(/[^A-Za-z0-9_-]/g, "");
+    if (compact) return compact.slice(0, 64);
+    const fallback = normalize(fallbackToken || "") || "message";
+    return `ext-${stableHash(fallback).slice(0, 12)}`;
+  }
+
+  function backendMessageToRow(message, mailbox) {
+    const from = message && message.from && typeof message.from === "object" ? message.from : {};
+    const to = Array.isArray(message && message.to) ? message.to : [];
+    const fromEmail = extractEmail(from.email || "");
+    const outgoing = Boolean(message && message.isOutgoing);
+
+    const primaryRecipient = to.find((entry) => extractEmail(entry && entry.email));
+    const contactName = outgoing
+      ? normalize(primaryRecipient && (primaryRecipient.name || primaryRecipient.email))
+      : normalize(from.name || from.email);
+    const contactEmail = outgoing
+      ? extractEmail(primaryRecipient && primaryRecipient.email)
+      : fromEmail;
+    const recipientEmails = outgoing
+      ? [contactEmail].filter(Boolean)
+      : to.map((entry) => extractEmail(entry && entry.email)).filter(Boolean);
+    const safeThreadId = backendThreadId(
+      message && message.threadId,
+      `${normalize(message && message.id)}|${normalize(message && message.messageId)}|${normalize(message && message.uid)}`
+    );
+    const routeMailbox = mailboxCacheKey(mailbox || "inbox");
+
+    return {
+      threadId: safeThreadId,
+      sender: contactName || contactEmail || "Unknown sender",
+      senderEmail: contactEmail || "",
+      recipientEmails,
+      subject: normalize(message && message.subject) || "No subject captured",
+      snippet: normalize(message && message.snippet) || "",
+      bodyText: "",
+      date: formatBackendDateToken(message && message.date),
+      href: `#${routeMailbox}/${safeThreadId}`,
+      row: null,
+      triageLevel: "",
+      unread: !Array.isArray(message && message.flags) || !message.flags.includes("\\Seen"),
+      mailbox: routeMailbox
+    };
+  }
+
+  async function refreshBackendAccountState() {
+    if (!extensionMessagingAvailable()) return;
+    const now = Date.now();
+    if (Number(state.backendAccountRefreshedAt || 0) > 0 && now - Number(state.backendAccountRefreshedAt || 0) < 20000) return;
+    try {
+      const response = await chrome.runtime.sendMessage({ action: "GET_STORAGE", payload: {} });
+      if (!response || response.success === false) return;
+      state.backendConnected = Boolean(response.userId);
+      state.backendConnectedEmail = normalize(response.userEmail || "");
+      state.backendAccountRefreshedAt = Date.now();
+    } catch (_) {
+      // Ignore extension storage probe failures.
+    }
+  }
+
+  async function refreshMailboxFromBackend(root, mailbox, options = {}) {
+    if (!extensionMessagingAvailable()) return;
+    const key = mailboxCacheKey(mailbox || "inbox");
+    if (key !== "inbox" && key !== "sent") return;
+    state.backendMailboxSync = state.backendMailboxSync || {};
+    const syncState = state.backendMailboxSync[key] || { inFlight: false, lastAt: 0 };
+    const now = Date.now();
+    const hasCache = Array.isArray(state.scannedMailboxMessages[key]) && state.scannedMailboxMessages[key].length > 0;
+    const staleMs = Number(options.staleMs || 90000);
+    if (!options.force && syncState.inFlight) return;
+    if (!options.force && hasCache && now - Number(syncState.lastAt || 0) < staleMs) return;
+
+    state.backendMailboxSync[key] = { ...syncState, inFlight: true, lastAt: syncState.lastAt || 0 };
+    let syncSucceeded = false;
+    try {
+      await refreshBackendAccountState();
+      const response = await chrome.runtime.sendMessage({
+        action: "FETCH_MESSAGES",
+        payload: {
+          folder: key,
+          limit: Number(options.limit || 500),
+          forceSync: Boolean(options.force)
+        }
+      });
+
+      if (!response || response.success === false) {
+        const code = normalize(response && response.code || "");
+        if (code === "NOT_CONNECTED") {
+          state.backendStatusMessage = "Not set up yet. Click the extension icon to connect.";
+          state.backendConnected = false;
+        } else if (code === "BACKEND_COLD_START") {
+          state.backendStatusMessage = "Backend server is starting up, please wait 60 seconds and try again.";
+        } else {
+          state.backendStatusMessage = normalize(response && response.error) || "Backend fetch failed.";
+        }
+        return;
+      }
+
+      const messages = Array.isArray(response.messages) ? response.messages : [];
+      const mapped = messages.map((msg) => backendMessageToRow(msg, key));
+      mergeMailboxCache(key, mapped);
+      state.backendStatusMessage = "";
+      state.backendConnected = true;
+      state.fullScanCompletedByMailbox[key] = true;
+      state.fullScanStatus = `Loaded ${mapped.length} ${key} messages from backend`;
+      state.backendMailboxSync[key] = { inFlight: false, lastAt: Date.now() };
+      syncSucceeded = true;
+      if (root instanceof HTMLElement && state.currentView === "list") {
+        state.lastListSignature = "";
+        state.lastObserverSignature = "";
+        applyReskin();
+      }
+      return;
+    } catch (error) {
+      state.backendStatusMessage = normalize(error && error.message) || "Backend fetch failed.";
+    } finally {
+      const latest = state.backendMailboxSync[key] || {};
+      const fallbackLastAt = syncSucceeded ? Date.now() : Math.max(0, Date.now() - 45000);
+      state.backendMailboxSync[key] = { inFlight: false, lastAt: Number(latest.lastAt || fallbackLastAt) };
+    }
+  }
+
   function emitSnapshot() {
     if (typeof diagSnapshot !== "function") return;
     const timeline = Array.isArray(state.activeTimelineMessages) ? state.activeTimelineMessages : [];
@@ -566,270 +714,8 @@
   }
 
   async function runTriageForInbox(options = {}) {
-    await loadPersistedTriageMap();
-    const force = Boolean(options.force);
-    const processAll = Boolean(options.processAll);
-    const oneByOneMode = Boolean(options.oneByOne);
-    const source = normalize(options.source || "unknown");
-    if (source === "auto" && Date.now() < state.triageAutoPauseUntil) {
-      logTriageDebug("Skipped auto triage due to cooldown", {
-        cooldownMsRemaining: Math.max(0, state.triageAutoPauseUntil - Date.now())
-      });
-      return;
-    }
-    if (source === "auto" && processAll && Date.now() - Number(state.lastAutoTriageAt || 0) < 25000) {
-      return;
-    }
-    if (state.currentView !== "list") {
-      logTriageDebug("Skipped triage run because current view is not list", {
-        currentView: state.currentView
-      });
-      return;
-    }
-    if (activeMailbox() !== "inbox") {
-      logTriageDebug("Skipped triage run because mailbox is not inbox", {
-        mailbox: activeMailbox()
-      });
-      return;
-    }
-    if (!window.ReskinAI || !window.ReskinTriage) {
-      logTriageDebug("Skipped triage run because AI or triage module is missing", {
-        hasAI: Boolean(window.ReskinAI),
-        hasTriage: Boolean(window.ReskinTriage)
-      });
-      return;
-    }
-    if (state.triageRunning) {
-      logTriageDebug("Skipped triage run because another run is already in progress");
-      return;
-    }
-
-    const settings = await loadSettingsCached();
-    if (!settings || !settings.enabled || !settings.consentTriage) {
-      state.triageStatus = "Enable triage + consent in Settings";
-      logTriageDebug("Skipped triage run because settings are disabled or consent missing", {
-        hasSettings: Boolean(settings),
-        enabled: Boolean(settings && settings.enabled),
-        consentTriage: Boolean(settings && settings.consentTriage)
-      });
-      return;
-    }
-    logEvent("triage:start", { source, processAll, batchSize: settings.batchSize });
-    logTriageDebug("Starting inbox triage run", {
-      source,
-      force,
-      processAll,
-      oneByOneMode,
-      batchSize: settings.batchSize,
-      provider: settings.provider,
-      model: settings.model
-    });
-
-    const listRoot = getRoot();
-    if (!(listRoot instanceof HTMLElement)) return;
-
-    if (processAll && !state.fullScanCompletedByMailbox[mailboxCacheKey("inbox")] && !state.fullScanRunning) {
-      state.triageStatus = "Scanning full inbox before triage...";
-      renderSidebar(listRoot);
-      await runFullMailboxScan(listRoot, { mailboxes: ["inbox"] });
-    }
-
-    const attempted = new Set();
-    let totalApplied = 0;
-    let totalScored = 0;
-    let batchIndex = 0;
-    let haltedOnEmptyAI = false;
-    let haltedOnDuplicateQueue = false;
-    let consecutiveApplyFailures = 0;
-    const maxBatches = processAll ? 1200 : 1;
-    state.triageRunning = true;
-    if (source === "auto" && processAll) {
-      state.lastAutoTriageAt = Date.now();
-    }
-
-    try {
-      while (batchIndex < maxBatches) {
-        const sourceItems = processAll
-          ? getMailboxMessages("inbox", 6000)
-          : getMailboxMessages("inbox", 200);
-        const result = {
-          items: sourceItems,
-          source: processAll ? "cache" : "live"
-        };
-        logTriageDebug("Collected messages for triage pass", {
-          extracted: result.items.length,
-          source: result.source || "unknown"
-        });
-        const candidates = [];
-        for (const msg of result.items) {
-          const level = getTriageLevelForMessage(msg);
-          msg.triageLevel = level;
-          if (!level && !attempted.has(msg.threadId)) candidates.push(msg);
-        }
-
-        state.triageUntriagedCount = candidates.length;
-        if (candidates.length === 0) {
-          logTriageDebug("No untriaged inbox candidates found", {
-            scanned: result.items.length
-          });
-          break;
-        }
-
-        const batchSize = oneByOneMode ? 1 : settings.batchSize;
-        const batch = candidates.slice(0, batchSize);
-        const queueKey = batch.map((m) => m.threadId).join(",");
-        if (!force && !processAll && queueKey && queueKey === state.triageQueueKey) {
-          logTriageDebug("Skipping duplicate triage queue", { queueKey });
-          haltedOnDuplicateQueue = true;
-          break;
-        }
-        state.triageQueueKey = queueKey;
-        logTriageDebug("Prepared triage batch", {
-          batchIndex: batchIndex + 1,
-          batchSize: batch.length,
-          candidatesRemaining: candidates.length,
-          threadIds: batch.map((msg) => msg.threadId)
-        });
-
-        state.triageStatus = processAll
-          ? `Triaging batch ${batchIndex + 1}: ${batch.length} of ${candidates.length} remaining...`
-          : `Triaging ${batch.length} of ${candidates.length}...`;
-        if (oneByOneMode) {
-          const current = batch[0];
-          state.triageStatus = processAll
-            ? `Triaging 1-by-1 (${batchIndex + 1}): ${current ? current.subject || current.threadId : "message"}`
-            : `Triaging 1 message...`;
-        }
-
-        let scored = [];
-        try {
-          scored = await window.ReskinAI.triageBatch(batch, settings);
-        } catch (error) {
-          const msg = normalize(error && error.message ? error.message : String(error || ""));
-          const isRateLimit = msg.includes("429") || msg.toLowerCase().includes("rate limit");
-          if (isRateLimit && processAll) {
-            const waitMs = Number(error && error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 65000;
-            state.triageStatus = `Rate limited. Waiting ${Math.ceil(waitMs / 1000)}s, then continuing...`;
-            renderSidebar(listRoot);
-            await new Promise((resolve) => setTimeout(resolve, waitMs));
-            state.triageStatus = "Resuming triage...";
-            continue;
-          }
-          throw error;
-        }
-        for (const msg of batch) attempted.add(msg.threadId);
-        totalScored += batch.length;
-        logTriageDebug("AI returned scored items", {
-          requested: batch.length,
-          returned: Array.isArray(scored) ? scored.length : 0,
-          scored
-        });
-        if (!Array.isArray(scored) || scored.length === 0) {
-          state.triageStatus = "AI returned no labels. Please retry or switch provider in Settings.";
-          state.triageLastFailureStatus = state.triageStatus;
-          state.triageQueueKey = "";
-          haltedOnEmptyAI = true;
-          logTriageDebug("Stopping triage because AI returned zero parsed labels", {
-            requested: batch.length
-          });
-          break;
-        }
-        for (const item of scored) {
-          if (!item || !item.urgency) continue;
-          const mappedByThread = item.threadId
-            ? batch.find((msg) => msg.threadId === item.threadId)
-            : null;
-          const mappedByIndex =
-            typeof item.i === "number" && item.i >= 0 && item.i < batch.length ? batch[item.i] : null;
-          const targetMessage = mappedByThread || mappedByIndex || null;
-          const mappedThreadId = (targetMessage && targetMessage.threadId) || item.threadId || "";
-          if (mappedThreadId) {
-            triageLocalSet(mappedThreadId, item.urgency);
-          }
-
-          const ok = window.ReskinTriage && typeof window.ReskinTriage.applyLabelToMessage === "function"
-            ? await window.ReskinTriage.applyLabelToMessage(
-              targetMessage || { threadId: item.threadId, href: "", row: null },
-              item.urgency
-            )
-            : await window.ReskinTriage.applyLabelToThread(item.threadId, item.urgency);
-          logTriageDebug("Label apply attempt finished", {
-            threadId: (targetMessage && targetMessage.threadId) || item.threadId || "",
-            urgency: item.urgency,
-            byThreadId: Boolean(mappedByThread),
-            byIndex: Boolean(mappedByIndex),
-            ok
-          });
-          if (ok) {
-            totalApplied += 1;
-            consecutiveApplyFailures = 0;
-          } else {
-            consecutiveApplyFailures += 1;
-          }
-        }
-
-        if (consecutiveApplyFailures >= 8) {
-          if (processAll) {
-            state.triageStatus =
-              "Gmail label controls were unstable. Retrying with a fresh pass...";
-            logTriageDebug("Backing off triage after repeated apply failures", {
-              consecutiveApplyFailures
-            });
-            consecutiveApplyFailures = 0;
-            await sleep(1200);
-            continue;
-          }
-          state.triageStatus =
-            "Gmail label UI could not be controlled. Stopped after repeated failures.";
-          state.triageLastFailureStatus = state.triageStatus;
-          logTriageDebug("Halting triage after repeated apply failures", {
-            consecutiveApplyFailures
-          });
-          break;
-        }
-
-        batchIndex += 1;
-        if (!processAll) break;
-      }
-      if (haltedOnEmptyAI) {
-        // Preserve the explicit user-facing AI failure status set above.
-      } else if (haltedOnDuplicateQueue) {
-        state.triageStatus = state.triageLastFailureStatus || "Triage waiting for new inbox changes.";
-      } else if (batchIndex === 0) {
-        state.triageStatus = "Inbox triage is up to date";
-      } else if (totalScored > 0 && totalApplied === 0) {
-        state.triageStatus = `AI triaged ${totalScored} messages locally. Gmail label sync failed.`;
-      } else if (processAll) {
-        state.triageStatus = `Triage complete: ${totalApplied} labels applied across ${batchIndex} batches`;
-      } else {
-        state.triageStatus = `Applied ${totalApplied} triage labels`;
-      }
-      logEvent("triage:done", { batchIndex, totalScored, totalApplied });
-      logTriageDebug("Triage run finished", {
-        batchIndex,
-        totalScored,
-        totalApplied,
-        status: state.triageStatus
-      });
-    } catch (error) {
-      const message = error && error.message ? error.message : "triage failed";
-      state.triageStatus = `Triage unavailable: ${message.slice(0, 120)}`;
-      state.triageLastFailureStatus = state.triageStatus;
-      state.triageQueueKey = "";
-      state.triageAutoPauseUntil = Date.now() + 45000;
-      logEvent("triage:failed", { message: (error && error.message) || "unknown" });
-      logWarn("Inbox triage run failed", error);
-      logTriageDebug("Triage run failed", {
-        message,
-        stack: error && error.stack ? String(error.stack) : ""
-      });
-    } finally {
-      state.triageRunning = false;
-      const root = getRoot();
-      if (root instanceof HTMLElement && state.currentView === "list") {
-        renderCurrentView(root);
-      }
-    }
+    void options;
+    state.triageStatus = "";
   }
 
   function renderCurrentView(root) {
@@ -888,86 +774,65 @@
   function renderSettings(root) {
     const wrap = root.querySelector(".rv-settings-wrap");
     if (!(wrap instanceof HTMLElement)) return;
+    const settings = state.settingsCache || { theme: THEME_DARK };
+    const currentTheme = normalizeTheme(settings.theme);
+    const connected = Boolean(state.backendConnected);
+    const connectedEmail = normalize(state.backendConnectedEmail || "");
+    const backendStatus = normalize(state.backendStatusMessage || state.settingsStatusMessage || state.fullScanStatus || "");
 
-    const settings = state.settingsCache || {
-      provider: "openrouter",
-      apiKey: "",
-      apiKeys: [],
-      theme: THEME_DARK,
-      model: "openrouter/free",
-      enabled: true,
-      consentTriage: false,
-      batchSize: 25,
-      timeoutMs: 30000,
-      retryCount: 2,
-      retryBackoffMs: 1200,
-      maxInputChars: 2200
-    };
-
-    if (!state.settingsCache && !state.settingsLoadFailed && !state.settingsLoadInFlight) {
-      loadSettingsCached().then(() => {
+    if (!state.settingsAccountProbeInFlight) {
+      state.settingsAccountProbeInFlight = true;
+      refreshBackendAccountState().finally(() => {
+        state.settingsAccountProbeInFlight = false;
         if (state.currentView !== "settings") return;
         const latestRoot = getRoot();
         if (!(latestRoot instanceof HTMLElement)) return;
-        const latestWrap = latestRoot.querySelector(".rv-settings-wrap");
-        if (!(latestWrap instanceof HTMLElement)) return;
         renderSettings(latestRoot);
       });
     }
 
-    const apiKey = normalize(settings.apiKey || "");
-    const selectedProvider = normalize(settings.provider || "openrouter").toLowerCase();
-    const currentTheme = normalizeTheme(settings.theme);
-    const needsApiKey = providerNeedsApiKey(selectedProvider);
-    const apiGuide = buildApiKeyGuide(selectedProvider);
-
     wrap.innerHTML = `
       <section class="rv-settings-view" data-reskin="true">
         <h2 class="rv-settings-title" data-reskin="true">Mailita Settings</h2>
-        <p class="rv-settings-copy" data-reskin="true">Inbox-only triage with autosave. Already-labeled emails are never re-triaged.</p>
+        <p class="rv-settings-copy" data-reskin="true">Complete setup and keep mailbox sync healthy from one place.</p>
 
         <section class="rv-settings-section" data-reskin="true">
-          <div class="rv-settings-section-title" data-reskin="true">API</div>
+          <div class="rv-settings-section-title" data-reskin="true">Connection</div>
           <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
-            <label class="rv-settings-card" data-reskin="true">
-              <div class="rv-settings-label" data-reskin="true">Provider</div>
-              <select name="provider" class="rv-field" data-reskin="true">
-                <option value="openrouter" ${settings.provider === "openrouter" ? "selected" : ""}>OpenRouter (free)</option>
-                <option value="groq" ${settings.provider === "groq" ? "selected" : ""}>Groq (free)</option>
-                <option value="ollama" ${settings.provider === "ollama" ? "selected" : ""}>Local Ollama</option>
-              </select>
-            </label>
-            <label class="rv-settings-card" data-reskin="true">
-              <div class="rv-settings-label" data-reskin="true">API Key</div>
-              <input name="apiKey" class="rv-field" data-reskin="true" type="password" value="${escapeHtml(apiKey)}" placeholder="${escapeHtml(apiKeyPlaceholderForProvider(settings.provider || "openrouter"))}" />
-            </label>
+            <div class="rv-settings-card" data-reskin="true">
+              <div class="rv-settings-label" data-reskin="true">Account</div>
+              <div class="rv-settings-copy" data-reskin="true">${connected ? `Connected as ${escapeHtml(connectedEmail || "your Gmail account")}` : "Not connected yet. Use the extension popup onboarding first."}</div>
+              ${backendStatus ? `<div class="rv-settings-copy" data-reskin="true" style="margin-top:6px;">${escapeHtml(backendStatus)}</div>` : ""}
+            </div>
+            <div class="rv-settings-card" data-reskin="true">
+              <div class="rv-settings-label" data-reskin="true">Actions</div>
+              <div class="rv-settings-copy" data-reskin="true">Use health check + sync after connecting, or when data looks stale.</div>
+              <div class="rv-modal-actions" data-reskin="true" style="margin-top:8px;">
+                <button type="button" class="rv-settings-health-check" data-reskin="true">Check backend status</button>
+                <button type="button" class="rv-settings-sync-now" data-reskin="true"${connected ? "" : " disabled"}>Sync now</button>
+                <button type="button" class="rv-settings-reload-mail" data-reskin="true">Reload mailbox</button>
+                <button type="button" class="rv-settings-disconnect" data-reskin="true"${connected ? "" : " disabled"}>Disconnect</button>
+              </div>
+            </div>
           </div>
-          ${needsApiKey ? `
-            <div class="rv-api-permission-inline" data-reskin="true">
-              <div class="rv-settings-copy" data-reskin="true">Need help getting a ${escapeHtml(apiGuide.label)} key?</div>
-              <button type="button" class="rv-api-key-permission" data-reskin="true">Show Key Setup Help</button>
-            </div>
-          ` : ""}
-          ${needsApiKey && state.apiKeyGuideGranted ? `
-            <div class="rv-api-key-guide" data-reskin="true">
-              <div class="rv-settings-label" data-reskin="true">${escapeHtml(apiGuide.label)} key setup</div>
-              <ol class="rv-api-key-guide-steps" data-reskin="true">
-                ${apiGuide.steps.map((step) => `<li data-reskin="true">${escapeHtml(step)}</li>`).join("")}
-              </ol>
-              <a class="rv-api-key-guide-link" data-reskin="true" href="${escapeHtml(apiGuide.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(apiGuide.linkText)}</a>
-            </div>
-          ` : ""}
         </section>
 
         <section class="rv-settings-section" data-reskin="true">
-          <div class="rv-settings-section-title" data-reskin="true">Triage</div>
-          <div class="rv-settings-grid rv-settings-grid-form" data-reskin="true">
-            <label class="rv-settings-card rv-settings-consent" data-reskin="true">
-              <input type="checkbox" name="consentTriage" class="rv-field" data-reskin="true" ${settings.consentTriage ? "checked" : ""} />
-              <span class="rv-settings-label" data-reskin="true">I consent to AI triage</span>
-            </label>
+          <div class="rv-settings-section-title" data-reskin="true">Setup Guide</div>
+          <ol class="rv-api-key-guide-steps" data-reskin="true">
+            <li data-reskin="true">Enable IMAP in Gmail settings.</li>
+            <li data-reskin="true">Generate an App Password named <strong>Gmail Unified</strong>.</li>
+            <li data-reskin="true">Open the extension popup and complete onboarding.</li>
+            <li data-reskin="true">Return here and press <strong>Check backend status</strong>, then <strong>Sync now</strong>.</li>
+          </ol>
+          <p class="rv-settings-copy" data-reskin="true" style="margin-top:8px;">
+            If backend status shows a cold start, wait about 60 seconds and run Check backend status again.
+          </p>
+          <div class="rv-modal-actions" data-reskin="true" style="margin-top:8px;">
+            <button type="button" class="rv-settings-open-gmail" data-reskin="true">Open Gmail IMAP settings</button>
+            <button type="button" class="rv-settings-open-apppasswords" data-reskin="true">Open App Passwords</button>
+            <button type="button" class="rv-settings-open-2fa" data-reskin="true">Open 2FA settings</button>
           </div>
-          <p class="rv-settings-copy" data-reskin="true">Allow sending inbox content to your chosen AI provider to label categories (Respond, Should read, News, Not important, Spam). Required for triage and Ask Inbox.</p>
         </section>
 
         <section class="rv-settings-section" data-reskin="true">
@@ -989,19 +854,6 @@
           </div>
           <p class="rv-settings-copy" data-reskin="true">Theme changes apply immediately and autosave.</p>
         </section>
-
-        ${state.showApiKeyPermissionModal ? `
-          <div class="rv-modal-backdrop" data-reskin="true">
-            <div class="rv-modal" data-reskin="true">
-              <h3 class="rv-modal-title" data-reskin="true">Allow API Key Setup Help?</h3>
-              <p class="rv-modal-copy" data-reskin="true">If you allow this, we will show quick steps and direct links to create your provider API key.</p>
-              <div class="rv-modal-actions" data-reskin="true">
-                <button type="button" class="rv-api-permission-allow" data-reskin="true">Allow</button>
-                <button type="button" class="rv-api-permission-decline" data-reskin="true">Not now</button>
-              </div>
-            </div>
-          </div>
-        ` : ""}
       </section>
     `;
   }
@@ -1033,16 +885,14 @@
     if (!(list instanceof HTMLElement)) return;
     if (state.currentView === "thread" && isThreadHash(window.location.hash || "")) return;
     const route = parseListRoute(window.location.hash || state.lastListHash || "#inbox");
-    if (route.mailbox !== "inbox") {
-      state.triageFilter = "";
-    } else if (hashHasTriageParam(window.location.hash || "")) {
-      state.triageFilter = route.triage;
-    } else {
-      state.triageFilter = "";
-    }
+    state.triageFilter = "";
 
-    if (route.mailbox === "inbox" && !state.settingsCache && !state.settingsLoadInFlight && window.ReskinAI) {
-      loadSettingsCached().then(() => applyReskin());
+    if (!state.backendInitialWarmScheduled) {
+      state.backendInitialWarmScheduled = true;
+      refreshMailboxFromBackend(root, "inbox", { staleMs: 0 }).catch(() => {});
+      refreshMailboxFromBackend(root, "sent", { staleMs: 0 }).catch(() => {});
+    } else if (route.mailbox === "inbox" || route.mailbox === "sent") {
+      refreshMailboxFromBackend(root, route.mailbox, { staleMs: 45000 }).catch(() => {});
     }
     const mailbox = mailboxCacheKey(route.mailbox);
     const currentVisible = Math.max(state.listChunkSize, Number(state.listVisibleByMailbox[mailbox] || state.listChunkSize));
@@ -1059,24 +909,17 @@
     const scanMarker = `${scanProgress.pagesScanned || 0}:${scanProgress.cachedCount || mergedCache.length}:${scanProgress.lastUpdatedAt || 0}`;
 
     for (const msg of allMessages) {
-      msg.triageLevel = getTriageLevelForMessage(msg);
+      msg.triageLevel = "";
     }
 
-    state.triageCounts = window.ReskinTriage && typeof window.ReskinTriage.countLevels === "function"
-      ? window.ReskinTriage.countLevels(allMessages)
-      : { respond: 0, read: 0, news: 0, notImportant: 0, spam: 0 };
+    state.triageCounts = {};
 
     let messages = allMessages;
     if (state.currentServerId && route.mailbox === "inbox") {
       const server = state.servers.find((s) => s.id === state.currentServerId);
       if (server) messages = messages.filter((msg) => threadIdInServer(msg.threadId, server));
     }
-    const filterLevel = route.mailbox === "inbox"
-      ? normalize(state.triageFilter || route.triage || "").toLowerCase()
-      : "";
-    if (route.mailbox === "inbox" && TRIAGE_LEVELS.includes(filterLevel)) {
-      messages = messages.filter((msg) => msg.triageLevel === filterLevel);
-    }
+    const filterLevel = "";
     const q = normalize(state.searchQuery || "").toLowerCase();
     if (q) {
       messages = messages.filter((msg) => {
@@ -1148,40 +991,6 @@
 
     list.innerHTML = "";
 
-    const showConsentBanner = route.mailbox === "inbox" && state.settingsCache && !state.settingsCache.consentTriage && !state.consentBannerDismissed;
-    if (showConsentBanner) {
-      const banner = document.createElement("div");
-      banner.className = "rv-consent-banner";
-      banner.setAttribute("data-reskin", "true");
-      banner.innerHTML = `
-        <div class="rv-consent-banner-inner" data-reskin="true">
-          <p class="rv-consent-banner-title" data-reskin="true">AI triage is off</p>
-          <p class="rv-consent-banner-copy" data-reskin="true">Triage and Ask Inbox need your consent to send inbox content to your chosen AI provider. Enable it in Settings to run priority labels and Q&amp;A.</p>
-          <div class="rv-consent-banner-actions" data-reskin="true">
-            <button type="button" class="rv-consent-banner-open-settings" data-reskin="true">Open Settings</button>
-            <button type="button" class="rv-consent-banner-dismiss" data-reskin="true">Dismiss</button>
-          </div>
-        </div>
-      `;
-      list.appendChild(banner);
-      const openBtn = banner.querySelector(".rv-consent-banner-open-settings");
-      const dismissBtn = banner.querySelector(".rv-consent-banner-dismiss");
-      if (openBtn) {
-        openBtn.addEventListener("click", () => {
-          state.settingsPinned = true;
-          state.currentView = "settings";
-          window.location.hash = "#app-settings";
-          applyReskin();
-        });
-      }
-      if (dismissBtn) {
-        dismissBtn.addEventListener("click", () => {
-          state.consentBannerDismissed = true;
-          applyReskin();
-        });
-      }
-    }
-
     if (state.lastSource !== result.source) {
       state.lastSource = result.source;
       logInfo(`Extractor source: ${result.source}`);
@@ -1197,20 +1006,13 @@
       const empty = document.createElement("div");
       empty.className = "rv-empty";
       empty.setAttribute("data-reskin", "true");
-      empty.textContent = TRIAGE_LEVELS.includes(filterLevel)
-        ? `No ${triageLabelText(filterLevel)} inbox messages captured yet.`
-        : "No messages captured yet.";
+      empty.textContent = normalize(state.backendStatusMessage || "")
+        || "No messages captured yet.";
       list.appendChild(empty);
       if ((route.mailbox === "inbox" || route.mailbox === "sent") && !state.fullScanRunning && !state.fullScanCompletedByMailbox[mailbox]) {
-        state.fullScanStatus = route.mailbox === "sent" ? "Loading sent…" : "Loading inbox…";
+        state.fullScanStatus = route.mailbox === "sent" ? "Loading sent from backend…" : "Loading inbox from backend…";
         renderSidebar(root);
-        if (state.startupWarmListReady) {
-          if (route.mailbox === "inbox") {
-            scheduleMailboxScanKick(root, { mailboxes: ["inbox", "sent"], delayMs: 1400 });
-          } else {
-            scheduleMailboxScanKick(root, { mailboxes: ["sent"], delayMs: 1400 });
-          }
-        }
+        refreshMailboxFromBackend(root, route.mailbox, { force: true, staleMs: 0 }).catch(() => {});
       }
       if (route.mailbox === "inbox" && state.currentView === "list" && !state.inboxHashNudged) {
         const hash = (window.location.hash || "").trim() || "#inbox";
@@ -1250,9 +1052,6 @@
           const isActive = g.threadIds.includes(state.activeThreadId);
           item.className = "rv-item" + (anyUnread ? " is-unread" : "") + (isActive ? " is-active" : "");
           item.setAttribute("data-reskin", "true");
-          const level = latest.triageLevel || (g.items.some((m) => m.triageLevel === "respond") ? "respond" : "");
-          const badgeClass = level ? `is-${level}` : "is-untriaged";
-          const badgeText = level ? triageLabelText(level) : "Untriaged";
           const summaryText = getSummaryForMessage(latest);
           const previewText = normalize(latest.snippet || "") || "No preview";
           const hasSummary = Boolean(summaryText);
@@ -1271,9 +1070,6 @@
                 </span>
               </div>
               <div class="rv-item-preview" data-reskin="true">${escapeHtml(previewLine.slice(0, 120))}${previewLine.length > 120 ? "…" : ""}</div>
-              <div class="rv-triage-row" data-reskin="true">
-                <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
-              </div>
             </div>
           `;
 
@@ -1344,9 +1140,6 @@
           item.setAttribute("data-thread-id", normalize(msg.threadId || ""));
           if (msg.unread) item.setAttribute("title", "Unread");
 
-          const level = msg.triageLevel;
-          const badgeClass = level ? `is-${level}` : "is-untriaged";
-          const badgeText = level ? triageLabelText(level) : "Untriaged";
           const summaryText = getSummaryForMessage(msg);
           const previewText = normalize(msg.snippet || "") || "No preview";
           const hasSummary = Boolean(summaryText);
@@ -1365,9 +1158,6 @@
                 </span>
               </div>
               <div class="rv-item-preview" data-reskin="true">${escapeHtml(previewLine.slice(0, 120))}${previewLine.length > 120 ? "…" : ""}</div>
-              <div class="rv-triage-row" data-reskin="true">
-                <span class="rv-badge ${badgeClass}" data-reskin="true">${escapeHtml(badgeText)}</span>
-              </div>
             </div>
           `;
 
@@ -1482,9 +1272,6 @@
         } else {
           scheduleMailboxScanKick(root, { mailboxes: ["sent"], delayMs: 180 });
         }
-      }
-      if (ENABLE_AI_BACKGROUND_AUTOMATION && route.mailbox === "inbox") {
-        runTriageForInbox({ force: false, processAll: true, source: "auto" });
       }
     } else {
       list.onscroll = null;

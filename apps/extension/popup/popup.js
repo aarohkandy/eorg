@@ -209,7 +209,7 @@ async function connectFromOnboarding() {
   clearOnboardingMessages();
 
   const email = String(onboardingEmailInput.value || '').trim();
-  const appPassword = String(onboardingPasswordInput.value || '').trim();
+  const appPassword = String(onboardingPasswordInput.value || '').trim().replace(/\s+/g, '');
 
   if (!email || !appPassword) {
     showOnboardingError('Please provide both Gmail address and App Password.');
@@ -268,6 +268,7 @@ async function connectFromOnboarding() {
       ]);
       showConnected(nextState);
       showConnectedStatus('Connected successfully.', false);
+      window.close();
     }, 900);
   } finally {
     onboardingPasswordInput.value = '';

@@ -555,19 +555,20 @@
     const sideTriageList = root.querySelector(".rv-side-triage-list");
     const sideTriageMeta = root.querySelector(".rv-side-triage-meta");
     if (sideTriageList instanceof HTMLElement) {
-      const currentFilter = activeTriageFilter();
-      const total = TRIAGE_LEVELS.reduce((sum, level) => sum + (state.triageCounts[level] || 0), 0);
-      const rows = [
-        `<button type="button" class="rv-triage-item rv-side-triage-item${!currentFilter ? " is-active" : ""}" data-triage-level="all" data-reskin="true"><span class="rv-triage-label" data-reskin="true">All</span><span class="rv-triage-count" data-reskin="true">${total}</span></button>`
-      ];
-      for (const level of TRIAGE_LEVELS) {
-        const count = state.triageCounts[level] || 0;
-        const active = currentFilter === level;
-        rows.push(
-          `<button type="button" class="rv-triage-item rv-side-triage-item${active ? " is-active" : ""}" data-triage-level="${level}" data-reskin="true"><span class="rv-triage-label" data-reskin="true">${triageLabelText(level)}</span><span class="rv-triage-count" data-reskin="true">${count}</span></button>`
-        );
-      }
-      sideTriageList.innerHTML = rows.join("");
+      const inboxProgress = state.mailboxScanProgress[mailboxCacheKey("inbox")] || {};
+      const sentProgress = state.mailboxScanProgress[mailboxCacheKey("sent")] || {};
+      const inboxCount = Number(inboxProgress.cachedCount || (state.scannedMailboxMessages.inbox || []).length || 0);
+      const sentCount = Number(sentProgress.cachedCount || (state.scannedMailboxMessages.sent || []).length || 0);
+      sideTriageList.innerHTML = `
+        <div class="rv-side-triage-item is-active" data-reskin="true">
+          <span class="rv-triage-label" data-reskin="true">Inbox</span>
+          <span class="rv-triage-count" data-reskin="true">${inboxCount}</span>
+        </div>
+        <div class="rv-side-triage-item" data-reskin="true">
+          <span class="rv-triage-label" data-reskin="true">Sent</span>
+          <span class="rv-triage-count" data-reskin="true">${sentCount}</span>
+        </div>
+      `;
     }
     if (sideTriageMeta instanceof HTMLElement) {
       const inboxProgress = state.mailboxScanProgress[mailboxCacheKey("inbox")] || {};
@@ -581,7 +582,7 @@
         ? `Scan cache: ${summaryParts.join(" • ")}`
         : "Auto-scan loads inbox + sent pages in the background.";
       sideTriageMeta.innerHTML = `
-        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.triageStatus || "Auto-triage runs in the background.")}</div>
+        <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.backendStatusMessage || state.settingsStatusMessage || "Mailbox sync is managed from Settings.")}</div>
         <div class="rv-triage-status" data-reskin="true">${escapeHtml(state.fullScanStatus || scanSummary)}</div>
       `;
     }

@@ -7,7 +7,14 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-LEGACY_HEADLESS_RUNTIME = ["inboxsdk.js", "ai.js", "triage.js", "compose.js", "content.js"]
+LEGACY_RUNTIME_ROOT = Path("legacy") / "gmail-dom-v1"
+LEGACY_HEADLESS_RUNTIME = [
+    str(LEGACY_RUNTIME_ROOT / "inboxsdk.js"),
+    str(LEGACY_RUNTIME_ROOT / "ai.js"),
+    str(LEGACY_RUNTIME_ROOT / "triage.js"),
+    str(LEGACY_RUNTIME_ROOT / "compose.js"),
+    str(LEGACY_RUNTIME_ROOT / "content.js"),
+]
 
 
 def _read_scripts_from_manifest(manifest_path: Path) -> list[str]:
@@ -31,7 +38,7 @@ def read_content_script_order(repo_root: Path) -> list[str]:
         return runtime_scripts
 
     root_scripts = _read_scripts_from_manifest(repo_root / "manifest.json")
-    if "content.js" in root_scripts:
+    if any(entry.endswith("content.js") for entry in root_scripts):
         return root_scripts
 
     # Production manifest now points to apps/extension runtime; harnesses still validate
@@ -48,7 +55,7 @@ async def inject_content_runtime(
     skip = set(skip_files or [])
     script_order = read_content_script_order(repo_root)
     for relative in script_order:
-        if relative in skip:
+        if relative in skip or Path(relative).name in skip:
             continue
         script_path = repo_root / relative
         if not script_path.is_file():

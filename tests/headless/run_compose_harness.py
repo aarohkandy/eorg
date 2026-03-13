@@ -5,9 +5,10 @@ from playwright.async_api import async_playwright
 
 
 async def main() -> int:
-    repo_root = Path(__file__).resolve().parents[2]
-    html_path = repo_root / "tests" / "headless" / "compose_harness.html"
-    compose_path = repo_root / "compose.js"
+    headless_dir = Path(__file__).resolve().parent
+    repo_root = headless_dir.parents[1]
+    html_path = headless_dir / "compose_harness.html"
+    compose_path = repo_root / "legacy" / "gmail-dom-v1" / "compose.js"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)

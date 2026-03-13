@@ -58,16 +58,21 @@ async def latest_diag_seq(page, token: str) -> int:
 
 
 async def main() -> int:
-    repo_root = Path(__file__).resolve().parents[2]
-    html_path = repo_root / "tests" / "headless" / "chat_harness.html"
-    artifacts_dir = repo_root / "tests" / "headless" / "artifacts"
+    headless_dir = Path(__file__).resolve().parent
+    repo_root = headless_dir.parents[1]
+    html_path = headless_dir / "chat_harness.html"
+    artifacts_dir = headless_dir / "artifacts"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         page.on("console", lambda msg: print(f"CONSOLE[{msg.type}] {msg.text}"))
         await page.goto(html_path.as_uri() + "#inbox")
-        await inject_content_runtime(page, repo_root, skip_files={"inboxsdk.js"})
+        await inject_content_runtime(
+            page,
+            repo_root,
+            skip_files={"legacy/gmail-dom-v1/inboxsdk.js"},
+        )
         await page.add_script_tag(content=STUB_AI)
         diag_token = new_diag_token("chat")
         await enable_e2e_diag(page, diag_token, ttl_ms=10 * 60 * 1000)

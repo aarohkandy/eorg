@@ -95,7 +95,7 @@
     ];
     const PRIMARY_NAV_HASHES = new Set(["#inbox", "#sent", "#drafts"]);
 
-    const TRIAGE_LEVELS = ["respond", "read", "news", "notImportant", "spam"];
+    const TRIAGE_LEVELS = [];
     const OLD_TO_NEW_TRIAGE = { critical: "respond", high: "read", medium: "news", low: "notImportant", fyi: "spam" };
     const TRIAGE_MAP_STORAGE_KEY = "reskin_triage_map_v1";
     const SYNC_DRAFT_STORAGE_KEY = "reskin_sync_draft_v1";
@@ -183,7 +183,7 @@
       lastSource: "",
       loggedOnce: new Set(),
       triageFilter: "",
-      triageCounts: { respond: 0, read: 0, news: 0, notImportant: 0, spam: 0 },
+      triageCounts: {},
       triageStatus: "",
       triageRunning: false,
       triageQueueKey: "",

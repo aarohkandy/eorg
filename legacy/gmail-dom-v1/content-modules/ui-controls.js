@@ -16,7 +16,6 @@
       applyReskin,
       consumeEvent,
       openSettingsView,
-      askInboxQuestion,
       submitThreadReply,
       bumpInteractionEpoch,
       setActiveTask,
@@ -49,20 +48,46 @@
     const resolveRenderList = () => (
       typeof getRenderList === "function" ? getRenderList() : null
     );
+  const LOCAL_SETTINGS_KEY = "reskin_local_settings_v1";
+
+  function readLocalSettings() {
+    try {
+      const raw = localStorage.getItem(LOCAL_SETTINGS_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeLocalSettings(next) {
+    try {
+      const payload = JSON.stringify(next && typeof next === "object" ? next : {});
+      localStorage.setItem(LOCAL_SETTINGS_KEY, payload);
+    } catch (_) {
+      // Ignore storage write failures.
+    }
+  }
+
   async function loadSettingsCached(force = false) {
     if (!force && state.settingsCache) return state.settingsCache;
     if (!force && state.settingsLoadFailed) return null;
     if (state.settingsLoadInFlight) return state.settingsCache;
-    if (!window.ReskinAI || typeof window.ReskinAI.loadSettings !== "function") return null;
     state.settingsLoadInFlight = true;
     try {
-      state.settingsCache = await window.ReskinAI.loadSettings();
+      const local = readLocalSettings();
+      if (local && typeof local === "object") {
+        state.settingsCache = local;
+      } else if (!state.settingsCache) {
+        state.settingsCache = { theme: THEME_DARK };
+      }
       applyTheme();
       state.settingsLoadFailed = false;
       return state.settingsCache;
     } catch (error) {
       state.settingsLoadFailed = true;
-      logWarn("Failed to load AI settings", error);
+      logWarn("Failed to load local settings", error);
       return null;
     } finally {
       state.settingsLoadInFlight = false;
@@ -70,40 +95,28 @@
   }
 
   async function saveSettingsFromDom(root, options = {}) {
-    if (!window.ReskinAI || typeof window.ReskinAI.saveSettings !== "function") return;
     const view = root.querySelector(".rv-settings-view");
     if (!(view instanceof HTMLElement)) return;
 
-    const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
-    const apiKey = normalize(view.querySelector('[name="apiKey"]')?.value || "");
     const selectedTheme = normalizeTheme(
       view.querySelector('[name="theme"]:checked')?.value ||
       view.querySelector('[name="theme"]')?.value ||
       THEME_DARK
     );
-    const consentCheckbox = view.querySelector('[name="consentTriage"]');
-    const consentTriage = consentCheckbox instanceof HTMLInputElement && consentCheckbox.checked;
-    const payload = {
-      provider,
-      apiKey,
-      apiKeys: apiKey ? [apiKey] : [],
-      theme: selectedTheme,
-      model: defaultModelForProvider(provider),
-      consentTriage: Boolean(consentTriage)
+    const localPayload = {
+      ...(state.settingsCache && typeof state.settingsCache === "object" ? state.settingsCache : {}),
+      theme: selectedTheme
     };
-
-    try {
-      const saved = await window.ReskinAI.saveSettings(payload);
-      state.settingsCache = saved;
-      if (!options || !options.silent) {
-        state.triageStatus = "Settings saved";
-        applyReskin();
-      }
-    } catch (error) {
-      state.triageStatus = "Settings save failed";
-      logWarn("Save settings failed", error);
+    state.settingsCache = localPayload;
+    writeLocalSettings(localPayload);
+    if (!options || !options.silent) {
+      state.settingsStatusMessage = "Settings saved";
       applyReskin();
     }
+  }
+
+  function defaultModelForProvider() {
+    return "";
   }
 
   function scheduleSettingsAutosave(root, delayMs = 650) {
@@ -118,68 +131,24 @@
     }, Math.max(180, Number(delayMs) || 650));
   }
 
-  function defaultModelForProvider(provider) {
-    const value = normalize(provider).toLowerCase();
-    if (value === "groq") {
-      const options = window.ReskinAI && Array.isArray(window.ReskinAI.GROQ_FREE_MODELS)
-        ? window.ReskinAI.GROQ_FREE_MODELS
-        : [];
-      return options[0] || "llama-3.1-8b-instant";
-    }
-    if (value === "ollama") return "llama3.1";
-    return "openrouter/free";
+  function apiKeyPlaceholderForProvider() {
+    return "";
   }
 
-  function apiKeyPlaceholderForProvider(provider) {
-    const value = normalize(provider).toLowerCase();
-    if (value === "groq") return "Groq API key";
-    if (value === "ollama") return "Not required for local Ollama";
-    return "OpenRouter API key";
+  function providerNeedsApiKey() {
+    return false;
   }
 
-  function providerNeedsApiKey(provider) {
-    return normalize(provider).toLowerCase() !== "ollama";
-  }
-
-  function buildApiKeyGuide(provider) {
-    const value = normalize(provider).toLowerCase();
-    if (value === "groq") {
-      return {
-        label: "Groq",
-        linkText: "Open Groq Console",
-        href: "https://console.groq.com/keys",
-        steps: [
-          "Sign in to your Groq account.",
-          "Open API Keys and create a new key.",
-          "Copy the key once shown.",
-          "Paste it into API Key below."
-        ]
-      };
-    }
+  function buildApiKeyGuide() {
     return {
-      label: "OpenRouter",
-      linkText: "Open OpenRouter Keys",
-      href: "https://openrouter.ai/keys",
-      steps: [
-        "Sign in to your OpenRouter account.",
-        "Create a new API key from the keys page.",
-        "Copy the key value.",
-        "Paste it into API Key below."
-      ]
+      label: "",
+      linkText: "",
+      href: "",
+      steps: []
     };
   }
 
-  function openApiKeyGuidePrompt(root) {
-    const view = root.querySelector(".rv-settings-view");
-    if (!(view instanceof HTMLElement)) return;
-    const provider = normalize(view.querySelector('[name="provider"]')?.value || "openrouter");
-    if (!providerNeedsApiKey(provider)) return;
-    state.showApiKeyPermissionModal = true;
-    const renderSettings = resolveRenderSettings();
-    if (typeof renderSettings === "function") {
-      renderSettings(root);
-    }
-  }
+  function openApiKeyGuidePrompt() {}
 
   function applyProviderDefaultsToSettingsForm(root) {
     const view = root.querySelector(".rv-settings-view");
@@ -268,6 +237,139 @@
         return;
       }
 
+      if (target.closest(".rv-settings-open-gmail")) {
+        consumeEvent(event);
+        window.open("https://mail.google.com/#settings/fwdandpop", "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      if (target.closest(".rv-settings-open-apppasswords")) {
+        consumeEvent(event);
+        window.open("https://myaccount.google.com/apppasswords", "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      if (target.closest(".rv-settings-open-2fa")) {
+        consumeEvent(event);
+        window.open(
+          "https://myaccount.google.com/signinoptions/two-step-verification",
+          "_blank",
+          "noopener,noreferrer"
+        );
+        return;
+      }
+
+      if (target.closest(".rv-settings-reload-mail")) {
+        consumeEvent(event);
+        state.settingsStatusMessage = "Refreshing mailbox view...";
+        state.lastListSignature = "";
+        state.lastObserverSignature = "";
+        applyReskin();
+        return;
+      }
+
+      if (target.closest(".rv-settings-health-check")) {
+        consumeEvent(event);
+        state.settingsStatusMessage = "Checking backend status...";
+        applyReskin();
+        (async () => {
+          try {
+            if (
+              typeof chrome === "undefined"
+              || !chrome.runtime
+              || typeof chrome.runtime.sendMessage !== "function"
+            ) {
+              state.settingsStatusMessage = "Extension runtime messaging is unavailable.";
+              applyReskin();
+              return;
+            }
+            const response = await chrome.runtime.sendMessage({ action: "HEALTH_CHECK", payload: {} });
+            if (!response || response.success === false) {
+              const message = normalize(response && response.error) || "Backend health check failed.";
+              state.settingsStatusMessage = message;
+              if (normalize(response && response.code) === "BACKEND_COLD_START") {
+                state.backendStatusMessage = "Backend server is starting up, please wait 60 seconds and try again.";
+              }
+            } else {
+              state.settingsStatusMessage = "Backend is healthy.";
+              state.backendStatusMessage = "";
+            }
+          } catch (error) {
+            state.settingsStatusMessage = normalize(error && error.message) || "Backend health check failed.";
+          }
+          applyReskin();
+        })();
+        return;
+      }
+
+      if (target.closest(".rv-settings-sync-now")) {
+        consumeEvent(event);
+        state.settingsStatusMessage = "Syncing from backend...";
+        applyReskin();
+        (async () => {
+          try {
+            if (
+              typeof chrome === "undefined"
+              || !chrome.runtime
+              || typeof chrome.runtime.sendMessage !== "function"
+            ) {
+              state.settingsStatusMessage = "Extension runtime messaging is unavailable.";
+              applyReskin();
+              return;
+            }
+            const response = await chrome.runtime.sendMessage({ action: "SYNC_MESSAGES", payload: {} });
+            if (!response || response.success === false) {
+              state.settingsStatusMessage = normalize(response && response.error) || "Sync failed.";
+            } else {
+              state.settingsStatusMessage = `Synced ${Number(response.synced || 0)} messages.`;
+              state.backendStatusMessage = "";
+            }
+          } catch (error) {
+            state.settingsStatusMessage = normalize(error && error.message) || "Sync failed.";
+          }
+          state.lastListSignature = "";
+          state.lastObserverSignature = "";
+          applyReskin();
+        })();
+        return;
+      }
+
+      if (target.closest(".rv-settings-disconnect")) {
+        consumeEvent(event);
+        state.settingsStatusMessage = "Disconnecting account...";
+        applyReskin();
+        (async () => {
+          try {
+            if (
+              typeof chrome === "undefined"
+              || !chrome.runtime
+              || typeof chrome.runtime.sendMessage !== "function"
+            ) {
+              state.settingsStatusMessage = "Extension runtime messaging is unavailable.";
+              applyReskin();
+              return;
+            }
+            const response = await chrome.runtime.sendMessage({ action: "DISCONNECT", payload: {} });
+            if (!response || response.success === false) {
+              state.settingsStatusMessage = normalize(response && response.error) || "Disconnect failed.";
+            } else {
+              state.settingsStatusMessage = "Disconnected. Re-open popup onboarding to reconnect.";
+              state.backendConnected = false;
+              state.backendConnectedEmail = "";
+              state.backendStatusMessage = "Not set up yet. Click the extension icon to connect.";
+              state.scannedMailboxMessages = {};
+              state.mailboxCacheRevision = Number(state.mailboxCacheRevision || 0) + 1;
+            }
+          } catch (error) {
+            state.settingsStatusMessage = normalize(error && error.message) || "Disconnect failed.";
+          }
+          state.lastListSignature = "";
+          state.lastObserverSignature = "";
+          applyReskin();
+        })();
+        return;
+      }
+
       if (target.closest(".rv-settings-view")) return;
 
       if (target.closest(".rv-back")) {
@@ -293,25 +395,10 @@
         return;
       }
 
-      if (target.closest(".rv-ai-qa-submit")) {
-        consumeEvent(event);
-        askInboxQuestion(root);
-        return;
-      }
-
       if (target.closest(".rv-thread-send")) {
         consumeEvent(event);
         submitThreadReply(root);
         return;
-      }
-
-      const chatShell = target.closest(".rv-ai-chat");
-      if (chatShell instanceof HTMLElement) {
-        const interactive = target.closest("button, a, textarea, input, select, [role='button']");
-        if (!interactive) {
-          const input = root.querySelector(".rv-ai-qa-input");
-          if (input instanceof HTMLTextAreaElement) input.focus();
-        }
       }
 
       const triageItem = target.closest(".rv-triage-item");
@@ -515,42 +602,10 @@
 
     root.addEventListener("input", (event) => {
       const target = event.target;
-      if (!(target instanceof HTMLTextAreaElement)) return;
-      if (!target.classList.contains("rv-ai-qa-input")) return;
-      state.aiQuestionText = target.value || "";
-      target.classList.toggle("is-has-text", Boolean(normalize(target.value || "")));
-    });
-
-    root.addEventListener("input", (event) => {
-      const target = event.target;
       if (!(target instanceof HTMLElement)) return;
       const view = target.closest(".rv-settings-view");
       if (!(view instanceof HTMLElement)) return;
-      if (target.classList.contains("rv-ai-qa-input")) return;
       scheduleSettingsAutosave(root, 700);
-    });
-
-    root.addEventListener("keydown", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLTextAreaElement)) return;
-      if (!target.classList.contains("rv-ai-qa-input")) return;
-      if (event.key !== "Enter" || event.shiftKey) return;
-      consumeEvent(event);
-      askInboxQuestion(root);
-    });
-
-    root.addEventListener("focusin", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLTextAreaElement)) return;
-      if (!target.classList.contains("rv-ai-qa-input")) return;
-      target.classList.add("is-focused");
-    });
-
-    root.addEventListener("focusout", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLTextAreaElement)) return;
-      if (!target.classList.contains("rv-ai-qa-input")) return;
-      target.classList.remove("is-focused");
     });
 
     root.setAttribute("data-bound", "true");

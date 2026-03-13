@@ -50,32 +50,33 @@
   function renderRightRail(root) {
     const rail = root.querySelector(".rv-right");
     if (!(rail instanceof HTMLElement)) return;
-    const messages = Array.isArray(state.aiChatMessages) ? state.aiChatMessages : [];
-    const transcript = messages.length
-      ? messages.map((msg) => {
-        const role = normalize(msg.role || "assistant").toLowerCase() === "user" ? "user" : "assistant";
-        return `<div class="rv-chat-msg is-${role}" data-reskin="true"><div class="rv-chat-bubble" data-reskin="true">${escapeHtml(normalize(msg.content || ""))}</div></div>`;
-      }).join("")
-      : `<div class="rv-chat-empty" data-reskin="true">Ask anything about your inbox.</div>`;
+    const connected = Boolean(state.backendConnected);
+    const connectedEmail = normalize(state.backendConnectedEmail || "");
+    const status = normalize(state.backendStatusMessage || state.settingsStatusMessage || state.fullScanStatus || "");
 
     rail.innerHTML = `
       <section class="rv-ai-chat" data-reskin="true">
         <div class="rv-ai-chat-head" data-reskin="true">
-          <div class="rv-ai-head" data-reskin="true">Inbox Chat</div>
-          <div class="rv-ai-copy" data-reskin="true">Type at the top, then messages flow below.</div>
+          <div class="rv-ai-head" data-reskin="true">Setup Guide</div>
+          <div class="rv-ai-copy" data-reskin="true">Use Settings to finish onboarding and sync mailbox data.</div>
         </div>
-        <div class="rv-chat-composer" data-reskin="true">
-          <textarea class="rv-ai-qa-input" data-reskin="true" placeholder="Start typing your inbox question...">${escapeHtml(state.aiQuestionText || "")}</textarea>
-          <button type="button" class="rv-ai-qa-submit" data-reskin="true" ${state.aiAnswerBusy ? "disabled" : ""}>${state.aiAnswerBusy ? "Thinking..." : "Send"}</button>
+        <div class="rv-chat-transcript" data-reskin="true">
+          <div class="rv-chat-msg is-assistant" data-reskin="true">
+            <div class="rv-chat-bubble" data-reskin="true">${connected ? `Connected: ${escapeHtml(connectedEmail || "account")}` : "Not connected yet. Click the extension icon and complete setup."}</div>
+          </div>
+          <div class="rv-chat-msg is-assistant" data-reskin="true">
+            <div class="rv-chat-bubble" data-reskin="true">Step 1: Enable IMAP in Gmail settings.</div>
+          </div>
+          <div class="rv-chat-msg is-assistant" data-reskin="true">
+            <div class="rv-chat-bubble" data-reskin="true">Step 2: Generate a Gmail App Password named \"Gmail Unified\".</div>
+          </div>
+          <div class="rv-chat-msg is-assistant" data-reskin="true">
+            <div class="rv-chat-bubble" data-reskin="true">Step 3: Open extension Settings and click Sync now.</div>
+          </div>
+          ${status ? `<div class="rv-chat-msg is-assistant" data-reskin="true"><div class="rv-chat-bubble" data-reskin="true">${escapeHtml(status)}</div></div>` : ""}
         </div>
-        <div class="rv-chat-transcript" data-reskin="true">${transcript}</div>
       </section>
     `;
-
-    const transcriptNode = rail.querySelector(".rv-chat-transcript");
-    if (transcriptNode instanceof HTMLElement) {
-      transcriptNode.scrollTop = transcriptNode.scrollHeight;
-    }
   }
 
   function buildInboxQuestionPrompt(question, messages) {
@@ -108,68 +109,11 @@
   }
 
   async function askInboxQuestion(root) {
-    if (state.aiAnswerBusy) return;
-    const viewQuestion = root.querySelector(".rv-ai-qa-input");
-    const question = normalize(
-      viewQuestion instanceof HTMLTextAreaElement ? viewQuestion.value : state.aiQuestionText || ""
-    );
-    state.aiQuestionText = question;
-    if (!question) {
-      state.aiChatMessages.push({ role: "assistant", content: "Type a question first." });
-      applyReskin();
-      return;
-    }
-    if (!window.ReskinAI || typeof window.ReskinAI.chat !== "function") {
-      state.aiChatMessages.push({ role: "assistant", content: "AI chat is unavailable." });
-      applyReskin();
-      return;
-    }
-
-    state.aiChatMessages.push({ role: "user", content: question });
-    state.aiAnswerBusy = true;
-    state.aiChatMessages.push({ role: "assistant", content: "Thinking..." });
+    state.aiQuestionText = "";
+    state.aiAnswerBusy = false;
+    state.aiChatMessages = [];
+    state.settingsStatusMessage = "This panel is guide-only in this build.";
     applyReskin();
-    try {
-      if (!state.fullScanCompletedByMailbox[mailboxCacheKey("inbox")] && !state.fullScanRunning) {
-        state.aiChatMessages[state.aiChatMessages.length - 1] = {
-          role: "assistant",
-          content: "Scanning inbox pages first so I can answer across all messages..."
-        };
-        applyReskin();
-        await runFullMailboxScan(root, { mailboxes: ["inbox"] });
-      }
-      const allMessages = getMailboxMessages("inbox", 2000);
-      const selected = selectMessagesForQuestion(question, allMessages);
-      let prompts = buildInboxQuestionPrompt(question, selected);
-      let answer = "";
-      try {
-        answer = await window.ReskinAI.chat(prompts, state.settingsCache || {});
-      } catch (error) {
-        const message = normalize(error && error.message ? error.message : String(error || ""));
-        if (message.includes("413") && selected.length > 12) {
-          const trimmed = selected.slice(0, Math.max(12, Math.floor(selected.length / 3)));
-          prompts = buildInboxQuestionPrompt(question, trimmed);
-          answer = await window.ReskinAI.chat(prompts, state.settingsCache || {});
-        } else {
-          throw error;
-        }
-      }
-      state.aiChatMessages[state.aiChatMessages.length - 1] = {
-        role: "assistant",
-        content:
-          `${normalize(answer) || "No answer returned."}\n\n(Used ${selected.length} of ${allMessages.length} cached inbox messages.)`
-      };
-    } catch (error) {
-      const msg = error && error.message ? String(error.message) : "AI answer failed";
-      state.aiChatMessages[state.aiChatMessages.length - 1] = {
-        role: "assistant",
-        content: `Unable to answer: ${msg.slice(0, 220)}`
-      };
-      logWarn("Inbox Q&A failed", error);
-    } finally {
-      state.aiAnswerBusy = false;
-      applyReskin();
-    }
   }
 
   function syncViewFromHash() {

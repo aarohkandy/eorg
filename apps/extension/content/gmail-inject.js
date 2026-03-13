@@ -570,7 +570,7 @@ async function connectFromGuide() {
   const connectBtn = document.getElementById('gmailUnifiedConnectBtn');
 
   const email = String(emailInput?.value || '').trim();
-  const appPassword = String(passInput?.value || '').trim();
+  const appPassword = String(passInput?.value || '').trim().replace(/\s+/g, '');
 
   if (!email || !appPassword) {
     setConnectUiState('Enter your Gmail address and app password to continue.', true);

@@ -310,7 +310,6 @@
               if (entry.classList?.contains("rv-item") || entry.classList?.contains("rv-back")
                 || entry.classList?.contains("rv-thread-send") || entry.classList?.contains("rv-find-history")
                 || entry.classList?.contains("rv-settings")
-                || entry.classList?.contains("rv-ai-qa-submit")
                 || entry.classList?.contains("rv-item-server-btn")
                 || entry.tagName === "BUTTON") {
                 targetForLog = entry;
