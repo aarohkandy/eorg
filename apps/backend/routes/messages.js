@@ -16,6 +16,18 @@ const IMAP_FOLDERS = {
   SENT: '[Gmail]/Sent Mail'
 };
 
+function pushDbTrace(trace, level, stage, message, extra = {}) {
+  return pushTrace(trace, 'DB', level, stage, message, extra);
+}
+
+function hasSpecificFailure(trace) {
+  return Array.isArray(trace) && trace.some((entry) =>
+    entry &&
+    entry.level === 'error' &&
+    (entry.source === 'DB' || entry.source === 'IMAP')
+  );
+}
+
 function parseFolder(folder) {
   const value = String(folder || 'all').toLowerCase();
   if (value === 'inbox') return 'inbox';
@@ -52,6 +64,7 @@ function dedupeById(messages) {
 }
 
 async function getUser(userId, trace = []) {
+  pushDbTrace(trace, 'info', 'db_user_lookup_started', 'Loading connected user from Supabase.');
   const { data, error } = await supabase
     .from('users')
     .select('id, email, encrypted_password, last_sync')
@@ -59,7 +72,7 @@ async function getUser(userId, trace = []) {
     .maybeSingle();
 
   if (error) {
-    pushTrace(trace, 'API', 'error', 'messages_user_lookup_failed', 'Could not load the connected user.', {
+    pushDbTrace(trace, 'error', 'db_user_lookup_failed', 'Could not load the connected user from Supabase.', {
       code: 'BACKEND_UNAVAILABLE',
       details: error.message
     });
@@ -67,16 +80,18 @@ async function getUser(userId, trace = []) {
   }
 
   if (!data) {
-    pushTrace(trace, 'API', 'error', 'messages_user_missing', 'Connected user was not found.', {
+    pushDbTrace(trace, 'error', 'db_user_missing', 'Connected user record was not found in Supabase.', {
       code: 'NOT_CONNECTED'
     });
     throw new AppError('NOT_CONNECTED', 'User not found. Please reconnect the extension.', 401, { trace });
   }
 
+  pushDbTrace(trace, 'success', 'db_user_lookup_complete', 'Connected user loaded from Supabase.');
   return data;
 }
 
-async function loadCachedMessages(userId, folders, limit) {
+async function loadCachedMessages(userId, folders, limit, trace = []) {
+  pushDbTrace(trace, 'info', 'db_cache_read_started', 'Loading cached messages from Supabase.');
   const query = supabase
     .from('messages')
     .select('*')
@@ -87,13 +102,21 @@ async function loadCachedMessages(userId, folders, limit) {
 
   const { data, error } = await query;
   if (error) {
-    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
+    pushDbTrace(trace, 'error', 'db_cache_read_failed', 'Could not load cached messages from Supabase.', {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
 
+  pushDbTrace(trace, 'success', 'db_cache_read_complete', `Loaded ${(data || []).length} cached messages from Supabase.`, {
+    details: `Folders ${folders.join(', ')}; limit ${limit}.`
+  });
   return (data || []).map(mapRowToMessage);
 }
 
-async function loadLatestCacheTimestamp(userId, folders) {
+async function loadLatestCacheTimestamp(userId, folders, trace = []) {
+  pushDbTrace(trace, 'info', 'db_cache_freshness_started', 'Checking cached message freshness in Supabase.');
   const { data, error } = await supabase
     .from('messages')
     .select('cached_at')
@@ -104,13 +127,20 @@ async function loadLatestCacheTimestamp(userId, folders) {
     .maybeSingle();
 
   if (error) {
-    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
+    pushDbTrace(trace, 'error', 'db_cache_freshness_failed', 'Could not check cached message freshness.', {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
 
+  pushDbTrace(trace, 'success', 'db_cache_freshness_complete', 'Checked cached message freshness.', {
+    details: data?.cached_at ? `Newest cached row at ${data.cached_at}.` : 'No cached rows were found.'
+  });
   return data?.cached_at ? new Date(data.cached_at).getTime() : 0;
 }
 
-async function pruneOldCache(userId, folder) {
+async function pruneOldCache(userId, folder, trace = []) {
   const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { error } = await supabase
     .from('messages')
@@ -120,11 +150,15 @@ async function pruneOldCache(userId, folder) {
     .lt('cached_at', cutoff);
 
   if (error) {
-    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
+    pushDbTrace(trace, 'error', 'db_cache_prune_failed', `Could not prune cached ${folder} messages.`, {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
 }
 
-async function upsertMessages(userId, messages) {
+async function upsertMessages(userId, messages, trace = []) {
   if (!messages.length) return;
 
   const byFolder = messages.reduce((acc, message) => {
@@ -133,15 +167,24 @@ async function upsertMessages(userId, messages) {
     return acc;
   }, {});
 
+  pushDbTrace(trace, 'info', 'db_messages_upsert_started', 'Saving synced messages to Supabase.', {
+    details: `Rows ${messages.length}; folders ${Object.keys(byFolder).join(', ')}.`
+  });
   for (const folder of Object.keys(byFolder)) {
-    await pruneOldCache(userId, folder);
+    await pruneOldCache(userId, folder, trace);
   }
 
   const rows = messages.map((message) => mapMessageToRow(message, userId));
   const { error } = await supabase.from('messages').upsert(rows, { onConflict: 'id' });
   if (error) {
-    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
+    pushDbTrace(trace, 'error', 'db_messages_upsert_failed', 'Could not save synced messages to Supabase.', {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
+
+  pushDbTrace(trace, 'success', 'db_messages_upsert_complete', `Saved ${rows.length} messages to Supabase.`);
 }
 
 async function fetchFromImap(user, requestedFolders, limit, trace = []) {
@@ -155,6 +198,22 @@ async function fetchFromImap(user, requestedFolders, limit, trace = []) {
 
   const results = await Promise.all(tasks);
   return sortByDateDesc(dedupeById(results.flat()));
+}
+
+async function updateLastSync(userId, trace = []) {
+  const now = new Date().toISOString();
+  pushDbTrace(trace, 'info', 'db_last_sync_started', 'Updating last sync time in Supabase.');
+  const { error } = await supabase.from('users').update({ last_sync: now }).eq('id', userId);
+  if (error) {
+    pushDbTrace(trace, 'error', 'db_last_sync_failed', 'Could not update last sync time in Supabase.', {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
+  }
+  pushDbTrace(trace, 'success', 'db_last_sync_complete', 'Updated last sync time in Supabase.', {
+    details: now
+  });
 }
 
 function buildCounts(messages) {
@@ -191,11 +250,11 @@ router.get('/', async (req, res) => {
     pushTrace(trace, 'API', 'success', 'messages_user_loaded', 'Connected user loaded successfully.');
 
     if (!forceSync) {
-      const latestCacheTimestamp = await loadLatestCacheTimestamp(userId, requestedFolders);
+      const latestCacheTimestamp = await loadLatestCacheTimestamp(userId, requestedFolders, trace);
       const ageMs = latestCacheTimestamp ? Date.now() - latestCacheTimestamp : Number.POSITIVE_INFINITY;
 
       if (ageMs < 5 * 60 * 1000) {
-        const cached = await loadCachedMessages(userId, requestedFolders, fetchLimit);
+        const cached = await loadCachedMessages(userId, requestedFolders, fetchLimit, trace);
         const sortedCached = sortByDateDesc(cached).slice(0, fetchLimit);
         const counts = buildCounts(sortedCached);
         const ageSec = Math.max(0, Math.floor(ageMs / 1000));
@@ -220,10 +279,8 @@ router.get('/', async (req, res) => {
     console.log(`[Messages] Cache miss for userId ${userId} - fetching from IMAP`);
     pushTrace(trace, 'API', 'info', 'messages_imap_fetch_start', 'Starting Gmail mailbox sync.');
     const fresh = await fetchFromImap(user, requestedFolders, limit, trace);
-    await upsertMessages(userId, fresh);
-
-    const now = new Date().toISOString();
-    await supabase.from('users').update({ last_sync: now }).eq('id', userId);
+    await upsertMessages(userId, fresh, trace);
+    await updateLastSync(userId, trace);
 
     const counts = buildCounts(fresh);
     pushTrace(trace, 'API', 'success', 'messages_imap_fetch_complete', `Mailbox sync complete: ${fresh.length} messages loaded.`, {
@@ -242,10 +299,12 @@ router.get('/', async (req, res) => {
       trace
     });
   } catch (error) {
-    pushTrace(trace, 'API', 'error', 'messages_fetch_failed', 'Mailbox load failed.', {
-      code: error?.code || 'BACKEND_UNAVAILABLE',
-      details: error?.message || 'Unexpected backend error'
-    });
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'messages_fetch_failed', 'Mailbox load failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
     const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }
@@ -281,6 +340,7 @@ router.get('/search', async (req, res) => {
     pushTrace(trace, 'API', 'success', 'messages_search_user_loaded', 'Connected user loaded successfully.');
 
     const ilike = `%${query}%`;
+    pushDbTrace(trace, 'info', 'db_search_cache_started', 'Searching cached messages in Supabase.');
     const { data: cachedRows, error } = await supabase
       .from('messages')
       .select('*')
@@ -290,7 +350,7 @@ router.get('/search', async (req, res) => {
       .limit(limit);
 
     if (error) {
-      pushTrace(trace, 'API', 'error', 'messages_search_cache_failed', 'Cached search failed.', {
+      pushDbTrace(trace, 'error', 'db_search_cache_failed', 'Cached search failed in Supabase.', {
         code: 'BACKEND_UNAVAILABLE',
         details: error.message
       });
@@ -298,6 +358,7 @@ router.get('/search', async (req, res) => {
     }
 
     const cachedMessages = (cachedRows || []).map(mapRowToMessage);
+    pushDbTrace(trace, 'success', 'db_search_cache_complete', `Loaded ${cachedMessages.length} cached search results from Supabase.`);
     if (cachedMessages.length >= 5) {
       pushTrace(trace, 'API', 'info', 'messages_search_cache_hit', `Search returned ${cachedMessages.length} cached results.`);
       return res.status(200).json({
@@ -334,10 +395,12 @@ router.get('/search', async (req, res) => {
       trace
     });
   } catch (error) {
-    pushTrace(trace, 'API', 'error', 'messages_search_failed', 'Search failed.', {
-      code: error?.code || 'BACKEND_UNAVAILABLE',
-      details: error?.message || 'Unexpected backend error'
-    });
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'messages_search_failed', 'Search failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
     const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }
@@ -362,10 +425,8 @@ router.post('/sync', async (req, res) => {
     pushTrace(trace, 'API', 'success', 'messages_sync_user_loaded', 'Connected user loaded successfully.');
     pushTrace(trace, 'API', 'info', 'messages_sync_imap_start', 'Starting manual Gmail sync.');
     const fresh = await fetchFromImap(user, ['INBOX', 'SENT'], 100, trace);
-    await upsertMessages(userId, fresh);
-
-    const now = new Date().toISOString();
-    await supabase.from('users').update({ last_sync: now }).eq('id', userId);
+    await upsertMessages(userId, fresh, trace);
+    await updateLastSync(userId, trace);
 
     console.log(`[Messages] Force-sync completed - synced ${fresh.length} messages`);
     const counts = buildCounts(fresh);
@@ -379,10 +440,12 @@ router.post('/sync', async (req, res) => {
       trace
     });
   } catch (error) {
-    pushTrace(trace, 'API', 'error', 'messages_sync_failed', 'Manual sync failed.', {
-      code: error?.code || 'BACKEND_UNAVAILABLE',
-      details: error?.message || 'Unexpected backend error'
-    });
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'messages_sync_failed', 'Manual sync failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
     const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }

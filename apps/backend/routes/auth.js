@@ -6,6 +6,18 @@ import { AppError, buildConnectFailure, buildErrorResponse, pushTrace } from '..
 
 const router = express.Router();
 
+function pushDbTrace(trace, level, stage, message, extra = {}) {
+  return pushTrace(trace, 'DB', level, stage, message, extra);
+}
+
+function hasSpecificFailure(trace) {
+  return Array.isArray(trace) && trace.some((entry) =>
+    entry &&
+    entry.level === 'error' &&
+    (entry.source === 'DB' || entry.source === 'IMAP')
+  );
+}
+
 function maskEmail(email) {
   const value = String(email || '').trim();
   const at = value.indexOf('@');
@@ -44,6 +56,7 @@ router.post('/connect', async (req, res) => {
 
     pushTrace(trace, 'API', 'success', 'auth_verified', 'Gmail connection verified.');
     const encryptedPassword = encrypt(appPassword);
+    pushDbTrace(trace, 'info', 'db_auth_save_started', 'Saving connected account to Supabase.');
 
     const { data, error } = await supabase
       .from('users')
@@ -59,7 +72,7 @@ router.post('/connect', async (req, res) => {
       .single();
 
     if (error) {
-      pushTrace(trace, 'API', 'error', 'auth_user_store_failed', 'Could not save the connected user.', {
+      pushDbTrace(trace, 'error', 'db_auth_save_failed', 'Could not save the connected user in Supabase.', {
         code: 'BACKEND_UNAVAILABLE',
         details: error.message
       });
@@ -67,6 +80,7 @@ router.post('/connect', async (req, res) => {
     }
 
     console.log(`[Auth] User connected: ${maskEmail(email)} (userId: ${data.id})`);
+    pushDbTrace(trace, 'success', 'db_auth_save_complete', 'Connected account saved to Supabase.');
     pushTrace(trace, 'API', 'success', 'auth_user_saved', 'Connected account saved successfully.');
     return res.status(200).json({
       success: true,
@@ -75,10 +89,12 @@ router.post('/connect', async (req, res) => {
       trace
     });
   } catch (error) {
-    pushTrace(trace, 'API', 'error', 'auth_request_failed', 'Connect request failed.', {
-      code: error?.code || 'BACKEND_UNAVAILABLE',
-      details: error?.message || 'Unexpected backend error'
-    });
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'auth_request_failed', 'Connect request failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
     const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }
@@ -97,6 +113,7 @@ router.delete('/disconnect', async (req, res) => {
       throw new AppError('NOT_CONNECTED', 'userId is required to disconnect.', 400, { trace });
     }
 
+    pushDbTrace(trace, 'info', 'db_auth_disconnect_lookup_started', 'Loading connected account from Supabase.');
     const { data: existing, error: lookupError } = await supabase
       .from('users')
       .select('email')
@@ -104,7 +121,7 @@ router.delete('/disconnect', async (req, res) => {
       .maybeSingle();
 
     if (lookupError) {
-      pushTrace(trace, 'API', 'error', 'auth_disconnect_lookup_failed', 'Could not load the connected user.', {
+      pushDbTrace(trace, 'error', 'db_auth_disconnect_lookup_failed', 'Could not load the connected account from Supabase.', {
         code: 'BACKEND_UNAVAILABLE',
         details: lookupError.message
       });
@@ -112,15 +129,17 @@ router.delete('/disconnect', async (req, res) => {
     }
 
     if (!existing) {
-      pushTrace(trace, 'API', 'error', 'auth_disconnect_missing_user', 'Connected user was not found.', {
+      pushDbTrace(trace, 'error', 'db_auth_disconnect_missing_user', 'Connected user was not found in Supabase.', {
         code: 'NOT_CONNECTED'
       });
       throw new AppError('NOT_CONNECTED', 'User not found for disconnect.', 404, { trace });
     }
 
+    pushDbTrace(trace, 'success', 'db_auth_disconnect_lookup_complete', 'Loaded connected account from Supabase.');
+    pushDbTrace(trace, 'info', 'db_auth_disconnect_delete_started', 'Removing connected account from Supabase.');
     const { error } = await supabase.from('users').delete().eq('id', userId);
     if (error) {
-      pushTrace(trace, 'API', 'error', 'auth_disconnect_delete_failed', 'Could not disconnect the current user.', {
+      pushDbTrace(trace, 'error', 'db_auth_disconnect_delete_failed', 'Could not remove the connected account from Supabase.', {
         code: 'BACKEND_UNAVAILABLE',
         details: error.message
       });
@@ -128,13 +147,16 @@ router.delete('/disconnect', async (req, res) => {
     }
 
     console.log(`[Auth] User disconnected: ${maskEmail(existing.email)}`);
+    pushDbTrace(trace, 'success', 'db_auth_disconnect_delete_complete', 'Connected account removed from Supabase.');
     pushTrace(trace, 'API', 'success', 'auth_disconnected', 'Connected account removed successfully.');
     return res.status(200).json({ success: true, trace });
   } catch (error) {
-    pushTrace(trace, 'API', 'error', 'auth_disconnect_failed', 'Disconnect request failed.', {
-      code: error?.code || 'BACKEND_UNAVAILABLE',
-      details: error?.message || 'Unexpected backend error'
-    });
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'auth_disconnect_failed', 'Disconnect request failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
     const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }

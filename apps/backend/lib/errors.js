@@ -16,6 +16,17 @@ function createTraceId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function sanitizeTraceDetails(details) {
+  if (details == null) return undefined;
+
+  const value = String(details)
+    .replace(/\b[a-z0-9]{4}(?:\s+[a-z0-9]{4}){3}\b/gi, '[redacted app password]')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return value || undefined;
+}
+
 function normalizeTraceEntries(entries) {
   if (!Array.isArray(entries)) return [];
 
@@ -38,7 +49,7 @@ function normalizeTraceEntries(entries) {
         stage,
         message,
         code: typeof entry.code === 'string' && entry.code ? entry.code : undefined,
-        details: typeof entry.details === 'string' && entry.details ? entry.details : undefined
+        details: sanitizeTraceDetails(entry.details)
       };
     })
     .filter(Boolean);
@@ -153,7 +164,7 @@ export function buildErrorResponse(error, fallbackTrace = []) {
 }
 
 export function parseImapError(error, folder) {
-  const message = String(error?.message || 'Unknown IMAP error');
+  const message = sanitizeTraceDetails(error?.message || 'Unknown IMAP error') || 'Unknown IMAP error';
   if (message.includes('AUTHENTICATIONFAILED')) {
     return new AppError(
       'AUTH_FAILED',

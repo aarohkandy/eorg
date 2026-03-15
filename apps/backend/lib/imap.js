@@ -1,6 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import { parseImapError, pushTrace } from './errors.js';
+import { parseImapError, pushTrace, sanitizeTraceDetails } from './errors.js';
 
 const IMAP_HOST = 'imap.gmail.com';
 const IMAP_PORT = 993;
@@ -134,11 +134,21 @@ async function attachSnippets(email, appPassword, folder, messages) {
   return messages;
 }
 
-function logImapFailure(trace, parsed, folder) {
+function buildImapFailureDetails(parsed, rawMessage) {
+  const rawDetail = sanitizeTraceDetails(rawMessage);
+  if (rawDetail && rawDetail !== parsed?.message) {
+    return `${parsed?.message || 'Unexpected IMAP error.'} Raw server response: ${rawDetail}`;
+  }
+  return parsed?.message || rawDetail || 'Unexpected IMAP error.';
+}
+
+function logImapFailure(trace, parsed, folder, options = {}) {
+  const details = buildImapFailureDetails(parsed, options.rawMessage);
+
   if (parsed?.code === 'AUTH_FAILED') {
     pushTrace(trace, 'IMAP', 'error', 'imap_auth_failed', 'Gmail rejected the App Password.', {
       code: parsed.code,
-      details: parsed.message
+      details
     });
     return;
   }
@@ -146,7 +156,7 @@ function logImapFailure(trace, parsed, folder) {
   if (parsed?.code === 'FOLDER_NOT_FOUND') {
     pushTrace(trace, 'IMAP', 'error', 'imap_folder_missing', `Required Gmail folder is missing: ${folder}.`, {
       code: parsed.code,
-      details: parsed.message
+      details
     });
     return;
   }
@@ -154,14 +164,20 @@ function logImapFailure(trace, parsed, folder) {
   if (parsed?.code === 'CONNECTION_FAILED') {
     pushTrace(trace, 'IMAP', 'error', 'imap_connection_failed', 'Could not reach Gmail IMAP.', {
       code: parsed.code,
-      details: parsed.message
+      details
     });
     return;
   }
 
-  pushTrace(trace, 'IMAP', 'error', 'imap_failed', 'IMAP request failed.', {
+  const actionLabel = options.operation === 'search'
+    ? `IMAP search failed for ${folder}.`
+    : (options.operation === 'fetch'
+      ? `IMAP header fetch failed for ${folder}.`
+      : 'IMAP request failed.');
+
+  pushTrace(trace, 'IMAP', 'error', 'imap_failed', actionLabel, {
     code: parsed?.code || 'BACKEND_UNAVAILABLE',
-    details: parsed?.message || 'Unexpected IMAP error.'
+    details
   });
 }
 
@@ -194,14 +210,16 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
       }
 
       const range = `*:-${Math.max(1, Number(limit) || 50)}`;
+      pushTrace(trace, 'IMAP', 'info', 'imap_fetch_command', `Requesting header batch from ${folder}.`, {
+        details: `Range ${range}; fields envelope, bodyStructure, internalDate, flags, uid, headers.`
+      });
       for await (const message of client.fetch(range, {
         envelope: true,
         bodyStructure: true,
         internalDate: true,
         flags: true,
         uid: true,
-        headers: ['references', 'in-reply-to'],
-        gmailThreadId: true
+        headers: ['references', 'in-reply-to']
       })) {
         collected.push({ ...message, snippet: '' });
       }
@@ -216,7 +234,10 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
-    logImapFailure(trace, parsed, folder);
+    logImapFailure(trace, parsed, folder, {
+      operation: 'fetch',
+      rawMessage: error?.message
+    });
     throw parsed;
   } finally {
     try {
@@ -250,7 +271,7 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
       const matchedUids = await client.search({ body: query });
       const slice = matchedUids.slice(-Math.max(1, Number(limit) || 20));
       pushTrace(trace, 'IMAP', 'info', 'imap_search_started', `Searching ${folder} for matching messages.`, {
-        details: `Matched ${matchedUids.length} messages before limiting.`
+        details: `Matched ${matchedUids.length} messages before limiting; query length ${String(query || '').trim().length}.`
       });
       if (!slice.length) {
         console.log(`[IMAP] Search returned 0 messages in ${folder}`);
@@ -258,14 +279,16 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
         return [];
       }
 
+      pushTrace(trace, 'IMAP', 'info', 'imap_search_fetch_command', `Requesting search result headers from ${folder}.`, {
+        details: `UIDs requested ${slice.length}; fields envelope, bodyStructure, internalDate, flags, uid, headers.`
+      });
       for await (const message of client.fetch(slice, {
         envelope: true,
         bodyStructure: true,
         internalDate: true,
         flags: true,
         uid: true,
-        headers: ['references', 'in-reply-to'],
-        gmailThreadId: true
+        headers: ['references', 'in-reply-to']
       })) {
         messages.push({ ...message });
       }
@@ -280,7 +303,10 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
-    logImapFailure(trace, parsed, folder);
+    logImapFailure(trace, parsed, folder, {
+      operation: 'search',
+      rawMessage: error?.message
+    });
     throw parsed;
   } finally {
     try {
@@ -310,7 +336,10 @@ export async function testConnection(email, appPassword, trace = []) {
   } catch (error) {
     const parsed = parseImapError(error, '[Gmail]/Sent Mail');
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
-    logImapFailure(trace, parsed, '[Gmail]/Sent Mail');
+    logImapFailure(trace, parsed, '[Gmail]/Sent Mail', {
+      operation: 'connect',
+      rawMessage: error?.message
+    });
     return { success: false, code: parsed.code, error: parsed.message, trace };
   }
 }
