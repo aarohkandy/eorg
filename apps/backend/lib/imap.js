@@ -38,6 +38,8 @@ export const IMAP_PROBE_RANGE_SETS = [
   { name: 'recent-1', target: '*:-1' },
   { name: 'recent-5', target: '*:-5' },
   { name: 'recent-50', target: '*:-50' },
+  { name: 'absolute-last-1', target: { type: 'absolute-last', count: 1 } },
+  { name: 'absolute-last-5', target: { type: 'absolute-last', count: 5 } },
   { name: 'absolute-last-50', target: { type: 'absolute-last', count: 50 } }
 ];
 
@@ -159,7 +161,8 @@ function resolveFetchTarget(totalMessages, rangeInput, fallbackLimit = 50) {
       target: `${start}:*`,
       label: `${start}:*`,
       fetchMode: 'sequence-range',
-      requestedCount: count
+      requestedCount: count,
+      resolvedStart: start
     };
   }
 
@@ -167,16 +170,20 @@ function resolveFetchTarget(totalMessages, rangeInput, fallbackLimit = 50) {
     return {
       target: rangeInput,
       label: rangeInput,
-      fetchMode: 'sequence-range'
+      fetchMode: 'sequence-range',
+      requestedCount: undefined,
+      resolvedStart: undefined
     };
   }
 
   const count = Math.max(1, Number(fallbackLimit) || 50);
+  const start = Math.max(1, Number(totalMessages || 0) - count + 1);
   return {
-    target: `*:-${count}`,
-    label: `*:-${count}`,
+    target: `${start}:*`,
+    label: `${start}:*`,
     fetchMode: 'sequence-range',
-    requestedCount: count
+    requestedCount: count,
+    resolvedStart: start
   };
 }
 
@@ -320,6 +327,8 @@ function buildImapFailureDetails(parsed, folder, options = {}) {
     fetchStrategy: options.fetchStrategy,
     fetchMode: options.fetchMode,
     range: options.fetchTarget,
+    requestedCount: options.requestedCount,
+    resolvedStart: options.resolvedStart,
     attrs: options.fetchAttributes,
     mailboxExists: options.mailboxExists,
     uidNext: options.uidNext,
@@ -441,13 +450,15 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
 
       fetchTarget = resolveFetchTarget(totalMessages, options.range, limit);
       console.log(
-        `[IMAP] requestId=${requestId} fetch folder=${folder} mode=${fetchTarget.fetchMode} range=${fetchTarget.label} attrs=${fetchAttributes} strategy=${fetchStrategy}`
+        `[IMAP] requestId=${requestId} fetch folder=${folder} mode=${fetchTarget.fetchMode} range=${fetchTarget.label} requestedCount=${fetchTarget.requestedCount || 'n/a'} resolvedStart=${fetchTarget.resolvedStart || 'n/a'} attrs=${fetchAttributes} strategy=${fetchStrategy}`
       );
       pushImapTrace(trace, 'info', 'imap_fetch_command', `Requesting header batch from ${folder}.`, {
         requestId,
         fetchStrategy,
         fetchMode: fetchTarget.fetchMode,
         range: fetchTarget.label,
+        requestedCount: fetchTarget.requestedCount,
+        resolvedStart: fetchTarget.resolvedStart,
         attrs: fetchAttributes,
         mailboxExists: mailboxInfo.exists,
         uidNext: mailboxInfo.uidNext,
@@ -464,6 +475,8 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
         fetchStrategy,
         fetchMode: fetchTarget.fetchMode,
         range: fetchTarget.label,
+        requestedCount: fetchTarget.requestedCount,
+        resolvedStart: fetchTarget.resolvedStart,
         attrs: fetchAttributes,
         count: collected.length
       });
@@ -481,6 +494,8 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
       fetchStrategy,
       fetchMode: fetchTarget?.fetchMode,
       fetchTarget: fetchTarget?.label,
+      requestedCount: fetchTarget?.requestedCount,
+      resolvedStart: fetchTarget?.resolvedStart,
       fetchAttributes,
       mailboxExists: mailboxInfo.exists,
       uidNext: mailboxInfo.uidNext,
@@ -760,6 +775,8 @@ export async function probeFetch(email, appPassword, folder, options = {}) {
         fetchStrategy,
         fetchMode: fetchTarget.fetchMode,
         range: fetchTarget.label,
+        requestedCount: fetchTarget.requestedCount,
+        resolvedStart: fetchTarget.resolvedStart,
         attrs: fetchAttributes,
         count,
         durationMs: Date.now() - startedAt,
@@ -776,6 +793,8 @@ export async function probeFetch(email, appPassword, folder, options = {}) {
       fetchStrategy,
       fetchMode: fetchTarget?.fetchMode,
       range: fetchTarget?.label,
+      requestedCount: fetchTarget?.requestedCount,
+      resolvedStart: fetchTarget?.resolvedStart,
       attrs: fetchAttributes,
       durationMs: Date.now() - startedAt,
       capabilities,

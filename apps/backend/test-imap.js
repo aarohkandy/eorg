@@ -13,7 +13,7 @@ const TEST_EMAIL = process.env.TEST_IMAP_EMAIL || 'your-email@gmail.com';
 const TEST_APP_PASSWORD = process.env.TEST_IMAP_APP_PASSWORD || 'replace-with-16-char-app-password';
 const TEST_QUERY = String(process.env.TEST_IMAP_QUERY || '').trim();
 const ARTIFACT_PATH = new URL('./imap-probe.log', import.meta.url);
-const BASELINE_RANGE = '*:-5';
+const BASELINE_RANGE = { type: 'absolute-last', count: 5 };
 const BASELINE_FIELDS = IMAP_PROBE_ATTRIBUTE_SETS[5]?.fields || ['uid', 'envelope', 'flags', 'internalDate', 'bodyStructure', 'headers'];
 
 const summary = {
@@ -54,6 +54,8 @@ function buildResultLine(result) {
   if (result.folder) parts.push(`folder=${result.folder}`);
   if (result.fetchMode) parts.push(`fetchMode=${result.fetchMode}`);
   if (result.range) parts.push(`range=${formatRange(result.range)}`);
+  if (Number.isFinite(result.requestedCount)) parts.push(`requestedCount=${result.requestedCount}`);
+  if (Number.isFinite(result.resolvedStart)) parts.push(`resolvedStart=${result.resolvedStart}`);
   if (result.attrs) parts.push(`attrs=${formatAttrs(result.attrs)}`);
   if (Number.isFinite(result.count)) parts.push(`count=${result.count}`);
   if (Number.isFinite(result.matched)) parts.push(`matched=${result.matched}`);
