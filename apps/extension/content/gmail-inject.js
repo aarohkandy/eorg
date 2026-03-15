@@ -58,14 +58,14 @@ function createDiagnosticId() {
 function normalizeDiagnosticDetails(details) {
   if (details == null) return undefined;
   if (typeof details === 'string') {
-    const value = details.trim();
+    const value = details.replace(/\s+/g, ' ').trim();
     return value || undefined;
   }
 
   try {
-    return JSON.stringify(details, null, 2);
+    return JSON.stringify(details);
   } catch {
-    return String(details);
+    return String(details).replace(/\s+/g, ' ').trim();
   }
 }
 
@@ -271,51 +271,35 @@ function formatActivityTime(value) {
   });
 }
 
+function formatActivityLine(entry) {
+  const parts = [
+    formatActivityTime(entry.ts),
+    entry.source,
+    entry.level,
+    entry.stage
+  ];
+
+  if (entry.code) parts.push(entry.code);
+  parts.push(entry.message);
+  if (entry.details) parts.push(entry.details);
+
+  return parts
+    .map((part) => String(part || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
 function renderActivityPanel() {
   const log = document.getElementById('gmailUnifiedActivityLog');
   if (!log) return;
 
-  const entries = [...normalizeSetupDiagnostics(state.setupDiagnostics).entries].reverse();
+  const entries = normalizeSetupDiagnostics(state.setupDiagnostics).entries;
   if (!entries.length) {
-    log.innerHTML = `
-      <div class="gmail-unified-activity-empty">
-        Activity from the UI, extension, backend, and Gmail will appear here.
-      </div>
-    `;
+    log.textContent = 'Activity from the UI, extension, backend, and Gmail will appear here.';
     return;
   }
 
-  log.innerHTML = entries.map((entry) => {
-    const detailText = entry.details && entry.details !== entry.message ? entry.details : '';
-    const row = `
-      <div class="gmail-unified-activity-row">
-        <span class="gmail-unified-activity-time">${escapeHtml(formatActivityTime(entry.ts))}</span>
-        <span class="gmail-unified-activity-source">${escapeHtml(entry.source)}</span>
-        <span class="gmail-unified-activity-main">
-          <span class="gmail-unified-activity-message">${escapeHtml(entry.message)}</span>
-          ${entry.level === 'error' && detailText
-            ? `<span class="gmail-unified-activity-inline-detail">${escapeHtml(detailText)}</span>`
-            : ''}
-        </span>
-        ${entry.code ? `<span class="gmail-unified-activity-code">${escapeHtml(entry.code)}</span>` : ''}
-      </div>
-    `;
-
-    if (detailText && entry.level !== 'error') {
-      return `
-        <details class="gmail-unified-activity-item is-${escapeHtml(entry.level)}">
-          <summary>${row}</summary>
-          <div class="gmail-unified-activity-details">${escapeHtml(detailText)}</div>
-        </details>
-      `;
-    }
-
-    return `
-      <div class="gmail-unified-activity-item is-${escapeHtml(entry.level)}">
-        ${row}
-      </div>
-    `;
-  }).join('');
+  log.textContent = entries.map((entry) => formatActivityLine(entry)).join('\n');
 }
 
 function byDateDesc(a, b) {
@@ -1012,7 +996,7 @@ function buildSidebar() {
           <div class="gmail-unified-activity-header">
             <div class="gmail-unified-activity-kicker">Activity</div>
           </div>
-          <div id="gmailUnifiedActivityLog" class="gmail-unified-activity-log"></div>
+          <pre id="gmailUnifiedActivityLog" class="gmail-unified-activity-log"></pre>
         </section>
       </div>
     </section>

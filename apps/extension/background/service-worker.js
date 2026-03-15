@@ -84,14 +84,14 @@ function normalizeDiagnosticDetails(details) {
   if (details == null) return undefined;
 
   if (typeof details === 'string') {
-    const value = details.trim();
+    const value = details.replace(/\s+/g, ' ').trim();
     return value || undefined;
   }
 
   try {
-    return JSON.stringify(details, null, 2);
+    return JSON.stringify(details);
   } catch {
-    return String(details);
+    return String(details).replace(/\s+/g, ' ').trim();
   }
 }
 

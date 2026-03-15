@@ -8,6 +8,7 @@
     "dev": "node --watch server.js",
     "start": "node server.js",
     "test:imap": "node test-imap.js",
+    "test:imap:matrix": "node test-imap.js",
     "test:errors": "node --test lib/errors.test.js"
   },
   "dependencies": {

@@ -16,6 +16,23 @@ const IMAP_FOLDERS = {
   SENT: '[Gmail]/Sent Mail'
 };
 
+function createRequestId(prefix = 'messages') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function appendDetails(existing, extra = {}) {
+  const base = String(existing || '').trim();
+  const additions = Object.entries(extra)
+    .map(([key, value]) => {
+      if (value == null || value === '') return '';
+      return `${key}=${value}`;
+    })
+    .filter(Boolean)
+    .join('; ');
+
+  return [base, additions].filter(Boolean).join('; ');
+}
+
 function pushDbTrace(trace, level, stage, message, extra = {}) {
   return pushTrace(trace, 'DB', level, stage, message, extra);
 }
@@ -63,7 +80,7 @@ function dedupeById(messages) {
   return [...byId.values()];
 }
 
-async function getUser(userId, trace = []) {
+async function getUser(userId, trace = [], requestId = '') {
   pushDbTrace(trace, 'info', 'db_user_lookup_started', 'Loading connected user from Supabase.');
   const { data, error } = await supabase
     .from('users')
@@ -87,10 +104,15 @@ async function getUser(userId, trace = []) {
   }
 
   pushDbTrace(trace, 'success', 'db_user_lookup_complete', 'Connected user loaded from Supabase.');
+  if (requestId) {
+    pushDbTrace(trace, 'info', 'db_user_lookup_context', 'Connected user lookup context.', {
+      details: `requestId=${requestId}; userId=${userId}`
+    });
+  }
   return data;
 }
 
-async function loadCachedMessages(userId, folders, limit, trace = []) {
+async function loadCachedMessages(userId, folders, limit, trace = [], requestId = '') {
   pushDbTrace(trace, 'info', 'db_cache_read_started', 'Loading cached messages from Supabase.');
   const query = supabase
     .from('messages')
@@ -110,12 +132,12 @@ async function loadCachedMessages(userId, folders, limit, trace = []) {
   }
 
   pushDbTrace(trace, 'success', 'db_cache_read_complete', `Loaded ${(data || []).length} cached messages from Supabase.`, {
-    details: `Folders ${folders.join(', ')}; limit ${limit}.`
+    details: appendDetails(`folders=${folders.join(',')}; limit=${limit}`, { requestId })
   });
   return (data || []).map(mapRowToMessage);
 }
 
-async function loadLatestCacheTimestamp(userId, folders, trace = []) {
+async function loadLatestCacheTimestamp(userId, folders, trace = [], requestId = '') {
   pushDbTrace(trace, 'info', 'db_cache_freshness_started', 'Checking cached message freshness in Supabase.');
   const { data, error } = await supabase
     .from('messages')
@@ -135,12 +157,15 @@ async function loadLatestCacheTimestamp(userId, folders, trace = []) {
   }
 
   pushDbTrace(trace, 'success', 'db_cache_freshness_complete', 'Checked cached message freshness.', {
-    details: data?.cached_at ? `Newest cached row at ${data.cached_at}.` : 'No cached rows were found.'
+    details: appendDetails(
+      data?.cached_at ? `newestCachedAt=${data.cached_at}` : 'newestCachedAt=none',
+      { requestId }
+    )
   });
   return data?.cached_at ? new Date(data.cached_at).getTime() : 0;
 }
 
-async function pruneOldCache(userId, folder, trace = []) {
+async function pruneOldCache(userId, folder, trace = [], requestId = '') {
   const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { error } = await supabase
     .from('messages')
@@ -152,13 +177,13 @@ async function pruneOldCache(userId, folder, trace = []) {
   if (error) {
     pushDbTrace(trace, 'error', 'db_cache_prune_failed', `Could not prune cached ${folder} messages.`, {
       code: 'BACKEND_UNAVAILABLE',
-      details: error.message
+      details: appendDetails(error.message, { requestId, folder, cutoff })
     });
     throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
 }
 
-async function upsertMessages(userId, messages, trace = []) {
+async function upsertMessages(userId, messages, trace = [], requestId = '') {
   if (!messages.length) return;
 
   const byFolder = messages.reduce((acc, message) => {
@@ -168,10 +193,10 @@ async function upsertMessages(userId, messages, trace = []) {
   }, {});
 
   pushDbTrace(trace, 'info', 'db_messages_upsert_started', 'Saving synced messages to Supabase.', {
-    details: `Rows ${messages.length}; folders ${Object.keys(byFolder).join(', ')}.`
+    details: appendDetails(`rows=${messages.length}; folders=${Object.keys(byFolder).join(',')}`, { requestId })
   });
   for (const folder of Object.keys(byFolder)) {
-    await pruneOldCache(userId, folder, trace);
+    await pruneOldCache(userId, folder, trace, requestId);
   }
 
   const rows = messages.map((message) => mapMessageToRow(message, userId));
@@ -184,23 +209,38 @@ async function upsertMessages(userId, messages, trace = []) {
     throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
 
-  pushDbTrace(trace, 'success', 'db_messages_upsert_complete', `Saved ${rows.length} messages to Supabase.`);
+  pushDbTrace(trace, 'success', 'db_messages_upsert_complete', `Saved ${rows.length} messages to Supabase.`, {
+    details: requestId ? `requestId=${requestId}` : undefined
+  });
 }
 
-async function fetchFromImap(user, requestedFolders, limit, trace = []) {
+async function fetchFromImap(user, requestedFolders, limit, trace = [], options = {}) {
   const password = decrypt(user.encrypted_password);
+  const requestId = String(options.requestId || '').trim();
+  const fetchStrategy = String(options.fetchStrategy || (requestedFolders.length > 1 ? 'parallel' : 'single')).trim();
 
-  const tasks = requestedFolders.map(async (folder) => {
+  const taskFactory = (folder) => async () => {
     const imapFolder = IMAP_FOLDERS[folder];
-    const rawMessages = await fetchMessages(user.email, password, imapFolder, limit, trace);
+    const rawMessages = await fetchMessages(user.email, password, imapFolder, limit, trace, {
+      requestId: requestId ? `${requestId}-${folder.toLowerCase()}` : undefined,
+      fetchStrategy
+    });
     return rawMessages.map((message) => normalizeImapMessage(message, folder, user.email));
-  });
+  };
 
-  const results = await Promise.all(tasks);
+  const tasks = requestedFolders.map((folder) => taskFactory(folder));
+  const results = fetchStrategy === 'sequential'
+    ? await tasks.reduce(async (accPromise, task) => {
+      const acc = await accPromise;
+      const next = await task();
+      acc.push(next);
+      return acc;
+    }, Promise.resolve([]))
+    : await Promise.all(tasks.map((task) => task()));
   return sortByDateDesc(dedupeById(results.flat()));
 }
 
-async function updateLastSync(userId, trace = []) {
+async function updateLastSync(userId, trace = [], requestId = '') {
   const now = new Date().toISOString();
   pushDbTrace(trace, 'info', 'db_last_sync_started', 'Updating last sync time in Supabase.');
   const { error } = await supabase.from('users').update({ last_sync: now }).eq('id', userId);
@@ -212,7 +252,7 @@ async function updateLastSync(userId, trace = []) {
     throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
   pushDbTrace(trace, 'success', 'db_last_sync_complete', 'Updated last sync time in Supabase.', {
-    details: now
+    details: appendDetails(now, { requestId })
   });
 }
 
@@ -224,9 +264,12 @@ function buildCounts(messages) {
 
 router.get('/', async (req, res) => {
   const trace = [];
+  const requestId = createRequestId('mailbox');
 
   try {
-    pushTrace(trace, 'API', 'info', 'messages_fetch_received', 'Mailbox load request received.');
+    pushTrace(trace, 'API', 'info', 'messages_fetch_received', 'Mailbox load request received.', {
+      details: `requestId=${requestId}`
+    });
     const userId = String(req.query?.userId || '').trim();
     if (!userId) {
       pushTrace(trace, 'API', 'error', 'messages_fetch_invalid', 'A connected user ID is required to load messages.', {
@@ -241,28 +284,28 @@ router.get('/', async (req, res) => {
     const requestedFolders = getRequestedFolders(folder);
     const fetchLimit = folder === 'all' ? limit * 2 : limit;
     pushTrace(trace, 'API', 'success', 'messages_fetch_valid', 'Mailbox load request validated.', {
-      details: `folder=${folder}; limit=${limit}; forceSync=${forceSync}`
+      details: `requestId=${requestId}; folder=${folder}; limit=${limit}; forceSync=${forceSync}; requestedFolders=${requestedFolders.join(',')}`
     });
 
-    console.log(`[Messages] Fetching for userId ${userId}`);
+    console.log(`[Messages] requestId=${requestId} fetching for userId ${userId}`);
 
-    const user = await getUser(userId, trace);
+    const user = await getUser(userId, trace, requestId);
     pushTrace(trace, 'API', 'success', 'messages_user_loaded', 'Connected user loaded successfully.');
 
     if (!forceSync) {
-      const latestCacheTimestamp = await loadLatestCacheTimestamp(userId, requestedFolders, trace);
+      const latestCacheTimestamp = await loadLatestCacheTimestamp(userId, requestedFolders, trace, requestId);
       const ageMs = latestCacheTimestamp ? Date.now() - latestCacheTimestamp : Number.POSITIVE_INFINITY;
 
       if (ageMs < 5 * 60 * 1000) {
-        const cached = await loadCachedMessages(userId, requestedFolders, fetchLimit, trace);
+        const cached = await loadCachedMessages(userId, requestedFolders, fetchLimit, trace, requestId);
         const sortedCached = sortByDateDesc(cached).slice(0, fetchLimit);
         const counts = buildCounts(sortedCached);
         const ageSec = Math.max(0, Math.floor(ageMs / 1000));
         pushTrace(trace, 'API', 'info', 'messages_cache_hit', `Using cached messages (${sortedCached.length} total).`, {
-          details: `Cache age ${ageSec}s. Inbox ${counts.inboxCount}, Sent ${counts.sentCount}.`
+          details: `requestId=${requestId}; cacheAgeSec=${ageSec}; inbox=${counts.inboxCount}; sent=${counts.sentCount}`
         });
         console.log(
-          `[Messages] Cache hit for userId ${userId} - returning ${sortedCached.length} cached messages (age: ${ageSec}s)`
+          `[Messages] requestId=${requestId} cache hit for userId ${userId} - returning ${sortedCached.length} cached messages (age: ${ageSec}s)`
         );
 
         return res.status(200).json({
@@ -276,20 +319,25 @@ router.get('/', async (req, res) => {
     }
 
     pushTrace(trace, 'API', 'info', 'messages_cache_miss', 'Cache is stale or empty. Fetching from Gmail.');
-    console.log(`[Messages] Cache miss for userId ${userId} - fetching from IMAP`);
-    pushTrace(trace, 'API', 'info', 'messages_imap_fetch_start', 'Starting Gmail mailbox sync.');
-    const fresh = await fetchFromImap(user, requestedFolders, limit, trace);
-    await upsertMessages(userId, fresh, trace);
-    await updateLastSync(userId, trace);
+    console.log(`[Messages] requestId=${requestId} cache miss for userId ${userId} - fetching from IMAP`);
+    pushTrace(trace, 'API', 'info', 'messages_imap_fetch_start', 'Starting Gmail mailbox sync.', {
+      details: `requestId=${requestId}; fetchStrategy=parallel; requestedFolders=${requestedFolders.join(',')}`
+    });
+    const fresh = await fetchFromImap(user, requestedFolders, limit, trace, {
+      requestId,
+      fetchStrategy: 'parallel'
+    });
+    await upsertMessages(userId, fresh, trace, requestId);
+    await updateLastSync(userId, trace, requestId);
 
     const counts = buildCounts(fresh);
     pushTrace(trace, 'API', 'success', 'messages_imap_fetch_complete', `Mailbox sync complete: ${fresh.length} messages loaded.`, {
-      details: `Inbox ${counts.inboxCount}, Sent ${counts.sentCount}.`
+      details: `requestId=${requestId}; inbox=${counts.inboxCount}; sent=${counts.sentCount}`
     });
     console.log(
-      `[Messages] Normalized ${fresh.length} messages (${counts.inboxCount} inbox, ${counts.sentCount} sent)`
+      `[Messages] requestId=${requestId} normalized ${fresh.length} messages (${counts.inboxCount} inbox, ${counts.sentCount} sent)`
     );
-    console.log(`[Messages] Returning ${fresh.length} messages to client`);
+    console.log(`[Messages] requestId=${requestId} returning ${fresh.length} messages to client`);
 
     return res.status(200).json({
       success: true,
@@ -312,9 +360,12 @@ router.get('/', async (req, res) => {
 
 router.get('/search', async (req, res) => {
   const trace = [];
+  const requestId = createRequestId('search');
 
   try {
-    pushTrace(trace, 'API', 'info', 'messages_search_received', 'Search request received.');
+    pushTrace(trace, 'API', 'info', 'messages_search_received', 'Search request received.', {
+      details: `requestId=${requestId}`
+    });
     const userId = String(req.query?.userId || '').trim();
     const query = String(req.query?.query || '').trim();
     const limit = parseLimit(req.query?.limit, 20);
@@ -334,13 +385,15 @@ router.get('/search', async (req, res) => {
     }
 
     pushTrace(trace, 'API', 'success', 'messages_search_valid', 'Search request validated.', {
-      details: `limit=${limit}`
+      details: `requestId=${requestId}; limit=${limit}`
     });
-    const user = await getUser(userId, trace);
+    const user = await getUser(userId, trace, requestId);
     pushTrace(trace, 'API', 'success', 'messages_search_user_loaded', 'Connected user loaded successfully.');
 
     const ilike = `%${query}%`;
-    pushDbTrace(trace, 'info', 'db_search_cache_started', 'Searching cached messages in Supabase.');
+    pushDbTrace(trace, 'info', 'db_search_cache_started', 'Searching cached messages in Supabase.', {
+      details: `requestId=${requestId}; limit=${limit}`
+    });
     const { data: cachedRows, error } = await supabase
       .from('messages')
       .select('*')
@@ -358,7 +411,9 @@ router.get('/search', async (req, res) => {
     }
 
     const cachedMessages = (cachedRows || []).map(mapRowToMessage);
-    pushDbTrace(trace, 'success', 'db_search_cache_complete', `Loaded ${cachedMessages.length} cached search results from Supabase.`);
+    pushDbTrace(trace, 'success', 'db_search_cache_complete', `Loaded ${cachedMessages.length} cached search results from Supabase.`, {
+      details: `requestId=${requestId}`
+    });
     if (cachedMessages.length >= 5) {
       pushTrace(trace, 'API', 'info', 'messages_search_cache_hit', `Search returned ${cachedMessages.length} cached results.`);
       return res.status(200).json({
@@ -371,10 +426,18 @@ router.get('/search', async (req, res) => {
     }
 
     const password = decrypt(user.encrypted_password);
-    pushTrace(trace, 'API', 'info', 'messages_search_live_start', 'Falling back to live Gmail search.');
+    pushTrace(trace, 'API', 'info', 'messages_search_live_start', 'Falling back to live Gmail search.', {
+      details: `requestId=${requestId}; fetchStrategy=parallel`
+    });
     const [inboxLive, sentLive] = await Promise.all([
-      searchMessages(user.email, password, IMAP_FOLDERS.INBOX, query, limit, trace),
-      searchMessages(user.email, password, IMAP_FOLDERS.SENT, query, limit, trace)
+      searchMessages(user.email, password, IMAP_FOLDERS.INBOX, query, limit, trace, {
+        requestId: `${requestId}-inbox`,
+        fetchStrategy: 'parallel'
+      }),
+      searchMessages(user.email, password, IMAP_FOLDERS.SENT, query, limit, trace, {
+        requestId: `${requestId}-sent`,
+        fetchStrategy: 'parallel'
+      })
     ]);
 
     const live = [
@@ -384,7 +447,7 @@ router.get('/search', async (req, res) => {
 
     const merged = sortByDateDesc(dedupeById([...cachedMessages, ...live])).slice(0, limit);
     pushTrace(trace, 'API', 'success', 'messages_search_complete', `Search completed with ${merged.length} results.`, {
-      details: `Source=mixed; cache=${cachedMessages.length}; live=${live.length}.`
+      details: `requestId=${requestId}; source=mixed; cache=${cachedMessages.length}; live=${live.length}`
     });
 
     return res.status(200).json({
@@ -408,9 +471,12 @@ router.get('/search', async (req, res) => {
 
 router.post('/sync', async (req, res) => {
   const trace = [];
+  const requestId = createRequestId('sync');
 
   try {
-    pushTrace(trace, 'API', 'info', 'messages_sync_received', 'Manual sync request received.');
+    pushTrace(trace, 'API', 'info', 'messages_sync_received', 'Manual sync request received.', {
+      details: `requestId=${requestId}`
+    });
     const userId = String(req.body?.userId || '').trim();
     if (!userId) {
       pushTrace(trace, 'API', 'error', 'messages_sync_invalid', 'A connected user ID is required to sync.', {
@@ -419,19 +485,24 @@ router.post('/sync', async (req, res) => {
       throw new AppError('NOT_CONNECTED', 'userId is required.', 400, { trace });
     }
 
-    console.log(`[Messages] Force-sync requested for userId ${userId}`);
+    console.log(`[Messages] requestId=${requestId} force-sync requested for userId ${userId}`);
 
-    const user = await getUser(userId, trace);
+    const user = await getUser(userId, trace, requestId);
     pushTrace(trace, 'API', 'success', 'messages_sync_user_loaded', 'Connected user loaded successfully.');
-    pushTrace(trace, 'API', 'info', 'messages_sync_imap_start', 'Starting manual Gmail sync.');
-    const fresh = await fetchFromImap(user, ['INBOX', 'SENT'], 100, trace);
-    await upsertMessages(userId, fresh, trace);
-    await updateLastSync(userId, trace);
+    pushTrace(trace, 'API', 'info', 'messages_sync_imap_start', 'Starting manual Gmail sync.', {
+      details: `requestId=${requestId}; fetchStrategy=parallel`
+    });
+    const fresh = await fetchFromImap(user, ['INBOX', 'SENT'], 100, trace, {
+      requestId,
+      fetchStrategy: 'parallel'
+    });
+    await upsertMessages(userId, fresh, trace, requestId);
+    await updateLastSync(userId, trace, requestId);
 
-    console.log(`[Messages] Force-sync completed - synced ${fresh.length} messages`);
+    console.log(`[Messages] requestId=${requestId} force-sync completed - synced ${fresh.length} messages`);
     const counts = buildCounts(fresh);
     pushTrace(trace, 'API', 'success', 'messages_sync_complete', `Manual sync completed: ${fresh.length} messages.`, {
-      details: `Inbox ${counts.inboxCount}, Sent ${counts.sentCount}.`
+      details: `requestId=${requestId}; inbox=${counts.inboxCount}; sent=${counts.sentCount}`
     });
 
     return res.status(200).json({
