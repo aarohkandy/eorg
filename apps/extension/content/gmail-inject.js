@@ -286,25 +286,33 @@ function renderActivityPanel() {
   }
 
   log.innerHTML = entries.map((entry) => {
-    const header = `
-      <span class="gmail-unified-activity-time">${escapeHtml(formatActivityTime(entry.ts))}</span>
-      <span class="gmail-unified-activity-source">${escapeHtml(entry.source)}</span>
-      <span class="gmail-unified-activity-message">${escapeHtml(entry.message)}</span>
-      ${entry.code ? `<span class="gmail-unified-activity-code">${escapeHtml(entry.code)}</span>` : ''}
+    const detailText = entry.details && entry.details !== entry.message ? entry.details : '';
+    const row = `
+      <div class="gmail-unified-activity-row">
+        <span class="gmail-unified-activity-time">${escapeHtml(formatActivityTime(entry.ts))}</span>
+        <span class="gmail-unified-activity-source">${escapeHtml(entry.source)}</span>
+        <span class="gmail-unified-activity-main">
+          <span class="gmail-unified-activity-message">${escapeHtml(entry.message)}</span>
+          ${entry.level === 'error' && detailText
+            ? `<span class="gmail-unified-activity-inline-detail">${escapeHtml(detailText)}</span>`
+            : ''}
+        </span>
+        ${entry.code ? `<span class="gmail-unified-activity-code">${escapeHtml(entry.code)}</span>` : ''}
+      </div>
     `;
 
-    if (entry.details || entry.level === 'error') {
+    if (detailText && entry.level !== 'error') {
       return `
         <details class="gmail-unified-activity-item is-${escapeHtml(entry.level)}">
-          <summary>${header}</summary>
-          <pre class="gmail-unified-activity-details">${escapeHtml(entry.details || 'No additional details.')}</pre>
+          <summary>${row}</summary>
+          <div class="gmail-unified-activity-details">${escapeHtml(detailText)}</div>
         </details>
       `;
     }
 
     return `
       <div class="gmail-unified-activity-item is-${escapeHtml(entry.level)}">
-        ${header}
+        ${row}
       </div>
     `;
   }).join('');
@@ -537,6 +545,16 @@ async function loadMessages(options = {}) {
   clearRetryTimer();
   state.messages = Array.isArray(response.messages) ? response.messages : [];
   renderThreads();
+  if (options.trackActivity) {
+    appendUiActivity({
+      source: 'UI',
+      level: 'success',
+      stage: 'mailbox_rendered',
+      message: `Mailbox view rendered with ${response.count || state.messages.length || 0} messages.`,
+      details: `Inbox ${response.inboxCount || 0}, Sent ${response.sentCount || 0}.`,
+      replaceKey: 'ui-mailbox-rendered'
+    }).catch(() => {});
+  }
 }
 
 function setFilter(filter) {
@@ -776,6 +794,12 @@ function bindGuideEvents(sidebar) {
   sidebar.querySelector('#gmailUnifiedGuideBtn')?.addEventListener('click', () => {
     if (!state.connected) return;
     state.guideReviewOpen = true;
+    appendUiActivity({
+      source: 'UI',
+      level: 'info',
+      stage: 'guide_opened',
+      message: 'Guided setup activity log reopened.'
+    }).catch(() => {});
     applyGmailLayoutMode();
   });
 
@@ -986,10 +1010,7 @@ function buildSidebar() {
 
         <section class="gmail-unified-activity-panel">
           <div class="gmail-unified-activity-header">
-            <div>
-              <div class="gmail-unified-activity-kicker">Activity</div>
-              <div class="gmail-unified-activity-copy">Important updates from the UI, extension, backend, and Gmail.</div>
-            </div>
+            <div class="gmail-unified-activity-kicker">Activity</div>
           </div>
           <div id="gmailUnifiedActivityLog" class="gmail-unified-activity-log"></div>
         </section>

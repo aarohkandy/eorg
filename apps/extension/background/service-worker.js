@@ -6,6 +6,19 @@ const COLD_START_MESSAGE =
   'Backend server is starting up, please wait 60 seconds and try again.';
 const SETUP_DIAGNOSTICS_KEY = 'setupDiagnostics';
 const MAX_SETUP_DIAGNOSTIC_ENTRIES = 10;
+const WRAPPER_FAILURE_STAGES = new Set([
+  'auth_request_failed',
+  'auth_disconnect_failed',
+  'connect_failed',
+  'disconnect_failed',
+  'messages_fetch_failed',
+  'messages_search_failed',
+  'messages_sync_failed',
+  'messages_failed',
+  'search_failed',
+  'sync_failed',
+  'health_check_failed'
+]);
 
 const GUIDE_STEPS = ['welcome', 'connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -111,6 +124,45 @@ function normalizeTraceEntries(entries) {
     : [];
 }
 
+function createDiagnosticSignature(entry) {
+  return [
+    entry.source,
+    entry.level,
+    entry.stage,
+    entry.message,
+    entry.code || '',
+    entry.details || '',
+    entry.replaceKey || ''
+  ].join('|');
+}
+
+function hasSpecificDiagnosticFailure(entries) {
+  return entries.some((entry) =>
+    entry &&
+    entry.level === 'error' &&
+    (entry.source === 'DB' || entry.source === 'IMAP')
+  );
+}
+
+function compressTraceEntries(entries) {
+  const normalized = normalizeTraceEntries(entries);
+  const filtered = hasSpecificDiagnosticFailure(normalized)
+    ? normalized.filter((entry) => !(entry.level === 'error' && WRAPPER_FAILURE_STAGES.has(entry.stage)))
+    : normalized;
+
+  const merged = [];
+  const seen = new Set();
+
+  for (const entry of filtered) {
+    const signature = createDiagnosticSignature(entry);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    merged.push(entry);
+  }
+
+  return merged;
+}
+
 function defaultSetupDiagnostics() {
   return {
     runId: createDiagnosticId(),
@@ -126,7 +178,7 @@ function normalizeSetupDiagnostics(input) {
   return {
     runId: typeof src.runId === 'string' && src.runId ? src.runId : fallback.runId,
     updatedAt: typeof src.updatedAt === 'string' && src.updatedAt ? src.updatedAt : fallback.updatedAt,
-    entries: normalizeTraceEntries(src.entries).slice(-MAX_SETUP_DIAGNOSTIC_ENTRIES)
+    entries: compressTraceEntries(src.entries).slice(-MAX_SETUP_DIAGNOSTIC_ENTRIES)
   };
 }
 
@@ -165,7 +217,7 @@ async function mutateSetupDiagnostics(mutator) {
 }
 
 async function appendSetupDiagnostics(entries, options = {}) {
-  const incoming = normalizeTraceEntries(Array.isArray(entries) ? entries : [entries]);
+  const incoming = compressTraceEntries(Array.isArray(entries) ? entries : [entries]);
 
   if (!incoming.length && !options.reset) {
     return readSetupDiagnostics();
@@ -758,7 +810,7 @@ async function handleGuideAction(action, payload = {}) {
 }
 
 function mergeTraceLists(...groups) {
-  return normalizeTraceEntries(groups.flat());
+  return compressTraceEntries(groups.flat());
 }
 
 function shouldTrackActivity(payload) {
@@ -794,6 +846,17 @@ async function handleBackendAction(message) {
     });
 
     const backendTrace = normalizeTraceEntries(response.trace);
+    const responseTrace = buildDiagnosticEntry(
+      'EXT',
+      response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'info'),
+      'backend_response_received',
+      'Backend replied to the connection request.',
+      {
+        code: response.success ? undefined : response.code,
+        details: response.success ? 'Connection was verified successfully.' : response.error,
+        replaceKey: response.code === 'BACKEND_COLD_START' ? 'connect-cold-start' : undefined
+      }
+    );
 
     if (response.success) {
       await chrome.storage.local.set({
@@ -804,10 +867,10 @@ async function handleBackendAction(message) {
       });
       await persistGuideState(buildConnectedGuideState());
       const extTrace = [
-        buildDiagnosticEntry('EXT', 'success', 'backend_response', 'Backend verified the Gmail connection.'),
+        responseTrace,
         buildDiagnosticEntry('EXT', 'success', 'local_auth_updated', 'Connected account saved in the extension.')
       ];
-      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
       return {
         ...response,
         trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -815,21 +878,26 @@ async function handleBackendAction(message) {
     }
 
     const extTrace = [
-      buildDiagnosticEntry(
-        'EXT',
-        response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
-        response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'connect_failed',
+      responseTrace,
+      ...(
+        hasSpecificDiagnosticFailure(backendTrace)
+          ? []
+          : [buildDiagnosticEntry(
+          'EXT',
+          response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
+          response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'connect_failed',
         response.code === 'BACKEND_COLD_START'
           ? 'Backend is waking up. Retry in about 60 seconds.'
           : 'Connection failed before Gmail Unified finished setup.',
-        {
-          code: response.code,
-          details: response.error,
-          replaceKey: response.code === 'BACKEND_COLD_START' ? 'connect-cold-start' : undefined
-        }
+          {
+            code: response.code,
+            details: response.error,
+            replaceKey: response.code === 'BACKEND_COLD_START' ? 'connect-cold-start' : undefined
+          }
+        )]
       )
     ];
-    await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+    await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
     return {
       ...response,
       trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -868,12 +936,20 @@ async function handleBackendAction(message) {
 
     const backendTrace = normalizeTraceEntries(response.trace);
     const extTrace = [
-      buildDiagnosticEntry('EXT', 'error', 'disconnect_failed', 'Disconnect failed in the extension.', {
+      buildDiagnosticEntry('EXT', 'info', 'backend_response_received', 'Backend replied to the disconnect request.', {
         code: response.code,
         details: response.error
-      })
+      }),
+      ...(
+        hasSpecificDiagnosticFailure(backendTrace)
+          ? []
+          : [buildDiagnosticEntry('EXT', 'error', 'disconnect_failed', 'Disconnect failed in the extension.', {
+            code: response.code,
+            details: response.error
+          })]
+      )
     ];
-    await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+    await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
     return {
       ...response,
       trace: mergeTraceLists(backendTrace, extTrace)
@@ -921,11 +997,14 @@ async function handleBackendAction(message) {
       if (trackActivity) {
         const backendTrace = normalizeTraceEntries(response.trace);
         const extTrace = [
+          buildDiagnosticEntry('EXT', 'success', 'backend_response_received', 'Backend replied to the mailbox request.', {
+            details: `Loaded ${response.count || 0} messages.`
+          }),
           buildDiagnosticEntry('EXT', 'success', 'messages_loaded', `Mailbox load complete: ${response.count || 0} messages.`, {
             details: `Inbox ${response.inboxCount || 0}, Sent ${response.sentCount || 0}.`
           })
         ];
-        await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+        await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
         return {
           ...response,
           trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -938,6 +1017,20 @@ async function handleBackendAction(message) {
       const extTrace = [
         buildDiagnosticEntry(
           'EXT',
+          response.code === 'BACKEND_COLD_START' ? 'warning' : 'info',
+          'backend_response_received',
+          'Backend replied to the mailbox request.',
+          {
+            code: response.code,
+            details: response.error,
+            replaceKey: response.code === 'BACKEND_COLD_START' ? 'fetch-cold-start' : undefined
+          }
+        ),
+        ...(
+          hasSpecificDiagnosticFailure(backendTrace)
+            ? []
+            : [buildDiagnosticEntry(
+          'EXT',
           response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
           response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'messages_failed',
           response.code === 'BACKEND_COLD_START'
@@ -948,9 +1041,10 @@ async function handleBackendAction(message) {
             details: response.error,
             replaceKey: response.code === 'BACKEND_COLD_START' ? 'fetch-cold-start' : undefined
           }
+        )]
         )
       ];
-      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
       return {
         ...response,
         trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -1000,21 +1094,36 @@ async function handleBackendAction(message) {
       const extTrace = [
         buildDiagnosticEntry(
           'EXT',
-          response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'error'),
-          response.success ? 'search_complete' : (response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'search_failed'),
-          response.success
-            ? `Search complete: ${response.count || 0} results.`
-            : (response.code === 'BACKEND_COLD_START'
-              ? 'Backend is waking up before search can continue.'
-              : 'Search failed in the extension.'),
+          response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'info'),
+          'backend_response_received',
+          'Backend replied to the search request.',
           {
             code: response.success ? undefined : response.code,
-            details: response.success ? `Source ${response.source || 'unknown'}.` : response.error,
+            details: response.success ? `Returned ${response.count || 0} results.` : response.error,
             replaceKey: response.code === 'BACKEND_COLD_START' ? 'search-cold-start' : undefined
           }
+        ),
+        ...(
+          response.success || !hasSpecificDiagnosticFailure(backendTrace)
+            ? [buildDiagnosticEntry(
+              'EXT',
+              response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'error'),
+              response.success ? 'search_complete' : (response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'search_failed'),
+              response.success
+                ? `Search complete: ${response.count || 0} results.`
+                : (response.code === 'BACKEND_COLD_START'
+                  ? 'Backend is waking up before search can continue.'
+                  : 'Search failed in the extension.'),
+              {
+                code: response.success ? undefined : response.code,
+                details: response.success ? `Source ${response.source || 'unknown'}.` : response.error,
+                replaceKey: response.code === 'BACKEND_COLD_START' ? 'search-cold-start' : undefined
+              }
+            )]
+            : []
         )
       ];
-      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
       return {
         ...response,
         trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -1062,11 +1171,14 @@ async function handleBackendAction(message) {
       if (trackActivity) {
         const backendTrace = normalizeTraceEntries(response.trace);
         const extTrace = [
+          buildDiagnosticEntry('EXT', 'success', 'backend_response_received', 'Backend replied to the sync request.', {
+            details: `Synced ${response.synced || 0} messages.`
+          }),
           buildDiagnosticEntry('EXT', 'success', 'sync_complete', `Manual sync complete: ${response.synced || 0} messages.`, {
             details: 'Mailbox cache updated successfully.'
           })
         ];
-        await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+        await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
         return {
           ...response,
           trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -1079,6 +1191,20 @@ async function handleBackendAction(message) {
       const extTrace = [
         buildDiagnosticEntry(
           'EXT',
+          response.code === 'BACKEND_COLD_START' ? 'warning' : 'info',
+          'backend_response_received',
+          'Backend replied to the sync request.',
+          {
+            code: response.code,
+            details: response.error,
+            replaceKey: response.code === 'BACKEND_COLD_START' ? 'sync-cold-start' : undefined
+          }
+        ),
+        ...(
+          hasSpecificDiagnosticFailure(backendTrace)
+            ? []
+            : [buildDiagnosticEntry(
+          'EXT',
           response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
           response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'sync_failed',
           response.code === 'BACKEND_COLD_START'
@@ -1089,9 +1215,10 @@ async function handleBackendAction(message) {
             details: response.error,
             replaceKey: response.code === 'BACKEND_COLD_START' ? 'sync-cold-start' : undefined
           }
+        )]
         )
       ];
-      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
       return {
         ...response,
         trace: mergeTraceLists(startTrace, backendTrace, extTrace)
