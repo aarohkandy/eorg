@@ -737,6 +737,141 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   color: #ffffff;
 }
 
+.gmail-unified-activity-panel {
+  margin-top: 14px;
+  border: 1px solid #2f2f2f;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 12px;
+}
+
+.gmail-unified-activity-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gmail-unified-activity-kicker {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gmail-unified-activity-copy {
+  margin-top: 4px;
+  color: #9e9e9e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.gmail-unified-activity-log {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.gmail-unified-activity-empty {
+  border: 1px dashed #3f3f3f;
+  border-radius: 12px;
+  padding: 12px;
+  color: #8f8f8f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.gmail-unified-activity-item {
+  border: 1px solid #333333;
+  border-radius: 12px;
+  background: #131313;
+  padding: 10px 12px;
+  color: #ebebeb;
+}
+
+.gmail-unified-activity-item summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.gmail-unified-activity-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.gmail-unified-activity-item.is-info {
+  border-color: #323232;
+}
+
+.gmail-unified-activity-item.is-success {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.gmail-unified-activity-item.is-warning {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: #161616;
+}
+
+.gmail-unified-activity-item.is-error {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: #181818;
+}
+
+.gmail-unified-activity-time {
+  display: inline-block;
+  min-width: 74px;
+  color: #9a9a9a;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.gmail-unified-activity-source {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  margin-right: 8px;
+  border: 1px solid #474747;
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #f3f3f3;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gmail-unified-activity-message {
+  color: #efefef;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.gmail-unified-activity-code {
+  display: inline-flex;
+  margin-left: 8px;
+  border-radius: 999px;
+  background: #242424;
+  padding: 2px 8px;
+  color: #cfcfcf;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.gmail-unified-activity-details {
+  margin: 10px 0 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: #0f0f0f;
+  color: #bbbbbb;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 #gmailUnifiedSidebar.gmail-unified-unlocking {
   animation: gmailUnifiedUnlock 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }

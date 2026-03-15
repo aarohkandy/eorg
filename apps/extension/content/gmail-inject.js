@@ -34,6 +34,7 @@ const state = {
   autoRefreshTimer: null,
   connected: false,
   guideState: null,
+  setupDiagnostics: { entries: [] },
   guideReviewOpen: false,
   connectInFlight: false
 };
@@ -48,6 +49,69 @@ function sendWorker(action, payload = {}) {
 
 function openExternalPage(url) {
   window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function createDiagnosticId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeDiagnosticDetails(details) {
+  if (details == null) return undefined;
+  if (typeof details === 'string') {
+    const value = details.trim();
+    return value || undefined;
+  }
+
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return String(details);
+  }
+}
+
+function normalizeDiagnosticEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+
+  const source = String(entry.source || '').trim().toUpperCase();
+  const level = String(entry.level || '').trim().toLowerCase();
+  const stage = String(entry.stage || '').trim();
+  const message = String(entry.message || '').trim();
+
+  if (!source || !level || !stage || !message) return null;
+
+  return {
+    id: typeof entry.id === 'string' && entry.id ? entry.id : createDiagnosticId(),
+    ts: typeof entry.ts === 'string' && entry.ts ? entry.ts : new Date().toISOString(),
+    source,
+    level,
+    stage,
+    message,
+    code: typeof entry.code === 'string' && entry.code ? entry.code : undefined,
+    details: normalizeDiagnosticDetails(entry.details)
+  };
+}
+
+function normalizeSetupDiagnostics(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const entries = Array.isArray(src.entries)
+    ? src.entries.map((entry) => normalizeDiagnosticEntry(entry)).filter(Boolean)
+    : [];
+
+  return {
+    entries
+  };
+}
+
+async function appendUiActivity(entry, options = {}) {
+  try {
+    const payload = {
+      reset: Boolean(options.reset),
+      entry
+    };
+    await sendWorker('DIAGNOSTICS_LOG', payload);
+  } catch {
+    // Ignore diagnostics failures in the UI path.
+  }
 }
 
 function defaultGuideState() {
@@ -195,6 +259,55 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function formatActivityTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--:--';
+  return date.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
+function renderActivityPanel() {
+  const log = document.getElementById('gmailUnifiedActivityLog');
+  if (!log) return;
+
+  const entries = [...normalizeSetupDiagnostics(state.setupDiagnostics).entries].reverse();
+  if (!entries.length) {
+    log.innerHTML = `
+      <div class="gmail-unified-activity-empty">
+        Activity from the UI, extension, backend, and Gmail will appear here.
+      </div>
+    `;
+    return;
+  }
+
+  log.innerHTML = entries.map((entry) => {
+    const header = `
+      <span class="gmail-unified-activity-time">${escapeHtml(formatActivityTime(entry.ts))}</span>
+      <span class="gmail-unified-activity-source">${escapeHtml(entry.source)}</span>
+      <span class="gmail-unified-activity-message">${escapeHtml(entry.message)}</span>
+      ${entry.code ? `<span class="gmail-unified-activity-code">${escapeHtml(entry.code)}</span>` : ''}
+    `;
+
+    if (entry.details || entry.level === 'error') {
+      return `
+        <details class="gmail-unified-activity-item is-${escapeHtml(entry.level)}">
+          <summary>${header}</summary>
+          <pre class="gmail-unified-activity-details">${escapeHtml(entry.details || 'No additional details.')}</pre>
+        </details>
+      `;
+    }
+
+    return `
+      <div class="gmail-unified-activity-item is-${escapeHtml(entry.level)}">
+        ${header}
+      </div>
+    `;
+  }).join('');
 }
 
 function byDateDesc(a, b) {
@@ -365,10 +478,18 @@ function clearRetryTimer() {
   state.retrySeconds = 0;
 }
 
-function startColdStartCountdown(onDone) {
+function startColdStartCountdown(onDone, options = {}) {
   clearRetryTimer();
   state.retrySeconds = 60;
   setStateCard('cold-start', COLD_START_MESSAGE, true);
+  appendUiActivity({
+    source: 'UI',
+    level: 'warning',
+    stage: 'retry_scheduled',
+    message: options.message || 'Automatic retry scheduled while the backend wakes up.',
+    details: 'Retrying in about 60 seconds.',
+    replaceKey: 'ui-retry-scheduled'
+  }).catch(() => {});
 
   state.retryTimer = setInterval(() => {
     state.retrySeconds -= 1;
@@ -387,7 +508,8 @@ async function loadMessages(options = {}) {
   const response = await sendWorker('FETCH_MESSAGES', {
     folder: options.folder || 'all',
     limit: 50,
-    forceSync: Boolean(options.forceSync)
+    forceSync: Boolean(options.forceSync),
+    trackActivity: Boolean(options.trackActivity)
   });
 
   if (!response?.success) {
@@ -402,7 +524,9 @@ async function loadMessages(options = {}) {
     }
 
     if (response.code === 'BACKEND_COLD_START') {
-      startColdStartCountdown(() => loadMessages(options));
+      startColdStartCountdown(() => loadMessages(options), {
+        message: 'Mailbox load is waiting for the backend to wake up.'
+      });
       return;
     }
 
@@ -439,11 +563,17 @@ async function handleSearch(query) {
   }
 
   setStateCard('loading', 'Searching messages...');
-  const response = await sendWorker('SEARCH_MESSAGES', { query: trimmed, limit: 20 });
+  const response = await sendWorker('SEARCH_MESSAGES', {
+    query: trimmed,
+    limit: 20,
+    trackActivity: !state.connected || state.guideReviewOpen
+  });
 
   if (!response?.success) {
     if (response.code === 'BACKEND_COLD_START') {
-      startColdStartCountdown(() => handleSearch(trimmed));
+      startColdStartCountdown(() => handleSearch(trimmed), {
+        message: 'Search is waiting for the backend to wake up.'
+      });
       return;
     }
 
@@ -497,6 +627,8 @@ function updateGuideProgressUI() {
   if (contextChip) {
     contextChip.textContent = `Current page: ${friendlyContextLabel(guide.currentContext || currentPageContext())}`;
   }
+
+  renderActivityPanel();
 }
 
 async function refreshGuideAndAuthState() {
@@ -504,6 +636,7 @@ async function refreshGuideAndAuthState() {
 
   state.connected = Boolean(storage?.success && storage.userId);
   state.guideState = normalizeGuideState(guide?.success ? guide.guideState : state.guideState);
+  state.setupDiagnostics = normalizeSetupDiagnostics(storage?.setupDiagnostics);
 
   return { storage, guide: state.guideState };
 }
@@ -573,6 +706,12 @@ async function connectFromGuide() {
   const appPassword = String(passInput?.value || '').trim().replace(/\s+/g, '');
 
   if (!email || !appPassword) {
+    await appendUiActivity({
+      source: 'UI',
+      level: 'warning',
+      stage: 'connect_input_missing',
+      message: 'Both Gmail address and App Password are required before connecting.'
+    });
     setConnectUiState('Enter your Gmail address and app password to continue.', true);
     return;
   }
@@ -583,6 +722,12 @@ async function connectFromGuide() {
     connectBtn.textContent = 'Connecting...';
   }
   setConnectUiState('Connecting...');
+  await appendUiActivity({
+    source: 'UI',
+    level: 'info',
+    stage: 'connect_button_clicked',
+    message: 'Connect button clicked. Starting setup.'
+  }, { reset: true });
 
   try {
     const response = await sendWorker('CONNECT', { email, appPassword });
@@ -612,7 +757,7 @@ async function connectFromGuide() {
       await refreshGuideAndAuthState();
       state.guideReviewOpen = false;
       applyGmailLayoutMode();
-      await loadMessages({ forceSync: false });
+      await loadMessages({ forceSync: false, trackActivity: true });
       startAutoRefresh();
     }, 600);
   } finally {
@@ -640,12 +785,24 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedWelcomeStartBtn')?.addEventListener('click', async () => {
+    appendUiActivity({
+      source: 'UI',
+      level: 'info',
+      stage: 'open_app_passwords',
+      message: 'Opened Google App Passwords.'
+    }).catch(() => {});
     openExternalPage(APP_PASSWORDS_URL);
     await guideConfirm('welcome');
     applyGmailLayoutMode();
   });
 
   sidebar.querySelector('#gmailUnifiedWelcomeTwoFactorBtn')?.addEventListener('click', () => {
+    appendUiActivity({
+      source: 'UI',
+      level: 'info',
+      stage: 'open_two_factor',
+      message: 'Opened Google 2-Step Verification.'
+    }).catch(() => {});
     openExternalPage(TWO_STEP_VERIFICATION_URL);
   });
 
@@ -654,10 +811,22 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedConnectOpenAppBtn')?.addEventListener('click', () => {
+    appendUiActivity({
+      source: 'UI',
+      level: 'info',
+      stage: 'open_app_passwords',
+      message: 'Opened Google App Passwords from Step 2.'
+    }).catch(() => {});
     openExternalPage(APP_PASSWORDS_URL);
   });
 
   sidebar.querySelector('#gmailUnifiedConnectOpenTwoFactorBtn')?.addEventListener('click', () => {
+    appendUiActivity({
+      source: 'UI',
+      level: 'info',
+      stage: 'open_two_factor',
+      message: 'Opened Google 2-Step Verification from Step 2.'
+    }).catch(() => {});
     openExternalPage(TWO_STEP_VERIFICATION_URL);
   });
 
@@ -671,10 +840,14 @@ function bindGuideEvents(sidebar) {
   sidebar.querySelector('#gmailUnifiedSync')?.addEventListener('click', async () => {
     if (!state.connected) return;
 
-    const result = await sendWorker('SYNC_MESSAGES');
+    const result = await sendWorker('SYNC_MESSAGES', {
+      trackActivity: state.guideReviewOpen
+    });
     if (!result?.success) {
       if (result.code === 'BACKEND_COLD_START') {
-        startColdStartCountdown(() => loadMessages({ forceSync: true }));
+        startColdStartCountdown(() => loadMessages({ forceSync: true, trackActivity: state.guideReviewOpen }), {
+          message: 'Manual sync is waiting for the backend to wake up.'
+        });
         return;
       }
 
@@ -682,7 +855,7 @@ function bindGuideEvents(sidebar) {
       return;
     }
 
-    await loadMessages({ forceSync: true });
+    await loadMessages({ forceSync: true, trackActivity: state.guideReviewOpen });
   });
 
   sidebar.querySelectorAll('.gmail-unified-filter-btn').forEach((button) => {
@@ -699,7 +872,7 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedRetryBtn')?.addEventListener('click', () => {
-    loadMessages({ forceSync: false });
+    loadMessages({ forceSync: false, trackActivity: true });
   });
 
   sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
@@ -810,6 +983,16 @@ function buildSidebar() {
           </div>
           <div id="gmailUnifiedConnectStatus" class="gmail-unified-connect-status"></div>
         </article>
+
+        <section class="gmail-unified-activity-panel">
+          <div class="gmail-unified-activity-header">
+            <div>
+              <div class="gmail-unified-activity-kicker">Activity</div>
+              <div class="gmail-unified-activity-copy">Important updates from the UI, extension, backend, and Gmail.</div>
+            </div>
+          </div>
+          <div id="gmailUnifiedActivityLog" class="gmail-unified-activity-log"></div>
+        </section>
       </div>
     </section>
   `;
@@ -855,6 +1038,10 @@ async function bootGmailSurface() {
           }
         })
         .catch(() => {});
+    }
+    if (changes.setupDiagnostics) {
+      state.setupDiagnostics = normalizeSetupDiagnostics(changes.setupDiagnostics.newValue);
+      renderActivityPanel();
     }
   });
 }

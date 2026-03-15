@@ -4,6 +4,8 @@ const BACKEND_URL = 'https://email-bcknd.onrender.com';
 const FETCH_TIMEOUT_MS = 12000;
 const COLD_START_MESSAGE =
   'Backend server is starting up, please wait 60 seconds and try again.';
+const SETUP_DIAGNOSTICS_KEY = 'setupDiagnostics';
+const MAX_SETUP_DIAGNOSTIC_ENTRIES = 10;
 
 const GUIDE_STEPS = ['welcome', 'connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -24,12 +26,15 @@ const GUIDE_ACTIONS = new Set([
   'SEARCH_MESSAGES',
   'SYNC_MESSAGES',
   'HEALTH_CHECK',
+  'DIAGNOSTICS_LOG',
   'GET_STORAGE',
   'GUIDE_GET_STATE',
   'GUIDE_NAVIGATE_TO_STEP',
   'GUIDE_CONFIRM_STEP',
   'GUIDE_RESET'
 ]);
+
+let diagnosticsWriteChain = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -56,6 +61,156 @@ function defaultGuideEvidence() {
       source: null
     }
   };
+}
+
+function createDiagnosticId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeDiagnosticDetails(details) {
+  if (details == null) return undefined;
+
+  if (typeof details === 'string') {
+    const value = details.trim();
+    return value || undefined;
+  }
+
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return String(details);
+  }
+}
+
+function normalizeDiagnosticEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+
+  const source = String(entry.source || '').trim().toUpperCase();
+  const level = String(entry.level || '').trim().toLowerCase();
+  const stage = String(entry.stage || '').trim();
+  const message = String(entry.message || '').trim();
+
+  if (!source || !level || !stage || !message) return null;
+
+  return {
+    id: typeof entry.id === 'string' && entry.id ? entry.id : createDiagnosticId(),
+    ts: typeof entry.ts === 'string' && entry.ts ? entry.ts : nowIso(),
+    source,
+    level,
+    stage,
+    message,
+    code: typeof entry.code === 'string' && entry.code ? entry.code : undefined,
+    details: normalizeDiagnosticDetails(entry.details),
+    replaceKey: typeof entry.replaceKey === 'string' && entry.replaceKey ? entry.replaceKey : undefined
+  };
+}
+
+function normalizeTraceEntries(entries) {
+  return Array.isArray(entries)
+    ? entries.map((entry) => normalizeDiagnosticEntry(entry)).filter(Boolean)
+    : [];
+}
+
+function defaultSetupDiagnostics() {
+  return {
+    runId: createDiagnosticId(),
+    updatedAt: nowIso(),
+    entries: []
+  };
+}
+
+function normalizeSetupDiagnostics(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const fallback = defaultSetupDiagnostics();
+
+  return {
+    runId: typeof src.runId === 'string' && src.runId ? src.runId : fallback.runId,
+    updatedAt: typeof src.updatedAt === 'string' && src.updatedAt ? src.updatedAt : fallback.updatedAt,
+    entries: normalizeTraceEntries(src.entries).slice(-MAX_SETUP_DIAGNOSTIC_ENTRIES)
+  };
+}
+
+function buildDiagnosticEntry(source, level, stage, message, extra = {}) {
+  return normalizeDiagnosticEntry({
+    source,
+    level,
+    stage,
+    message,
+    code: extra.code,
+    details: extra.details,
+    replaceKey: extra.replaceKey
+  });
+}
+
+async function readSetupDiagnostics() {
+  const stored = await chrome.storage.local.get([SETUP_DIAGNOSTICS_KEY]);
+  return normalizeSetupDiagnostics(stored[SETUP_DIAGNOSTICS_KEY]);
+}
+
+async function persistSetupDiagnostics(nextState) {
+  const normalized = normalizeSetupDiagnostics(nextState);
+  await chrome.storage.local.set({ [SETUP_DIAGNOSTICS_KEY]: normalized });
+  return normalized;
+}
+
+async function mutateSetupDiagnostics(mutator) {
+  const task = async () => {
+    const current = await readSetupDiagnostics();
+    const next = await mutator(current);
+    return persistSetupDiagnostics(next);
+  };
+
+  diagnosticsWriteChain = diagnosticsWriteChain.then(task, task);
+  return diagnosticsWriteChain;
+}
+
+async function appendSetupDiagnostics(entries, options = {}) {
+  const incoming = normalizeTraceEntries(Array.isArray(entries) ? entries : [entries]);
+
+  if (!incoming.length && !options.reset) {
+    return readSetupDiagnostics();
+  }
+
+  return mutateSetupDiagnostics((current) => {
+    const base = options.reset
+      ? {
+        runId: createDiagnosticId(),
+        updatedAt: nowIso(),
+        entries: []
+      }
+      : normalizeSetupDiagnostics(current);
+
+    let merged = [...base.entries];
+
+    for (const entry of incoming) {
+      if (entry.replaceKey) {
+        const existingIndex = merged.findIndex((item) => item.replaceKey === entry.replaceKey);
+        if (existingIndex >= 0) {
+          merged[existingIndex] = {
+            ...merged[existingIndex],
+            ...entry,
+            id: merged[existingIndex].id
+          };
+          continue;
+        }
+      }
+
+      merged.push(entry);
+      if (merged.length > MAX_SETUP_DIAGNOSTIC_ENTRIES) {
+        merged = merged.slice(-MAX_SETUP_DIAGNOSTIC_ENTRIES);
+      }
+    }
+
+    return {
+      ...base,
+      updatedAt: nowIso(),
+      entries: merged
+    };
+  });
+}
+
+async function clearSetupDiagnostics() {
+  return persistSetupDiagnostics(defaultSetupDiagnostics());
 }
 
 function normalizeIsoField(value) {
@@ -303,13 +458,14 @@ async function syncGuideContextFromTab(tab) {
   }
 }
 
-function coldStartError() {
+function coldStartError(trace = []) {
   return {
     success: false,
     code: 'BACKEND_COLD_START',
     error: COLD_START_MESSAGE,
     retriable: true,
-    retryAfterSec: 60
+    retryAfterSec: 60,
+    trace: normalizeTraceEntries(trace)
   };
 }
 
@@ -318,7 +474,8 @@ function normalizeError(payload, fallbackCode = 'BACKEND_UNAVAILABLE') {
     return {
       success: false,
       code: fallbackCode,
-      error: 'Backend returned an invalid response.'
+      error: 'Backend returned an invalid response.',
+      trace: []
     };
   }
 
@@ -327,7 +484,8 @@ function normalizeError(payload, fallbackCode = 'BACKEND_UNAVAILABLE') {
     code: payload.code || fallbackCode,
     error: payload.error || 'Backend request failed.',
     retriable: payload.retriable,
-    retryAfterSec: payload.retryAfterSec
+    retryAfterSec: payload.retryAfterSec,
+    trace: normalizeTraceEntries(payload.trace)
   };
 }
 
@@ -371,7 +529,8 @@ async function fetchBackend(path, options = {}) {
     return {
       success: false,
       code: 'BACKEND_UNAVAILABLE',
-      error: error.message || 'Backend request failed.'
+      error: error.message || 'Backend request failed.',
+      trace: []
     };
   } finally {
     clearTimeout(timeout);
@@ -403,7 +562,8 @@ async function fetchHealth() {
       return {
         success: false,
         code: 'BACKEND_UNAVAILABLE',
-        error: 'Backend health check failed.'
+        error: 'Backend health check failed.',
+        trace: []
       };
     }
 
@@ -420,7 +580,8 @@ async function fetchHealth() {
     return {
       success: false,
       code: 'BACKEND_UNAVAILABLE',
-      error: error.message || 'Backend health check failed.'
+      error: error.message || 'Backend health check failed.',
+      trace: []
     };
   } finally {
     clearTimeout(timeout);
@@ -428,20 +589,22 @@ async function fetchHealth() {
 }
 
 async function getStoredUser() {
-  const { userId, userEmail, lastSyncTime, onboardingComplete, onboardingGuideState } =
+  const { userId, userEmail, lastSyncTime, onboardingComplete, onboardingGuideState, setupDiagnostics } =
     await chrome.storage.local.get([
       'userId',
       'userEmail',
       'lastSyncTime',
       'onboardingComplete',
-      'onboardingGuideState'
+      'onboardingGuideState',
+      SETUP_DIAGNOSTICS_KEY
     ]);
   return {
     userId,
     userEmail,
     lastSyncTime,
     onboardingComplete,
-    onboardingGuideState
+    onboardingGuideState,
+    setupDiagnostics: normalizeSetupDiagnostics(setupDiagnostics)
   };
 }
 
@@ -460,6 +623,7 @@ async function handleGuideAction(action, payload = {}) {
   if (action === 'GUIDE_RESET') {
     const guideState = await persistGuideState(normalizeGuideState(null, false));
     await chrome.storage.local.set({ onboardingComplete: false });
+    await clearSetupDiagnostics();
     return { success: true, guideState };
   }
 
@@ -593,6 +757,14 @@ async function handleGuideAction(action, payload = {}) {
   };
 }
 
+function mergeTraceLists(...groups) {
+  return normalizeTraceEntries(groups.flat());
+}
+
+function shouldTrackActivity(payload) {
+  return Boolean(payload?.trackActivity);
+}
+
 async function handleBackendAction(message) {
   const action = message?.action;
   const payload = message?.payload || {};
@@ -601,11 +773,27 @@ async function handleBackendAction(message) {
     return handleGuideAction(action, payload);
   }
 
+  if (action === 'DIAGNOSTICS_LOG') {
+    const entries = Array.isArray(payload.entries)
+      ? payload.entries
+      : [payload.entry || payload];
+    const setupDiagnostics = await appendSetupDiagnostics(entries, { reset: Boolean(payload.reset) });
+    return { success: true, setupDiagnostics };
+  }
+
   if (action === 'CONNECT') {
+    const startTrace = [
+      buildDiagnosticEntry('EXT', 'info', 'connect_started', 'Starting Gmail connection.'),
+      buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Sending connection request to the backend.')
+    ];
+    await appendSetupDiagnostics(startTrace);
+
     const response = await fetchBackend('/api/auth/connect', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
+
+    const backendTrace = normalizeTraceEntries(response.trace);
 
     if (response.success) {
       await chrome.storage.local.set({
@@ -615,9 +803,37 @@ async function handleBackendAction(message) {
         onboardingComplete: true
       });
       await persistGuideState(buildConnectedGuideState());
+      const extTrace = [
+        buildDiagnosticEntry('EXT', 'success', 'backend_response', 'Backend verified the Gmail connection.'),
+        buildDiagnosticEntry('EXT', 'success', 'local_auth_updated', 'Connected account saved in the extension.')
+      ];
+      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      return {
+        ...response,
+        trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+      };
     }
 
-    return response;
+    const extTrace = [
+      buildDiagnosticEntry(
+        'EXT',
+        response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
+        response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'connect_failed',
+        response.code === 'BACKEND_COLD_START'
+          ? 'Backend is waking up. Retry in about 60 seconds.'
+          : 'Connection failed before Gmail Unified finished setup.',
+        {
+          code: response.code,
+          details: response.error,
+          replaceKey: response.code === 'BACKEND_COLD_START' ? 'connect-cold-start' : undefined
+        }
+      )
+    ];
+    await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+    return {
+      ...response,
+      trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+    };
   }
 
   if (action === 'DISCONNECT') {
@@ -629,6 +845,10 @@ async function handleBackendAction(message) {
         error: 'Not connected. Please set up the extension.'
       };
     }
+
+    await appendSetupDiagnostics([
+      buildDiagnosticEntry('EXT', 'info', 'disconnect_started', 'Disconnecting the current account.')
+    ]);
 
     const response = await fetchBackend('/api/auth/disconnect', {
       method: 'DELETE',
@@ -642,19 +862,50 @@ async function handleBackendAction(message) {
         onboardingGuideState: normalizeGuideState(null, false)
       });
       await setGuideBadge(normalizeGuideState(null, false));
+      await clearSetupDiagnostics();
+      return response;
     }
 
-    return response;
+    const backendTrace = normalizeTraceEntries(response.trace);
+    const extTrace = [
+      buildDiagnosticEntry('EXT', 'error', 'disconnect_failed', 'Disconnect failed in the extension.', {
+        code: response.code,
+        details: response.error
+      })
+    ];
+    await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+    return {
+      ...response,
+      trace: mergeTraceLists(backendTrace, extTrace)
+    };
   }
 
   if (action === 'FETCH_MESSAGES') {
+    const trackActivity = shouldTrackActivity(payload);
     const { userId } = await getStoredUser();
     if (!userId) {
+      if (trackActivity) {
+        await appendSetupDiagnostics([
+          buildDiagnosticEntry('EXT', 'error', 'messages_not_connected', 'Mailbox load is unavailable until setup finishes.', {
+            code: 'NOT_CONNECTED'
+          })
+        ]);
+      }
       return {
         success: false,
         code: 'NOT_CONNECTED',
         error: 'Not connected. Please set up the extension.'
       };
+    }
+
+    const startTrace = trackActivity
+      ? [
+        buildDiagnosticEntry('EXT', 'info', 'messages_requested', 'Loading mailbox data.'),
+        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Requesting messages from the backend.')
+      ]
+      : [];
+    if (trackActivity && startTrace.length) {
+      await appendSetupDiagnostics(startTrace);
     }
 
     const params = new URLSearchParams({
@@ -667,19 +918,74 @@ async function handleBackendAction(message) {
     const response = await fetchBackend(`/api/messages?${params.toString()}`);
     if (response.success) {
       await chrome.storage.local.set({ lastSyncTime: nowIso() });
+      if (trackActivity) {
+        const backendTrace = normalizeTraceEntries(response.trace);
+        const extTrace = [
+          buildDiagnosticEntry('EXT', 'success', 'messages_loaded', `Mailbox load complete: ${response.count || 0} messages.`, {
+            details: `Inbox ${response.inboxCount || 0}, Sent ${response.sentCount || 0}.`
+          })
+        ];
+        await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+        return {
+          ...response,
+          trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+        };
+      }
+    }
+
+    if (trackActivity) {
+      const backendTrace = normalizeTraceEntries(response.trace);
+      const extTrace = [
+        buildDiagnosticEntry(
+          'EXT',
+          response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
+          response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'messages_failed',
+          response.code === 'BACKEND_COLD_START'
+            ? 'Backend is waking up before mailbox load can continue.'
+            : 'Mailbox load failed in the extension.',
+          {
+            code: response.code,
+            details: response.error,
+            replaceKey: response.code === 'BACKEND_COLD_START' ? 'fetch-cold-start' : undefined
+          }
+        )
+      ];
+      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      return {
+        ...response,
+        trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+      };
     }
 
     return response;
   }
 
   if (action === 'SEARCH_MESSAGES') {
+    const trackActivity = shouldTrackActivity(payload);
     const { userId } = await getStoredUser();
     if (!userId) {
+      if (trackActivity) {
+        await appendSetupDiagnostics([
+          buildDiagnosticEntry('EXT', 'error', 'search_not_connected', 'Search is unavailable until setup finishes.', {
+            code: 'NOT_CONNECTED'
+          })
+        ]);
+      }
       return {
         success: false,
         code: 'NOT_CONNECTED',
         error: 'Not connected. Please set up the extension.'
       };
+    }
+
+    const startTrace = trackActivity
+      ? [
+        buildDiagnosticEntry('EXT', 'info', 'search_requested', 'Searching mailbox data.'),
+        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Sending search request to the backend.')
+      ]
+      : [];
+    if (trackActivity && startTrace.length) {
+      await appendSetupDiagnostics(startTrace);
     }
 
     const params = new URLSearchParams({
@@ -687,17 +993,63 @@ async function handleBackendAction(message) {
       query: payload.query || '',
       limit: String(payload.limit || 20)
     });
-    return fetchBackend(`/api/messages/search?${params.toString()}`);
+    const response = await fetchBackend(`/api/messages/search?${params.toString()}`);
+
+    if (trackActivity) {
+      const backendTrace = normalizeTraceEntries(response.trace);
+      const extTrace = [
+        buildDiagnosticEntry(
+          'EXT',
+          response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'error'),
+          response.success ? 'search_complete' : (response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'search_failed'),
+          response.success
+            ? `Search complete: ${response.count || 0} results.`
+            : (response.code === 'BACKEND_COLD_START'
+              ? 'Backend is waking up before search can continue.'
+              : 'Search failed in the extension.'),
+          {
+            code: response.success ? undefined : response.code,
+            details: response.success ? `Source ${response.source || 'unknown'}.` : response.error,
+            replaceKey: response.code === 'BACKEND_COLD_START' ? 'search-cold-start' : undefined
+          }
+        )
+      ];
+      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      return {
+        ...response,
+        trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+      };
+    }
+
+    return response;
   }
 
   if (action === 'SYNC_MESSAGES') {
+    const trackActivity = shouldTrackActivity(payload);
     const { userId } = await getStoredUser();
     if (!userId) {
+      if (trackActivity) {
+        await appendSetupDiagnostics([
+          buildDiagnosticEntry('EXT', 'error', 'sync_not_connected', 'Sync is unavailable until setup finishes.', {
+            code: 'NOT_CONNECTED'
+          })
+        ]);
+      }
       return {
         success: false,
         code: 'NOT_CONNECTED',
         error: 'Not connected. Please set up the extension.'
       };
+    }
+
+    const startTrace = trackActivity
+      ? [
+        buildDiagnosticEntry('EXT', 'info', 'sync_requested', 'Starting manual mailbox sync.'),
+        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Sending sync request to the backend.')
+      ]
+      : [];
+    if (trackActivity && startTrace.length) {
+      await appendSetupDiagnostics(startTrace);
     }
 
     const response = await fetchBackend('/api/messages/sync', {
@@ -707,13 +1059,68 @@ async function handleBackendAction(message) {
 
     if (response.success) {
       await chrome.storage.local.set({ lastSyncTime: nowIso() });
+      if (trackActivity) {
+        const backendTrace = normalizeTraceEntries(response.trace);
+        const extTrace = [
+          buildDiagnosticEntry('EXT', 'success', 'sync_complete', `Manual sync complete: ${response.synced || 0} messages.`, {
+            details: 'Mailbox cache updated successfully.'
+          })
+        ];
+        await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+        return {
+          ...response,
+          trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+        };
+      }
+    }
+
+    if (trackActivity) {
+      const backendTrace = normalizeTraceEntries(response.trace);
+      const extTrace = [
+        buildDiagnosticEntry(
+          'EXT',
+          response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
+          response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'sync_failed',
+          response.code === 'BACKEND_COLD_START'
+            ? 'Backend is waking up before sync can continue.'
+            : 'Manual sync failed in the extension.',
+          {
+            code: response.code,
+            details: response.error,
+            replaceKey: response.code === 'BACKEND_COLD_START' ? 'sync-cold-start' : undefined
+          }
+        )
+      ];
+      await appendSetupDiagnostics([...backendTrace, ...extTrace]);
+      return {
+        ...response,
+        trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+      };
     }
 
     return response;
   }
 
   if (action === 'HEALTH_CHECK') {
-    return fetchHealth();
+    const response = await fetchHealth();
+    const extTrace = [
+      buildDiagnosticEntry(
+        'EXT',
+        response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'error'),
+        response.success ? 'health_check_complete' : (response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'health_check_failed'),
+        response.success ? 'Backend health check succeeded.' : response.error || 'Backend health check failed.',
+        {
+          code: response.success ? undefined : response.code,
+          details: response.success ? `Uptime ${Math.floor(Number(response.uptime || 0))}s.` : response.error,
+          replaceKey: response.code === 'BACKEND_COLD_START' ? 'health-cold-start' : undefined
+        }
+      )
+    ];
+    await appendSetupDiagnostics(extTrace);
+    return {
+      ...response,
+      trace: mergeTraceLists(response.trace, extTrace)
+    };
   }
 
   if (action === 'GET_STORAGE') {
@@ -795,6 +1202,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       })
       .catch((error) => {
         console.error('[Extension SW ERROR]', error?.message || error);
+        appendSetupDiagnostics([
+          buildDiagnosticEntry('EXT', 'error', 'background_unhandled_error', 'Unhandled extension error.', {
+            code: 'BACKEND_UNAVAILABLE',
+            details: error?.message || 'Unhandled background error.'
+          })
+        ]).catch(() => {});
         sendResponse({
           success: false,
           code: 'BACKEND_UNAVAILABLE',

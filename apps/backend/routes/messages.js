@@ -7,7 +7,7 @@ import {
   mapMessageToRow,
   mapRowToMessage
 } from '../lib/message-normalize.js';
-import { AppError, buildErrorResponse } from '../lib/errors.js';
+import { AppError, buildErrorResponse, pushTrace } from '../lib/errors.js';
 
 const router = express.Router();
 
@@ -51,7 +51,7 @@ function dedupeById(messages) {
   return [...byId.values()];
 }
 
-async function getUser(userId) {
+async function getUser(userId, trace = []) {
   const { data, error } = await supabase
     .from('users')
     .select('id, email, encrypted_password, last_sync')
@@ -59,11 +59,18 @@ async function getUser(userId) {
     .maybeSingle();
 
   if (error) {
-    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
+    pushTrace(trace, 'API', 'error', 'messages_user_lookup_failed', 'Could not load the connected user.', {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
   }
 
   if (!data) {
-    throw new AppError('NOT_CONNECTED', 'User not found. Please reconnect the extension.', 401);
+    pushTrace(trace, 'API', 'error', 'messages_user_missing', 'Connected user was not found.', {
+      code: 'NOT_CONNECTED'
+    });
+    throw new AppError('NOT_CONNECTED', 'User not found. Please reconnect the extension.', 401, { trace });
   }
 
   return data;
@@ -137,12 +144,12 @@ async function upsertMessages(userId, messages) {
   }
 }
 
-async function fetchFromImap(user, requestedFolders, limit) {
+async function fetchFromImap(user, requestedFolders, limit, trace = []) {
   const password = decrypt(user.encrypted_password);
 
   const tasks = requestedFolders.map(async (folder) => {
     const imapFolder = IMAP_FOLDERS[folder];
-    const rawMessages = await fetchMessages(user.email, password, imapFolder, limit);
+    const rawMessages = await fetchMessages(user.email, password, imapFolder, limit, trace);
     return rawMessages.map((message) => normalizeImapMessage(message, folder, user.email));
   });
 
@@ -157,10 +164,16 @@ function buildCounts(messages) {
 }
 
 router.get('/', async (req, res) => {
+  const trace = [];
+
   try {
+    pushTrace(trace, 'API', 'info', 'messages_fetch_received', 'Mailbox load request received.');
     const userId = String(req.query?.userId || '').trim();
     if (!userId) {
-      throw new AppError('NOT_CONNECTED', 'userId query parameter is required.', 400);
+      pushTrace(trace, 'API', 'error', 'messages_fetch_invalid', 'A connected user ID is required to load messages.', {
+        code: 'NOT_CONNECTED'
+      });
+      throw new AppError('NOT_CONNECTED', 'userId query parameter is required.', 400, { trace });
     }
 
     const folder = parseFolder(req.query?.folder);
@@ -168,10 +181,14 @@ router.get('/', async (req, res) => {
     const forceSync = parseBoolean(req.query?.forceSync);
     const requestedFolders = getRequestedFolders(folder);
     const fetchLimit = folder === 'all' ? limit * 2 : limit;
+    pushTrace(trace, 'API', 'success', 'messages_fetch_valid', 'Mailbox load request validated.', {
+      details: `folder=${folder}; limit=${limit}; forceSync=${forceSync}`
+    });
 
     console.log(`[Messages] Fetching for userId ${userId}`);
 
-    const user = await getUser(userId);
+    const user = await getUser(userId, trace);
+    pushTrace(trace, 'API', 'success', 'messages_user_loaded', 'Connected user loaded successfully.');
 
     if (!forceSync) {
       const latestCacheTimestamp = await loadLatestCacheTimestamp(userId, requestedFolders);
@@ -182,6 +199,9 @@ router.get('/', async (req, res) => {
         const sortedCached = sortByDateDesc(cached).slice(0, fetchLimit);
         const counts = buildCounts(sortedCached);
         const ageSec = Math.max(0, Math.floor(ageMs / 1000));
+        pushTrace(trace, 'API', 'info', 'messages_cache_hit', `Using cached messages (${sortedCached.length} total).`, {
+          details: `Cache age ${ageSec}s. Inbox ${counts.inboxCount}, Sent ${counts.sentCount}.`
+        });
         console.log(
           `[Messages] Cache hit for userId ${userId} - returning ${sortedCached.length} cached messages (age: ${ageSec}s)`
         );
@@ -190,19 +210,25 @@ router.get('/', async (req, res) => {
           success: true,
           messages: sortedCached,
           count: sortedCached.length,
-          ...counts
+          ...counts,
+          trace
         });
       }
     }
 
+    pushTrace(trace, 'API', 'info', 'messages_cache_miss', 'Cache is stale or empty. Fetching from Gmail.');
     console.log(`[Messages] Cache miss for userId ${userId} - fetching from IMAP`);
-    const fresh = await fetchFromImap(user, requestedFolders, limit);
+    pushTrace(trace, 'API', 'info', 'messages_imap_fetch_start', 'Starting Gmail mailbox sync.');
+    const fresh = await fetchFromImap(user, requestedFolders, limit, trace);
     await upsertMessages(userId, fresh);
 
     const now = new Date().toISOString();
     await supabase.from('users').update({ last_sync: now }).eq('id', userId);
 
     const counts = buildCounts(fresh);
+    pushTrace(trace, 'API', 'success', 'messages_imap_fetch_complete', `Mailbox sync complete: ${fresh.length} messages loaded.`, {
+      details: `Inbox ${counts.inboxCount}, Sent ${counts.sentCount}.`
+    });
     console.log(
       `[Messages] Normalized ${fresh.length} messages (${counts.inboxCount} inbox, ${counts.sentCount} sent)`
     );
@@ -212,29 +238,47 @@ router.get('/', async (req, res) => {
       success: true,
       messages: fresh,
       count: fresh.length,
-      ...counts
+      ...counts,
+      trace
     });
   } catch (error) {
-    const payload = buildErrorResponse(error);
+    pushTrace(trace, 'API', 'error', 'messages_fetch_failed', 'Mailbox load failed.', {
+      code: error?.code || 'BACKEND_UNAVAILABLE',
+      details: error?.message || 'Unexpected backend error'
+    });
+    const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }
 });
 
 router.get('/search', async (req, res) => {
+  const trace = [];
+
   try {
+    pushTrace(trace, 'API', 'info', 'messages_search_received', 'Search request received.');
     const userId = String(req.query?.userId || '').trim();
     const query = String(req.query?.query || '').trim();
     const limit = parseLimit(req.query?.limit, 20);
 
     if (!userId) {
-      throw new AppError('NOT_CONNECTED', 'userId query parameter is required.', 400);
+      pushTrace(trace, 'API', 'error', 'messages_search_invalid', 'A connected user ID is required to search.', {
+        code: 'NOT_CONNECTED'
+      });
+      throw new AppError('NOT_CONNECTED', 'userId query parameter is required.', 400, { trace });
     }
 
     if (!query) {
-      throw new AppError('BACKEND_UNAVAILABLE', 'query parameter is required.', 400);
+      pushTrace(trace, 'API', 'error', 'messages_search_missing_query', 'A search query is required.', {
+        code: 'BACKEND_UNAVAILABLE'
+      });
+      throw new AppError('BACKEND_UNAVAILABLE', 'query parameter is required.', 400, { trace });
     }
 
-    const user = await getUser(userId);
+    pushTrace(trace, 'API', 'success', 'messages_search_valid', 'Search request validated.', {
+      details: `limit=${limit}`
+    });
+    const user = await getUser(userId, trace);
+    pushTrace(trace, 'API', 'success', 'messages_search_user_loaded', 'Connected user loaded successfully.');
 
     const ilike = `%${query}%`;
     const { data: cachedRows, error } = await supabase
@@ -246,23 +290,30 @@ router.get('/search', async (req, res) => {
       .limit(limit);
 
     if (error) {
-      throw new AppError('BACKEND_UNAVAILABLE', error.message, 500);
+      pushTrace(trace, 'API', 'error', 'messages_search_cache_failed', 'Cached search failed.', {
+        code: 'BACKEND_UNAVAILABLE',
+        details: error.message
+      });
+      throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
     }
 
     const cachedMessages = (cachedRows || []).map(mapRowToMessage);
     if (cachedMessages.length >= 5) {
+      pushTrace(trace, 'API', 'info', 'messages_search_cache_hit', `Search returned ${cachedMessages.length} cached results.`);
       return res.status(200).json({
         success: true,
         messages: cachedMessages,
         count: cachedMessages.length,
-        source: 'cache'
+        source: 'cache',
+        trace
       });
     }
 
     const password = decrypt(user.encrypted_password);
+    pushTrace(trace, 'API', 'info', 'messages_search_live_start', 'Falling back to live Gmail search.');
     const [inboxLive, sentLive] = await Promise.all([
-      searchMessages(user.email, password, IMAP_FOLDERS.INBOX, query, limit),
-      searchMessages(user.email, password, IMAP_FOLDERS.SENT, query, limit)
+      searchMessages(user.email, password, IMAP_FOLDERS.INBOX, query, limit, trace),
+      searchMessages(user.email, password, IMAP_FOLDERS.SENT, query, limit, trace)
     ]);
 
     const live = [
@@ -271,43 +322,68 @@ router.get('/search', async (req, res) => {
     ];
 
     const merged = sortByDateDesc(dedupeById([...cachedMessages, ...live])).slice(0, limit);
+    pushTrace(trace, 'API', 'success', 'messages_search_complete', `Search completed with ${merged.length} results.`, {
+      details: `Source=mixed; cache=${cachedMessages.length}; live=${live.length}.`
+    });
 
     return res.status(200).json({
       success: true,
       messages: merged,
       count: merged.length,
-      source: 'mixed'
+      source: 'mixed',
+      trace
     });
   } catch (error) {
-    const payload = buildErrorResponse(error);
+    pushTrace(trace, 'API', 'error', 'messages_search_failed', 'Search failed.', {
+      code: error?.code || 'BACKEND_UNAVAILABLE',
+      details: error?.message || 'Unexpected backend error'
+    });
+    const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }
 });
 
 router.post('/sync', async (req, res) => {
+  const trace = [];
+
   try {
+    pushTrace(trace, 'API', 'info', 'messages_sync_received', 'Manual sync request received.');
     const userId = String(req.body?.userId || '').trim();
     if (!userId) {
-      throw new AppError('NOT_CONNECTED', 'userId is required.', 400);
+      pushTrace(trace, 'API', 'error', 'messages_sync_invalid', 'A connected user ID is required to sync.', {
+        code: 'NOT_CONNECTED'
+      });
+      throw new AppError('NOT_CONNECTED', 'userId is required.', 400, { trace });
     }
 
     console.log(`[Messages] Force-sync requested for userId ${userId}`);
 
-    const user = await getUser(userId);
-    const fresh = await fetchFromImap(user, ['INBOX', 'SENT'], 100);
+    const user = await getUser(userId, trace);
+    pushTrace(trace, 'API', 'success', 'messages_sync_user_loaded', 'Connected user loaded successfully.');
+    pushTrace(trace, 'API', 'info', 'messages_sync_imap_start', 'Starting manual Gmail sync.');
+    const fresh = await fetchFromImap(user, ['INBOX', 'SENT'], 100, trace);
     await upsertMessages(userId, fresh);
 
     const now = new Date().toISOString();
     await supabase.from('users').update({ last_sync: now }).eq('id', userId);
 
     console.log(`[Messages] Force-sync completed - synced ${fresh.length} messages`);
+    const counts = buildCounts(fresh);
+    pushTrace(trace, 'API', 'success', 'messages_sync_complete', `Manual sync completed: ${fresh.length} messages.`, {
+      details: `Inbox ${counts.inboxCount}, Sent ${counts.sentCount}.`
+    });
 
     return res.status(200).json({
       success: true,
-      synced: fresh.length
+      synced: fresh.length,
+      trace
     });
   } catch (error) {
-    const payload = buildErrorResponse(error);
+    pushTrace(trace, 'API', 'error', 'messages_sync_failed', 'Manual sync failed.', {
+      code: error?.code || 'BACKEND_UNAVAILABLE',
+      details: error?.message || 'Unexpected backend error'
+    });
+    const payload = buildErrorResponse(error, trace);
     return res.status(payload.status).json(payload.body);
   }
 });

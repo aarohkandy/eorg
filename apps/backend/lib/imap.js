@@ -1,6 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import { parseImapError } from './errors.js';
+import { parseImapError, pushTrace } from './errors.js';
 
 const IMAP_HOST = 'imap.gmail.com';
 const IMAP_PORT = 993;
@@ -134,24 +134,62 @@ async function attachSnippets(email, appPassword, folder, messages) {
   return messages;
 }
 
-export async function fetchMessages(email, appPassword, folder, limit = 50) {
+function logImapFailure(trace, parsed, folder) {
+  if (parsed?.code === 'AUTH_FAILED') {
+    pushTrace(trace, 'IMAP', 'error', 'imap_auth_failed', 'Gmail rejected the App Password.', {
+      code: parsed.code,
+      details: parsed.message
+    });
+    return;
+  }
+
+  if (parsed?.code === 'FOLDER_NOT_FOUND') {
+    pushTrace(trace, 'IMAP', 'error', 'imap_folder_missing', `Required Gmail folder is missing: ${folder}.`, {
+      code: parsed.code,
+      details: parsed.message
+    });
+    return;
+  }
+
+  if (parsed?.code === 'CONNECTION_FAILED') {
+    pushTrace(trace, 'IMAP', 'error', 'imap_connection_failed', 'Could not reach Gmail IMAP.', {
+      code: parsed.code,
+      details: parsed.message
+    });
+    return;
+  }
+
+  pushTrace(trace, 'IMAP', 'error', 'imap_failed', 'IMAP request failed.', {
+    code: parsed?.code || 'BACKEND_UNAVAILABLE',
+    details: parsed?.message || 'Unexpected IMAP error.'
+  });
+}
+
+export async function fetchMessages(email, appPassword, folder, limit = 50, trace = []) {
   const maskedEmail = maskEmail(email);
   console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${maskedEmail}`);
   const client = buildClient(email, appPassword);
+  pushTrace(trace, 'IMAP', 'info', 'imap_connecting', `Connecting to Gmail for ${folder}.`);
 
   try {
     await client.connect();
     console.log(`[IMAP] Connected successfully for ${maskedEmail}`);
+    pushTrace(trace, 'IMAP', 'success', 'imap_connected', `Connected to Gmail for ${folder}.`);
 
     const lock = await client.getMailboxLock(folder);
     console.log(`[IMAP] Opened folder: ${folder}`);
+    pushTrace(trace, 'IMAP', 'info', 'imap_mailbox_opened', `Opened Gmail folder ${folder}.`);
     let collected = [];
 
     try {
       const totalMessages = client.mailbox.exists || 0;
       console.log(`[IMAP] Found ${totalMessages} messages in ${folder}`);
+      pushTrace(trace, 'IMAP', 'info', 'imap_fetch_started', `Fetching recent message headers from ${folder}.`, {
+        details: `Mailbox contains ${totalMessages} messages.`
+      });
 
       if (totalMessages === 0) {
+        pushTrace(trace, 'IMAP', 'success', 'imap_fetch_complete', `No messages found in ${folder}.`);
         return [];
       }
 
@@ -169,6 +207,7 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
       }
 
       console.log(`[IMAP] Fetched ${collected.length} message envelopes from ${folder}`);
+      pushTrace(trace, 'IMAP', 'success', 'imap_fetch_complete', `Fetched ${collected.length} recent messages from ${folder}.`);
     } finally {
       lock.release();
     }
@@ -177,6 +216,7 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
+    logImapFailure(trace, parsed, folder);
     throw parsed;
   } finally {
     try {
@@ -190,24 +230,31 @@ export async function fetchMessages(email, appPassword, folder, limit = 50) {
   }
 }
 
-export async function searchMessages(email, appPassword, folder, query, limit = 20) {
+export async function searchMessages(email, appPassword, folder, query, limit = 20, trace = []) {
   const maskedEmail = maskEmail(email);
   console.log(`[IMAP] Connecting to ${IMAP_HOST}:${IMAP_PORT} for ${maskedEmail} (search)`);
   const client = buildClient(email, appPassword);
+  pushTrace(trace, 'IMAP', 'info', 'imap_connecting', `Connecting to Gmail for search in ${folder}.`);
 
   try {
     await client.connect();
     console.log(`[IMAP] Connected successfully for ${maskedEmail}`);
+    pushTrace(trace, 'IMAP', 'success', 'imap_connected', `Connected to Gmail for search in ${folder}.`);
 
     const lock = await client.getMailboxLock(folder);
     console.log(`[IMAP] Opened folder: ${folder}`);
+    pushTrace(trace, 'IMAP', 'info', 'imap_mailbox_opened', `Opened Gmail folder ${folder}.`);
     let messages = [];
 
     try {
       const matchedUids = await client.search({ body: query });
       const slice = matchedUids.slice(-Math.max(1, Number(limit) || 20));
+      pushTrace(trace, 'IMAP', 'info', 'imap_search_started', `Searching ${folder} for matching messages.`, {
+        details: `Matched ${matchedUids.length} messages before limiting.`
+      });
       if (!slice.length) {
         console.log(`[IMAP] Search returned 0 messages in ${folder}`);
+        pushTrace(trace, 'IMAP', 'success', 'imap_search_complete', `No search results in ${folder}.`);
         return [];
       }
 
@@ -224,6 +271,7 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
       }
 
       console.log(`[IMAP] Search fetched ${messages.length} message envelopes from ${folder}`);
+      pushTrace(trace, 'IMAP', 'success', 'imap_search_complete', `Search fetched ${messages.length} messages from ${folder}.`);
     } finally {
       lock.release();
     }
@@ -232,6 +280,7 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
   } catch (error) {
     const parsed = parseImapError(error, folder);
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
+    logImapFailure(trace, parsed, folder);
     throw parsed;
   } finally {
     try {
@@ -245,20 +294,24 @@ export async function searchMessages(email, appPassword, folder, query, limit = 
   }
 }
 
-export async function testConnection(email, appPassword) {
+export async function testConnection(email, appPassword, trace = []) {
   const maskedEmail = maskEmail(email);
   console.log(`[IMAP] Testing connection for ${maskedEmail}`);
   const client = buildClient(email, appPassword);
+  pushTrace(trace, 'IMAP', 'info', 'imap_connecting', 'Connecting to Gmail to verify credentials.');
 
   try {
     await client.connect();
     console.log(`[IMAP] Connection test PASSED for ${maskedEmail}`);
+    pushTrace(trace, 'IMAP', 'success', 'imap_connected', 'Connected to Gmail successfully.');
+    pushTrace(trace, 'IMAP', 'success', 'imap_auth_verified', 'Gmail accepted the App Password.');
     await client.logout();
-    return { success: true };
+    return { success: true, trace };
   } catch (error) {
     const parsed = parseImapError(error, '[Gmail]/Sent Mail');
     console.error(`[IMAP ERROR] ${parsed.code}: ${parsed.message}`);
-    return { success: false, code: parsed.code, error: parsed.message };
+    logImapFailure(trace, parsed, '[Gmail]/Sent Mail');
+    return { success: false, code: parsed.code, error: parsed.message, trace };
   }
 }
 

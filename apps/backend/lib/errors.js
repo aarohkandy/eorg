@@ -5,21 +5,96 @@ export class AppError extends Error {
     this.status = status;
     this.retriable = Boolean(extra.retriable);
     this.retryAfterSec = Number.isFinite(extra.retryAfterSec) ? extra.retryAfterSec : undefined;
+    this.trace = Array.isArray(extra.trace) ? normalizeTraceEntries(extra.trace) : undefined;
   }
 }
 
 const CONNECT_ERROR_DEFAULT_MESSAGE =
   'Wrong email or App Password. Enable IMAP in Gmail settings and generate a valid App Password.';
 
-export function buildConnectFailure(code, message) {
+function createTraceId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeTraceEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+
+  return entries
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+
+      const source = String(entry.source || '').trim().toUpperCase();
+      const level = String(entry.level || '').trim().toLowerCase();
+      const stage = String(entry.stage || '').trim();
+      const message = String(entry.message || '').trim();
+
+      if (!source || !level || !stage || !message) return null;
+
+      return {
+        id: typeof entry.id === 'string' && entry.id ? entry.id : createTraceId(),
+        ts: typeof entry.ts === 'string' && entry.ts ? entry.ts : new Date().toISOString(),
+        source,
+        level,
+        stage,
+        message,
+        code: typeof entry.code === 'string' && entry.code ? entry.code : undefined,
+        details: typeof entry.details === 'string' && entry.details ? entry.details : undefined
+      };
+    })
+    .filter(Boolean);
+}
+
+export function pushTrace(trace, source, level, stage, message, extra = {}) {
+  const entry = normalizeTraceEntries([{
+    source,
+    level,
+    stage,
+    message,
+    code: extra.code,
+    details: extra.details
+  }])[0];
+
+  if (entry && Array.isArray(trace)) {
+    trace.push(entry);
+  }
+
+  return entry || null;
+}
+
+function mergeTraces(...groups) {
+  const seen = new Set();
+  const merged = [];
+
+  for (const entry of normalizeTraceEntries(groups.flat())) {
+    const signature = [
+      entry.ts,
+      entry.source,
+      entry.level,
+      entry.stage,
+      entry.message,
+      entry.code || '',
+      entry.details || ''
+    ].join('|');
+
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    merged.push(entry);
+  }
+
+  return merged;
+}
+
+export function buildConnectFailure(code, message, trace = []) {
   const normalizedCode = String(code || 'AUTH_FAILED').trim() || 'AUTH_FAILED';
   const normalizedMessage = String(message || '').trim();
+  const mergedTrace = mergeTraces(trace);
 
   if (normalizedCode === 'AUTH_FAILED' || normalizedCode === 'NOT_CONNECTED') {
     return new AppError(
       normalizedCode,
       normalizedMessage || CONNECT_ERROR_DEFAULT_MESSAGE,
-      401
+      401,
+      { trace: mergedTrace }
     );
   }
 
@@ -27,7 +102,8 @@ export function buildConnectFailure(code, message) {
     return new AppError(
       normalizedCode,
       normalizedMessage || 'Required Gmail folders are not available for this account.',
-      400
+      400,
+      { trace: mergedTrace }
     );
   }
 
@@ -36,7 +112,7 @@ export function buildConnectFailure(code, message) {
       normalizedCode,
       normalizedMessage || 'Cannot reach imap.gmail.com. Check network connectivity and try again.',
       503,
-      { retriable: true, retryAfterSec: 60 }
+      { retriable: true, retryAfterSec: 60, trace: mergedTrace }
     );
   }
 
@@ -44,11 +120,13 @@ export function buildConnectFailure(code, message) {
     normalizedCode,
     normalizedMessage || 'Unable to verify Gmail connection right now.',
     503,
-    { retriable: true, retryAfterSec: 60 }
+    { retriable: true, retryAfterSec: 60, trace: mergedTrace }
   );
 }
 
-export function buildErrorResponse(error) {
+export function buildErrorResponse(error, fallbackTrace = []) {
+  const trace = mergeTraces(error?.trace, fallbackTrace);
+
   if (error instanceof AppError) {
     return {
       status: error.status,
@@ -57,7 +135,8 @@ export function buildErrorResponse(error) {
         code: error.code,
         error: error.message,
         retriable: error.retriable || undefined,
-        retryAfterSec: error.retryAfterSec
+        retryAfterSec: error.retryAfterSec,
+        trace: trace.length ? trace : undefined
       }
     };
   }
@@ -67,7 +146,8 @@ export function buildErrorResponse(error) {
     body: {
       success: false,
       code: 'BACKEND_UNAVAILABLE',
-      error: error?.message || 'Unexpected backend error'
+      error: error?.message || 'Unexpected backend error',
+      trace: trace.length ? trace : undefined
     }
   };
 }
