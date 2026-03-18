@@ -1,3 +1,9 @@
+const foundationNormalizeSetupDiagnostics = globalThis.normalizeSetupDiagnostics;
+const foundationState = globalThis.state;
+const foundationUpdateMainPanelVisibility = globalThis.updateMainPanelVisibility;
+const foundationFormatDate = globalThis.formatDate;
+const foundationEscapeHtml = globalThis.escapeHtml;
+
 function formatActivityTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '--:--';
@@ -30,7 +36,7 @@ function renderActivityPanel() {
   const log = document.getElementById('gmailUnifiedActivityLog');
   if (!log) return;
 
-  const entries = normalizeSetupDiagnostics(state.setupDiagnostics).entries;
+  const entries = foundationNormalizeSetupDiagnostics(foundationState.setupDiagnostics).entries;
   if (!entries.length) {
     log.textContent = 'Activity from the UI, extension, backend, and Gmail will appear here.';
     return;
@@ -65,13 +71,13 @@ function isUnread(message) {
 }
 
 function filteredMessages() {
-  let current = [...state.messages];
+  let current = [...foundationState.messages];
 
-  if (state.filter === 'inbox') {
+  if (foundationState.filter === 'inbox') {
     current = current.filter((message) => !message.isOutgoing);
   }
 
-  if (state.filter === 'sent') {
+  if (foundationState.filter === 'sent') {
     current = current.filter((message) => message.isOutgoing);
   }
 
@@ -91,20 +97,20 @@ function setStateCard(type, text, retryVisible = false) {
   card.dataset.state = type;
   textNode.textContent = text;
   retryBtn.style.display = retryVisible ? 'inline-flex' : 'none';
-  countdown.style.display = state.retrySeconds > 0 ? 'block' : 'none';
-  countdown.textContent = state.retrySeconds > 0 ? `Retrying automatically in ${state.retrySeconds}s` : '';
+  countdown.style.display = foundationState.retrySeconds > 0 ? 'block' : 'none';
+  countdown.textContent = foundationState.retrySeconds > 0 ? `Retrying automatically in ${foundationState.retrySeconds}s` : '';
 
   if (type === 'normal') {
     card.style.display = 'none';
     list.style.display = 'block';
-    detail.style.display = state.selectedThreadId ? 'block' : 'none';
+    detail.style.display = foundationState.selectedThreadId ? 'block' : 'none';
   } else {
     card.style.display = 'block';
     list.style.display = 'none';
     detail.style.display = 'none';
   }
 
-  updateMainPanelVisibility();
+  foundationUpdateMainPanelVisibility();
 }
 
 function renderThreads() {
@@ -140,13 +146,13 @@ function renderThreads() {
         <span class="gmail-unified-tag ${latest.isOutgoing ? 'sent' : 'inbox'}">${
       latest.isOutgoing ? 'Sent' : 'Inbox'
     }</span>
-        <span class="gmail-unified-date">${formatDate(latest.date)}</span>
+        <span class="gmail-unified-date">${foundationFormatDate(latest.date)}</span>
       </div>
-      <div class="gmail-unified-thread-who">${escapeHtml(who)}</div>
-      <div class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(
+      <div class="gmail-unified-thread-who">${foundationEscapeHtml(who)}</div>
+      <div class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${foundationEscapeHtml(
       latest.subject || '(no subject)'
     )}</div>
-      <div class="gmail-unified-thread-snippet">${escapeHtml(latest.snippet || '(no preview)')}</div>
+      <div class="gmail-unified-thread-snippet">${foundationEscapeHtml(latest.snippet || '(no preview)')}</div>
       <div class="gmail-unified-thread-meta">
         <span>${group.messages.length} message${group.messages.length > 1 ? 's' : ''}</span>
         ${unread ? '<span class="gmail-unified-unread-dot" title="Unread"></span>' : ''}
@@ -154,7 +160,7 @@ function renderThreads() {
     `;
 
     row.addEventListener('click', () => {
-      state.selectedThreadId = group.threadId;
+      foundationState.selectedThreadId = group.threadId;
       renderThreadDetail(group);
     });
 
@@ -187,14 +193,27 @@ function renderThreadDetail(group) {
 
       item.innerHTML = `
       <div class="gmail-unified-message-meta">
-        <span>${escapeHtml(who)}</span>
-        <span>${formatDate(message.date)}</span>
+        <span>${foundationEscapeHtml(who)}</span>
+        <span>${foundationFormatDate(message.date)}</span>
       </div>
-      <div class="gmail-unified-message-snippet">${escapeHtml(message.snippet || '(no preview)')}</div>
+      <div class="gmail-unified-message-snippet">${foundationEscapeHtml(message.snippet || '(no preview)')}</div>
     `;
 
       body.appendChild(item);
     });
 
-  updateMainPanelVisibility();
+  foundationUpdateMainPanelVisibility();
 }
+
+Object.assign(globalThis, {
+  formatActivityTime,
+  formatActivityLine,
+  renderActivityPanel,
+  byDateDesc,
+  groupByThread,
+  isUnread,
+  filteredMessages,
+  setStateCard,
+  renderThreads,
+  renderThreadDetail
+});

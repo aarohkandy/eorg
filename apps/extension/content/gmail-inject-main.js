@@ -1,33 +1,44 @@
-async function bootGmailSurface() {
-  buildSidebar();
-  await refreshGuideAndAuthState();
-  applyGmailLayoutMode();
+const mainBuildSidebar = globalThis.buildSidebar;
+const mainRefreshGuideAndAuthState = globalThis.refreshGuideAndAuthState;
+const mainApplyGmailLayoutMode = globalThis.applyGmailLayoutMode;
+const mainState = globalThis.state;
+const mainLoadMessages = globalThis.loadMessages;
+const mainStartAutoRefresh = globalThis.startAutoRefresh;
+const mainNormalizeSetupDiagnostics = globalThis.normalizeSetupDiagnostics;
+const mainRenderActivityPanel = globalThis.renderActivityPanel;
 
-  if (state.connected) {
-    await loadMessages();
-    startAutoRefresh();
+async function bootGmailSurface() {
+  mainBuildSidebar();
+  await mainRefreshGuideAndAuthState();
+  mainApplyGmailLayoutMode();
+
+  if (mainState.connected) {
+    await mainLoadMessages();
+    mainStartAutoRefresh();
   }
 
   window.addEventListener('hashchange', async () => {
-    await refreshGuideAndAuthState();
-    applyGmailLayoutMode();
+    await mainRefreshGuideAndAuthState();
+    mainApplyGmailLayoutMode();
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
     if (changes.onboardingGuideState || changes.userId || changes.onboardingComplete) {
-      refreshGuideAndAuthState()
+      mainRefreshGuideAndAuthState()
         .then(async () => {
-          applyGmailLayoutMode();
-          if (state.connected && state.messages.length === 0) {
-            await loadMessages();
+          mainApplyGmailLayoutMode();
+          if (mainState.connected && mainState.messages.length === 0) {
+            await mainLoadMessages();
           }
         })
         .catch(() => {});
     }
     if (changes.setupDiagnostics) {
-      state.setupDiagnostics = normalizeSetupDiagnostics(changes.setupDiagnostics.newValue);
-      renderActivityPanel();
+      mainState.setupDiagnostics = mainNormalizeSetupDiagnostics(changes.setupDiagnostics.newValue);
+      mainRenderActivityPanel();
     }
   });
 }
+
+globalThis.bootGmailSurface = bootGmailSurface;

@@ -1,7 +1,21 @@
+const setupNormalizeGuideState = globalThis.normalizeGuideState;
+const setupState = globalThis.state;
+const setupResolvedGuideStepForUi = globalThis.resolvedGuideStepForUi;
+const setupStepNumberFromKey = globalThis.stepNumberFromKey;
+const setupGuideSubstepCopy = globalThis.GUIDE_SUBSTEP_COPY;
+const setupFriendlyContextLabel = globalThis.friendlyContextLabel;
+const setupCurrentPageContext = globalThis.currentPageContext;
+const setupRenderActivityPanel = globalThis.renderActivityPanel;
+const setupSendWorker = globalThis.sendWorker;
+const setupGuideStepSet = globalThis.GUIDE_STEP_SET;
+const setupAppendUiActivity = globalThis.appendUiActivity;
+const setupLoadMessages = globalThis.loadMessages;
+const setupStartAutoRefresh = globalThis.startAutoRefresh;
+
 function updateGuideProgressUI() {
-  const guide = normalizeGuideState(state.guideState);
-  const guideStepForUi = resolvedGuideStepForUi(guide);
-  const stepNumber = stepNumberFromKey(guideStepForUi);
+  const guide = setupNormalizeGuideState(setupState.guideState);
+  const guideStepForUi = setupResolvedGuideStepForUi(guide);
+  const stepNumber = setupStepNumberFromKey(guideStepForUi);
   const progressText = document.getElementById('gmailUnifiedGuideProgressText');
   if (progressText) {
     progressText.textContent = `Step ${stepNumber}/2 · ${guide.progress}/2 completed`;
@@ -24,40 +38,40 @@ function updateGuideProgressUI() {
 
   const welcomeBody = document.getElementById('gmailUnifiedWelcomeBody');
   if (welcomeBody) {
-    welcomeBody.textContent = GUIDE_SUBSTEP_COPY.welcome.intro.body;
+    welcomeBody.textContent = setupGuideSubstepCopy.welcome.intro.body;
   }
 
   const connectBody = document.getElementById('gmailUnifiedConnectBody');
   if (connectBody) {
     connectBody.textContent =
       guide.substep === 'connect_submitted'
-        ? GUIDE_SUBSTEP_COPY.connect_account.connect_submitted.body
-        : GUIDE_SUBSTEP_COPY.connect_account.connect_ready.body;
+        ? setupGuideSubstepCopy.connect_account.connect_submitted.body
+        : setupGuideSubstepCopy.connect_account.connect_ready.body;
   }
 
   const contextChip = document.getElementById('gmailUnifiedGuideContext');
   if (contextChip) {
-    contextChip.textContent = `Current page: ${friendlyContextLabel(guide.currentContext || currentPageContext())}`;
+    contextChip.textContent = `Current page: ${setupFriendlyContextLabel(guide.currentContext || setupCurrentPageContext())}`;
   }
 
-  renderActivityPanel();
+  setupRenderActivityPanel();
 }
 
 async function refreshGuideAndAuthState() {
-  const [storage, guide] = await Promise.all([sendWorker('GET_STORAGE'), sendWorker('GUIDE_GET_STATE')]);
+  const [storage, guide] = await Promise.all([setupSendWorker('GET_STORAGE'), setupSendWorker('GUIDE_GET_STATE')]);
 
-  state.connected = Boolean(storage?.success && storage.userId);
-  state.guideState = normalizeGuideState(guide?.success ? guide.guideState : state.guideState);
-  state.setupDiagnostics = normalizeSetupDiagnostics(storage?.setupDiagnostics);
+  setupState.connected = Boolean(storage?.success && storage.userId);
+  setupState.guideState = setupNormalizeGuideState(guide?.success ? guide.guideState : setupState.guideState);
+  setupState.setupDiagnostics = globalThis.normalizeSetupDiagnostics(storage?.setupDiagnostics);
 
-  return { storage, guide: state.guideState };
+  return { storage, guide: setupState.guideState };
 }
 
 async function guideConfirm(step, payload = {}) {
-  if (!GUIDE_STEP_SET.has(step)) return;
-  const response = await sendWorker('GUIDE_CONFIRM_STEP', { step, ...payload });
+  if (!setupGuideStepSet.has(step)) return;
+  const response = await setupSendWorker('GUIDE_CONFIRM_STEP', { step, ...payload });
   if (response?.success && response.guideState) {
-    state.guideState = normalizeGuideState(response.guideState);
+    setupState.guideState = setupNormalizeGuideState(response.guideState);
     return;
   }
   await refreshGuideAndAuthState();
@@ -72,12 +86,12 @@ function applyGmailLayoutMode() {
   if (!sidebar || !shell || !onboardingOverlay) return;
 
   document.body.classList.add('gmail-unified-fullscreen');
-  sidebar.classList.toggle('gmail-unified-locked', !state.connected);
+  sidebar.classList.toggle('gmail-unified-locked', !setupState.connected);
 
-  const showGuide = !state.connected || state.guideReviewOpen;
-  shell.hidden = !state.connected;
+  const showGuide = !setupState.connected || setupState.guideReviewOpen;
+  shell.hidden = !setupState.connected;
   onboardingOverlay.hidden = !showGuide;
-  if (guideClose) guideClose.hidden = !state.connected || !state.guideReviewOpen;
+  if (guideClose) guideClose.hidden = !setupState.connected || !setupState.guideReviewOpen;
 
   updateGuideProgressUI();
 }
@@ -108,7 +122,7 @@ function setConnectUiState(status, error = false) {
 }
 
 async function connectFromGuide() {
-  if (state.connectInFlight) return;
+  if (setupState.connectInFlight) return;
 
   const emailInput = document.getElementById('gmailUnifiedConnectEmail');
   const passInput = document.getElementById('gmailUnifiedConnectPassword');
@@ -118,7 +132,7 @@ async function connectFromGuide() {
   const appPassword = String(passInput?.value || '').trim().replace(/\s+/g, '');
 
   if (!email || !appPassword) {
-    await appendUiActivity({
+    await setupAppendUiActivity({
       source: 'UI',
       level: 'warning',
       stage: 'connect_input_missing',
@@ -128,13 +142,13 @@ async function connectFromGuide() {
     return;
   }
 
-  state.connectInFlight = true;
+  setupState.connectInFlight = true;
   if (connectBtn) {
     connectBtn.disabled = true;
     connectBtn.textContent = 'Connecting...';
   }
   setConnectUiState('Connecting...');
-  await appendUiActivity({
+  await setupAppendUiActivity({
     source: 'UI',
     level: 'info',
     stage: 'connect_button_clicked',
@@ -142,7 +156,7 @@ async function connectFromGuide() {
   }, { reset: true });
 
   try {
-    const response = await sendWorker('CONNECT', { email, appPassword });
+    const response = await setupSendWorker('CONNECT', { email, appPassword });
     if (!response?.success) {
       setConnectUiState(mapConnectError(response), true);
       return;
@@ -167,19 +181,29 @@ async function connectFromGuide() {
 
     setTimeout(async () => {
       await refreshGuideAndAuthState();
-      state.guideReviewOpen = false;
+      setupState.guideReviewOpen = false;
       applyGmailLayoutMode();
-      await loadMessages({ forceSync: false, trackActivity: true });
-      startAutoRefresh();
+      await setupLoadMessages({ forceSync: false, trackActivity: true });
+      setupStartAutoRefresh();
     }, 600);
   } finally {
     if (passInput) {
       passInput.value = '';
     }
-    state.connectInFlight = false;
+    setupState.connectInFlight = false;
     if (connectBtn) {
       connectBtn.disabled = false;
       connectBtn.textContent = 'Connect my account';
     }
   }
 }
+
+Object.assign(globalThis, {
+  updateGuideProgressUI,
+  refreshGuideAndAuthState,
+  guideConfirm,
+  applyGmailLayoutMode,
+  mapConnectError,
+  setConnectUiState,
+  connectFromGuide
+});

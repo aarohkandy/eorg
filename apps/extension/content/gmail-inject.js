@@ -1,5 +1,5 @@
-if (isMailHost()) {
-  waitForGmail(() => {
-    bootGmailSurface().catch(() => {});
+if (globalThis.isMailHost()) {
+  globalThis.waitForGmail(() => {
+    globalThis.bootGmailSurface().catch(() => {});
   });
 }

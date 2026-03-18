@@ -260,3 +260,31 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+Object.assign(globalThis, {
+  COLD_START_MESSAGE,
+  APP_PASSWORDS_URL,
+  TWO_STEP_VERIFICATION_URL,
+  GUIDE_STEPS,
+  GUIDE_STEP_SET,
+  GUIDE_SUBSTEP_COPY,
+  state,
+  isMailHost,
+  sendWorker,
+  openExternalPage,
+  createDiagnosticId,
+  normalizeDiagnosticDetails,
+  normalizeDiagnosticEntry,
+  normalizeSetupDiagnostics,
+  appendUiActivity,
+  defaultGuideState,
+  normalizeGuideState,
+  stepNumberFromKey,
+  resolvedGuideStepForUi,
+  currentPageContext,
+  friendlyContextLabel,
+  updateMainPanelVisibility,
+  waitForGmail,
+  formatDate,
+  escapeHtml
+});

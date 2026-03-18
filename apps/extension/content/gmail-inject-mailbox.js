@@ -1,16 +1,24 @@
+const mailboxState = globalThis.state;
+const mailboxSetStateCard = globalThis.setStateCard;
+const mailboxColdStartMessage = globalThis.COLD_START_MESSAGE;
+const mailboxAppendUiActivity = globalThis.appendUiActivity;
+const mailboxSendWorker = globalThis.sendWorker;
+const mailboxRenderThreads = globalThis.renderThreads;
+const mailboxFilteredMessages = globalThis.filteredMessages;
+
 function clearRetryTimer() {
-  if (state.retryTimer) {
-    clearInterval(state.retryTimer);
-    state.retryTimer = null;
+  if (mailboxState.retryTimer) {
+    clearInterval(mailboxState.retryTimer);
+    mailboxState.retryTimer = null;
   }
-  state.retrySeconds = 0;
+  mailboxState.retrySeconds = 0;
 }
 
 function startColdStartCountdown(onDone, options = {}) {
   clearRetryTimer();
-  state.retrySeconds = 60;
-  setStateCard('cold-start', COLD_START_MESSAGE, true);
-  appendUiActivity({
+  mailboxState.retrySeconds = 60;
+  mailboxSetStateCard('cold-start', mailboxColdStartMessage, true);
+  mailboxAppendUiActivity({
     source: 'UI',
     level: 'warning',
     stage: 'retry_scheduled',
@@ -19,11 +27,11 @@ function startColdStartCountdown(onDone, options = {}) {
     replaceKey: 'ui-retry-scheduled'
   }).catch(() => {});
 
-  state.retryTimer = setInterval(() => {
-    state.retrySeconds -= 1;
-    setStateCard('cold-start', COLD_START_MESSAGE, true);
+  mailboxState.retryTimer = setInterval(() => {
+    mailboxState.retrySeconds -= 1;
+    mailboxSetStateCard('cold-start', mailboxColdStartMessage, true);
 
-    if (state.retrySeconds <= 0) {
+    if (mailboxState.retrySeconds <= 0) {
       clearRetryTimer();
       onDone();
     }
@@ -31,9 +39,9 @@ function startColdStartCountdown(onDone, options = {}) {
 }
 
 async function loadMessages(options = {}) {
-  setStateCard('loading', 'Connecting to Gmail...');
+  mailboxSetStateCard('loading', 'Connecting to Gmail...');
 
-  const response = await sendWorker('FETCH_MESSAGES', {
+  const response = await mailboxSendWorker('FETCH_MESSAGES', {
     folder: options.folder || 'all',
     limit: 50,
     forceSync: Boolean(options.forceSync),
@@ -42,12 +50,12 @@ async function loadMessages(options = {}) {
 
   if (!response?.success) {
     if (response.code === 'NOT_CONNECTED') {
-      setStateCard('not-connected', 'Not set up yet. Use the setup guide to connect.');
+      mailboxSetStateCard('not-connected', 'Not set up yet. Use the setup guide to connect.');
       return;
     }
 
     if (response.code === 'AUTH_FAILED') {
-      setStateCard('auth-failed', 'Connection error. Reconnect your account in setup.');
+      mailboxSetStateCard('auth-failed', 'Connection error. Reconnect your account in setup.');
       return;
     }
 
@@ -58,19 +66,19 @@ async function loadMessages(options = {}) {
       return;
     }
 
-    setStateCard('error', response.error || 'Unable to load messages right now.', true);
+    mailboxSetStateCard('error', response.error || 'Unable to load messages right now.', true);
     return;
   }
 
   clearRetryTimer();
-  state.messages = Array.isArray(response.messages) ? response.messages : [];
-  renderThreads();
+  mailboxState.messages = Array.isArray(response.messages) ? response.messages : [];
+  mailboxRenderThreads();
   if (options.trackActivity) {
-    appendUiActivity({
+    mailboxAppendUiActivity({
       source: 'UI',
       level: 'success',
       stage: 'mailbox_rendered',
-      message: `Mailbox view rendered with ${response.count || state.messages.length || 0} messages.`,
+      message: `Mailbox view rendered with ${response.count || mailboxState.messages.length || 0} messages.`,
       details: `Inbox ${response.inboxCount || 0}, Sent ${response.sentCount || 0}.`,
       replaceKey: 'ui-mailbox-rendered'
     }).catch(() => {});
@@ -78,33 +86,33 @@ async function loadMessages(options = {}) {
 }
 
 function setFilter(filter) {
-  state.filter = filter;
+  mailboxState.filter = filter;
 
   const buttons = document.querySelectorAll('.gmail-unified-filter-btn');
   buttons.forEach((button) => {
     button.classList.toggle('active', button.dataset.filter === filter);
   });
 
-  const visible = filteredMessages().length;
+  const visible = mailboxFilteredMessages().length;
   console.log(`[Extension] Filter changed to: ${filter} - showing ${visible} messages`);
-  renderThreads();
+  mailboxRenderThreads();
 }
 
-let searchDebounce = null;
+globalThis.searchDebounce = null;
 async function handleSearch(query) {
   const trimmed = String(query || '').trim();
-  state.searchQuery = trimmed;
+  mailboxState.searchQuery = trimmed;
 
   if (!trimmed) {
     await loadMessages();
     return;
   }
 
-  setStateCard('loading', 'Searching messages...');
-  const response = await sendWorker('SEARCH_MESSAGES', {
+  mailboxSetStateCard('loading', 'Searching messages...');
+  const response = await mailboxSendWorker('SEARCH_MESSAGES', {
     query: trimmed,
     limit: 20,
-    trackActivity: !state.connected || state.guideReviewOpen
+    trackActivity: !mailboxState.connected || mailboxState.guideReviewOpen
   });
 
   if (!response?.success) {
@@ -115,20 +123,29 @@ async function handleSearch(query) {
       return;
     }
 
-    setStateCard('error', response.error || 'Search failed.', true);
+    mailboxSetStateCard('error', response.error || 'Search failed.', true);
     return;
   }
 
   clearRetryTimer();
-  state.messages = Array.isArray(response.messages) ? response.messages : [];
-  renderThreads();
+  mailboxState.messages = Array.isArray(response.messages) ? response.messages : [];
+  mailboxRenderThreads();
 }
 
 function startAutoRefresh() {
-  if (state.autoRefreshTimer) return;
+  if (mailboxState.autoRefreshTimer) return;
 
-  state.autoRefreshTimer = setInterval(() => {
-    if (document.hidden || !state.connected) return;
+  mailboxState.autoRefreshTimer = setInterval(() => {
+    if (document.hidden || !mailboxState.connected) return;
     loadMessages();
   }, 5 * 60 * 1000);
 }
+
+Object.assign(globalThis, {
+  clearRetryTimer,
+  startColdStartCountdown,
+  loadMessages,
+  setFilter,
+  handleSearch,
+  startAutoRefresh
+});

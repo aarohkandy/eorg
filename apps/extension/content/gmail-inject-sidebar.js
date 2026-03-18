@@ -1,116 +1,132 @@
+const sidebarState = globalThis.state;
+const sidebarAppendUiActivity = globalThis.appendUiActivity;
+const sidebarApplyGmailLayoutMode = globalThis.applyGmailLayoutMode;
+const sidebarOpenExternalPage = globalThis.openExternalPage;
+const sidebarAppPasswordsUrl = globalThis.APP_PASSWORDS_URL;
+const sidebarGuideConfirm = globalThis.guideConfirm;
+const sidebarTwoStepVerificationUrl = globalThis.TWO_STEP_VERIFICATION_URL;
+const sidebarConnectFromGuide = globalThis.connectFromGuide;
+const sidebarSendWorker = globalThis.sendWorker;
+const sidebarStartColdStartCountdown = globalThis.startColdStartCountdown;
+const sidebarLoadMessages = globalThis.loadMessages;
+const sidebarSetStateCard = globalThis.setStateCard;
+const sidebarSetFilter = globalThis.setFilter;
+const sidebarHandleSearch = globalThis.handleSearch;
+const sidebarUpdateMainPanelVisibility = globalThis.updateMainPanelVisibility;
+
 function bindGuideEvents(sidebar) {
   sidebar.querySelector('#gmailUnifiedGuideBtn')?.addEventListener('click', () => {
-    if (!state.connected) return;
-    state.guideReviewOpen = true;
-    appendUiActivity({
+    if (!sidebarState.connected) return;
+    sidebarState.guideReviewOpen = true;
+    sidebarAppendUiActivity({
       source: 'UI',
       level: 'info',
       stage: 'guide_opened',
       message: 'Guided setup activity log reopened.'
     }).catch(() => {});
-    applyGmailLayoutMode();
+    sidebarApplyGmailLayoutMode();
   });
 
   sidebar.querySelector('#gmailUnifiedGuideCloseBtn')?.addEventListener('click', () => {
-    state.guideReviewOpen = false;
-    applyGmailLayoutMode();
+    sidebarState.guideReviewOpen = false;
+    sidebarApplyGmailLayoutMode();
   });
 
   sidebar.querySelector('#gmailUnifiedWelcomeStartBtn')?.addEventListener('click', async () => {
-    appendUiActivity({
+    sidebarAppendUiActivity({
       source: 'UI',
       level: 'info',
       stage: 'open_app_passwords',
       message: 'Opened Google App Passwords.'
     }).catch(() => {});
-    openExternalPage(APP_PASSWORDS_URL);
-    await guideConfirm('welcome');
-    applyGmailLayoutMode();
+    sidebarOpenExternalPage(sidebarAppPasswordsUrl);
+    await sidebarGuideConfirm('welcome');
+    sidebarApplyGmailLayoutMode();
   });
 
   sidebar.querySelector('#gmailUnifiedWelcomeTwoFactorBtn')?.addEventListener('click', () => {
-    appendUiActivity({
+    sidebarAppendUiActivity({
       source: 'UI',
       level: 'info',
       stage: 'open_two_factor',
       message: 'Opened Google 2-Step Verification.'
     }).catch(() => {});
-    openExternalPage(TWO_STEP_VERIFICATION_URL);
+    sidebarOpenExternalPage(sidebarTwoStepVerificationUrl);
   });
 
   sidebar.querySelector('#gmailUnifiedConnectBtn')?.addEventListener('click', async () => {
-    await connectFromGuide();
+    await sidebarConnectFromGuide();
   });
 
   sidebar.querySelector('#gmailUnifiedConnectOpenAppBtn')?.addEventListener('click', () => {
-    appendUiActivity({
+    sidebarAppendUiActivity({
       source: 'UI',
       level: 'info',
       stage: 'open_app_passwords',
       message: 'Opened Google App Passwords from Step 2.'
     }).catch(() => {});
-    openExternalPage(APP_PASSWORDS_URL);
+    sidebarOpenExternalPage(sidebarAppPasswordsUrl);
   });
 
   sidebar.querySelector('#gmailUnifiedConnectOpenTwoFactorBtn')?.addEventListener('click', () => {
-    appendUiActivity({
+    sidebarAppendUiActivity({
       source: 'UI',
       level: 'info',
       stage: 'open_two_factor',
       message: 'Opened Google 2-Step Verification from Step 2.'
     }).catch(() => {});
-    openExternalPage(TWO_STEP_VERIFICATION_URL);
+    sidebarOpenExternalPage(sidebarTwoStepVerificationUrl);
   });
 
   sidebar.querySelector('#gmailUnifiedConnectPassword')?.addEventListener('keydown', async (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      await connectFromGuide();
+      await sidebarConnectFromGuide();
     }
   });
 
   sidebar.querySelector('#gmailUnifiedSync')?.addEventListener('click', async () => {
-    if (!state.connected) return;
+    if (!sidebarState.connected) return;
 
-    const result = await sendWorker('SYNC_MESSAGES', {
-      trackActivity: state.guideReviewOpen
+    const result = await sidebarSendWorker('SYNC_MESSAGES', {
+      trackActivity: sidebarState.guideReviewOpen
     });
     if (!result?.success) {
       if (result.code === 'BACKEND_COLD_START') {
-        startColdStartCountdown(() => loadMessages({ forceSync: true, trackActivity: state.guideReviewOpen }), {
+        sidebarStartColdStartCountdown(() => sidebarLoadMessages({ forceSync: true, trackActivity: sidebarState.guideReviewOpen }), {
           message: 'Manual sync is waiting for the backend to wake up.'
         });
         return;
       }
 
-      setStateCard('error', result.error || 'Sync failed.', true);
+      sidebarSetStateCard('error', result.error || 'Sync failed.', true);
       return;
     }
 
-    await loadMessages({ forceSync: true, trackActivity: state.guideReviewOpen });
+    await sidebarLoadMessages({ forceSync: true, trackActivity: sidebarState.guideReviewOpen });
   });
 
   sidebar.querySelectorAll('.gmail-unified-filter-btn').forEach((button) => {
-    button.addEventListener('click', () => setFilter(button.dataset.filter));
+    button.addEventListener('click', () => sidebarSetFilter(button.dataset.filter));
   });
 
   const searchInput = sidebar.querySelector('#gmailUnifiedSearchInput');
   searchInput?.addEventListener('input', (event) => {
-    clearTimeout(searchDebounce);
+    clearTimeout(globalThis.searchDebounce);
     const value = event.target.value;
-    searchDebounce = setTimeout(() => {
-      handleSearch(value);
+    globalThis.searchDebounce = setTimeout(() => {
+      sidebarHandleSearch(value);
     }, 400);
   });
 
   sidebar.querySelector('#gmailUnifiedRetryBtn')?.addEventListener('click', () => {
-    loadMessages({ forceSync: false, trackActivity: true });
+    sidebarLoadMessages({ forceSync: false, trackActivity: true });
   });
 
   sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
-    state.selectedThreadId = '';
+    sidebarState.selectedThreadId = '';
     document.getElementById('gmailUnifiedDetail').style.display = 'none';
-    updateMainPanelVisibility();
+    sidebarUpdateMainPanelVisibility();
   });
 }
 
@@ -229,5 +245,10 @@ function buildSidebar() {
   document.body.appendChild(sidebar);
   bindGuideEvents(sidebar);
 
-  updateMainPanelVisibility();
+  sidebarUpdateMainPanelVisibility();
 }
+
+Object.assign(globalThis, {
+  bindGuideEvents,
+  buildSidebar
+});
