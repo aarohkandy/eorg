@@ -2,6 +2,8 @@ const COLD_START_MESSAGE =
   'Backend server is starting up, please wait 60 seconds and try again.';
 const APP_PASSWORDS_URL = 'https://myaccount.google.com/apppasswords';
 const TWO_STEP_VERIFICATION_URL = 'https://myaccount.google.com/signinoptions/two-step-verification';
+// Flip this off when we're ready to remove the onboarding activity panel.
+const SHOW_ACTIVITY_PANEL = true;
 
 const GUIDE_STEPS = ['welcome', 'connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -35,6 +37,18 @@ const state = {
   connected: false,
   guideState: null,
   setupDiagnostics: { entries: [] },
+  lastMailboxTrace: [],
+  lastMailboxDebug: null,
+  lastMailboxSource: 'mailbox',
+  mailboxAutoRefresh: {
+    attempted: false,
+    inFlight: false,
+    before: null,
+    after: null,
+    failedToFillContent: false,
+    error: ''
+  },
+  contactDebug: {},
   guideReviewOpen: false,
   connectInFlight: false
 };
@@ -100,6 +114,161 @@ function normalizeSetupDiagnostics(input) {
   return {
     entries
   };
+}
+
+function normalizeTraceEntries(entries) {
+  return Array.isArray(entries)
+    ? entries.map((entry) => normalizeDiagnosticEntry(entry)).filter(Boolean)
+    : [];
+}
+
+function mergeTraceEntries(...groups) {
+  const combined = groups.flat().filter(Boolean);
+  const merged = [];
+  const seen = new Set();
+
+  normalizeTraceEntries(combined).forEach((entry) => {
+    const signature = [
+      entry.ts,
+      entry.source,
+      entry.level,
+      entry.stage,
+      entry.message,
+      entry.code || '',
+      entry.details || ''
+    ].join('|');
+
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    merged.push(entry);
+  });
+
+  return merged;
+}
+
+function numericValue(value, fallback = 0) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+function normalizeBuildInfo(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  return {
+    version: typeof src.version === 'string' && src.version ? src.version : 'unknown',
+    buildSha: typeof src.buildSha === 'string' && src.buildSha ? src.buildSha : 'unknown',
+    deployedAt: typeof src.deployedAt === 'string' && src.deployedAt ? src.deployedAt : null
+  };
+}
+
+function normalizeMailboxDebug(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const cache = src.cache && typeof src.cache === 'object' ? src.cache : {};
+  const live = src.live && typeof src.live === 'object' ? src.live : {};
+
+  return {
+    backend: normalizeBuildInfo(src.backend),
+    cache: {
+      used: Boolean(cache.used),
+      newestCachedAt: typeof cache.newestCachedAt === 'string' && cache.newestCachedAt ? cache.newestCachedAt : null,
+      totalMessages: numericValue(cache.totalMessages, 0),
+      missingContentCount: numericValue(cache.missingContentCount, 0),
+      shortContentCount: numericValue(cache.shortContentCount, 0),
+      contentCoveragePct: numericValue(cache.contentCoveragePct, 100)
+    },
+    live: {
+      used: Boolean(live.used),
+      limitPerFolder: numericValue(live.limitPerFolder, 0),
+      totalMessages: numericValue(live.totalMessages, 0),
+      missingContentCount: numericValue(live.missingContentCount, 0),
+      shortContentCount: numericValue(live.shortContentCount, 0),
+      contentCoveragePct: numericValue(live.contentCoveragePct, 100)
+    }
+  };
+}
+
+function blankMailboxDebug() {
+  return normalizeMailboxDebug(null);
+}
+
+function threadIdToContactEmail(threadId) {
+  const value = String(threadId || '').trim();
+  return value.startsWith('contact:') ? value.slice('contact:'.length) : '';
+}
+
+function getGroupContactEmail(group) {
+  const fromThreadId = threadIdToContactEmail(group?.threadId);
+  if (fromThreadId) return fromThreadId;
+
+  const messages = Array.isArray(group?.messages) ? group.messages : [];
+  const fromIncoming = messages.find((message) => !message?.isOutgoing && message?.from?.email)?.from?.email;
+  if (fromIncoming) return String(fromIncoming).trim().toLowerCase();
+
+  const fromOutgoing = messages.find((message) => message?.isOutgoing && message?.to?.[0]?.email)?.to?.[0]?.email;
+  if (fromOutgoing) return String(fromOutgoing).trim().toLowerCase();
+
+  return '';
+}
+
+function buildSelectedMessageRefs(group) {
+  return Array.isArray(group?.messages)
+    ? group.messages.map((message) => ({
+      id: message?.id || '',
+      uid: message?.uid ?? null,
+      folder: message?.folder || '',
+      messageId: message?.messageId || ''
+    }))
+    : [];
+}
+
+function replaceMessagesForThread(threadId, nextMessages) {
+  const remaining = state.messages.filter((message) => threadCounterpartyKey(message) !== threadId);
+  const replacements = Array.isArray(nextMessages) ? nextMessages : [];
+  const merged = new Map();
+
+  [...remaining, ...replacements].forEach((message) => {
+    if (!message?.id) return;
+    merged.set(message.id, message);
+  });
+
+  state.messages = [...merged.values()];
+}
+
+function messageContentCounts(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const missing = list.filter((message) => snippetHealth(message) === 'missing').length;
+  const short = list.filter((message) => snippetHealth(message) === 'short').length;
+  return {
+    total: list.length,
+    missing,
+    short,
+    present: Math.max(0, list.length - missing - short)
+  };
+}
+
+function defaultContactDebugState() {
+  return {
+    attempted: false,
+    inFlight: false,
+    contactEmail: '',
+    beforeCount: 0,
+    beforeMissingContentCount: 0,
+    afterCount: 0,
+    afterMissingContentCount: 0,
+    backend: normalizeBuildInfo(null),
+    trace: [],
+    perMessageExtraction: [],
+    error: '',
+    requestedAt: null,
+    completedAt: null
+  };
+}
+
+function getContactDebugState(threadId) {
+  const key = String(threadId || '');
+  if (!key) return defaultContactDebugState();
+  if (!state.contactDebug[key]) {
+    state.contactDebug[key] = defaultContactDebugState();
+  }
+  return state.contactDebug[key];
 }
 
 async function appendUiActivity(entry, options = {}) {
@@ -302,14 +471,50 @@ function renderActivityPanel() {
   log.textContent = entries.map((entry) => formatActivityLine(entry)).join('\n');
 }
 
+function buildActivityPanelMarkup() {
+  if (!SHOW_ACTIVITY_PANEL) return '';
+
+  return `
+        <section class="gmail-unified-activity-panel">
+          <div class="gmail-unified-activity-header">
+            <div class="gmail-unified-activity-kicker">Activity</div>
+          </div>
+          <pre id="gmailUnifiedActivityLog" class="gmail-unified-activity-log"></pre>
+        </section>
+  `;
+}
+
 function byDateDesc(a, b) {
   return new Date(b.date).getTime() - new Date(a.date).getTime();
+}
+
+function threadCounterparty(message) {
+  if (message?.isOutgoing) {
+    return message.to?.[0]?.name || message.to?.[0]?.email || 'Unknown recipient';
+  }
+
+  return message?.from?.name || message?.from?.email || 'Unknown sender';
+}
+
+function threadCounterpartyKey(message) {
+  if (message?.isOutgoing) {
+    const email = String(message.to?.[0]?.email || '').trim().toLowerCase();
+    if (email) return `contact:${email}`;
+  } else {
+    const email = String(message?.from?.email || '').trim().toLowerCase();
+    if (email) return `contact:${email}`;
+  }
+
+  const label = threadCounterparty(message).trim().toLowerCase();
+  if (label) return `contact-label:${label}`;
+
+  return message?.threadId || message?.id || createDiagnosticId();
 }
 
 function groupByThread(messages) {
   const map = new Map();
   messages.forEach((message) => {
-    const key = message.threadId || message.id;
+    const key = threadCounterpartyKey(message);
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(message);
   });
@@ -320,6 +525,11 @@ function groupByThread(messages) {
       messages: [...entries].sort(byDateDesc)
     }))
     .sort((a, b) => byDateDesc(a.messages[0], b.messages[0]));
+}
+
+function findSelectedGroup() {
+  if (!state.selectedThreadId) return null;
+  return groupByThread(filteredMessages()).find((group) => group.threadId === state.selectedThreadId) || null;
 }
 
 function isUnread(message) {
@@ -339,6 +549,234 @@ function filteredMessages() {
   }
 
   return current.sort(byDateDesc);
+}
+
+function snippetHealth(message) {
+  const text = String(message?.snippet || '').trim();
+  if (!text) return 'missing';
+  if (text.length < 40) return 'short';
+  return 'present';
+}
+
+function buildDebugDiagnosis(group, traceEntries) {
+  const messages = Array.isArray(group?.messages) ? group.messages : [];
+  const missingCount = messages.filter((message) => snippetHealth(message) === 'missing').length;
+  const shortCount = messages.filter((message) => snippetHealth(message) === 'short').length;
+  const contactDebug = getContactDebugState(group?.threadId);
+  const stages = new Set((traceEntries || []).map((entry) => entry.stage));
+
+  if (!messages.length) {
+    return 'No selected thread was available when this debug snapshot was generated.';
+  }
+
+  if (contactDebug.inFlight) {
+    return 'Mailita is refreshing this conversation live from Gmail right now to capture per-message extraction details.';
+  }
+
+  if (contactDebug.attempted && !contactDebug.inFlight) {
+    if (contactDebug.error) {
+      return 'Mailita attempted a live contact refetch, but that refetch failed before refreshed message text could be returned.';
+    }
+
+    if (contactDebug.afterCount > 0 && contactDebug.afterMissingContentCount === 0) {
+      return 'Mailita performed a live contact refetch and recovered message content for this conversation.';
+    }
+
+    if (contactDebug.afterCount > 0 && contactDebug.afterMissingContentCount > 0) {
+      return 'Mailita performed a live contact refetch, and Gmail still returned blank text for some or all messages. The extraction diagnostics below show where parsing failed.';
+    }
+  }
+
+  if (state.mailboxAutoRefresh.inFlight) {
+    return 'Mailita detected blank cached content and is running one live mailbox refresh from Gmail to compare cache coverage before and after.';
+  }
+
+  if (state.mailboxAutoRefresh.attempted && state.mailboxAutoRefresh.failedToFillContent) {
+    return 'Mailita already retried the mailbox live, but blank message content remained. The contact-level debug refetch below is the next layer of evidence.';
+  }
+
+  if (!missingCount && !shortCount) {
+    return 'The UI received message text for this thread. If the content still looks wrong, the next likely issue is formatting or HTML-to-text conversion.';
+  }
+
+  if (stages.has('messages_cache_hit') && !stages.has('messages_cache_preview_miss')) {
+    return 'The backend served cached rows without refreshing from Gmail. Empty content here usually means those cached rows were saved before body extraction worked, or the active backend is still running the older build.';
+  }
+
+  if (stages.has('messages_cache_preview_miss')) {
+    return 'The backend noticed weak cached preview content and attempted a live Gmail refresh. If content is still empty, the IMAP extraction path is still failing for this message structure.';
+  }
+
+  if (stages.has('messages_imap_fetch_complete') || stages.has('imap_fetch_complete')) {
+    return 'The backend fetched this mailbox from Gmail, but message text still came back empty. That usually means this email has a MIME/HTML structure our extraction logic is not parsing yet.';
+  }
+
+  return 'The UI did not receive usable message text for at least one message in this thread. We need the trace below to see whether the failure happened in cache, live IMAP fetch, or parsing.';
+}
+
+function buildThreadDebugReport(group) {
+  const mailboxDebug = state.lastMailboxDebug || blankMailboxDebug();
+  const contactDebug = getContactDebugState(group?.threadId);
+  const traceEntries = mergeTraceEntries(state.lastMailboxTrace, contactDebug.trace);
+  const messages = [...(group?.messages || [])].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const selectedContactEmail = getGroupContactEmail(group);
+  const backendInfo = contactDebug.attempted
+    ? normalizeBuildInfo(contactDebug.backend)
+    : normalizeBuildInfo(mailboxDebug.backend);
+  const lines = [
+    'MAILITA TEMP DEBUG',
+    `generated_at: ${new Date().toISOString()}`,
+    `trace_source: ${contactDebug.attempted ? 'mailbox+contact_debug' : (state.lastMailboxSource || 'mailbox')}`,
+    `selected_thread_id: ${group?.threadId || 'none'}`,
+    `selected_contact: ${selectedContactEmail || '(no contact email)'}`,
+    `selected_subject: ${group?.messages?.[0]?.subject || '(no subject)'}`,
+    `message_count: ${messages.length}`,
+    `diagnosis: ${buildDebugDiagnosis(group, traceEntries)}`,
+    ''
+  ];
+
+  lines.push('backend:');
+  lines.push(`  version: ${backendInfo.version}`);
+  lines.push(`  build_sha: ${backendInfo.buildSha}`);
+  lines.push(`  deployed_at: ${backendInfo.deployedAt || 'unknown'}`);
+  lines.push('');
+
+  lines.push('mailbox_cache_coverage:');
+  lines.push(`  used: ${mailboxDebug.cache.used}`);
+  lines.push(`  newest_cached_at: ${mailboxDebug.cache.newestCachedAt || 'none'}`);
+  lines.push(`  total_messages: ${mailboxDebug.cache.totalMessages}`);
+  lines.push(`  missing_content_count: ${mailboxDebug.cache.missingContentCount}`);
+  lines.push(`  short_content_count: ${mailboxDebug.cache.shortContentCount}`);
+  lines.push(`  content_coverage_pct: ${mailboxDebug.cache.contentCoveragePct}`);
+  lines.push('');
+
+  lines.push('mailbox_live_refresh:');
+  lines.push(`  used: ${mailboxDebug.live.used}`);
+  lines.push(`  limit_per_folder: ${mailboxDebug.live.limitPerFolder}`);
+  lines.push(`  total_messages: ${mailboxDebug.live.totalMessages}`);
+  lines.push(`  missing_content_count: ${mailboxDebug.live.missingContentCount}`);
+  lines.push(`  short_content_count: ${mailboxDebug.live.shortContentCount}`);
+  lines.push(`  content_coverage_pct: ${mailboxDebug.live.contentCoveragePct}`);
+  lines.push('');
+
+  lines.push('mailbox_auto_refresh:');
+  lines.push(`  attempted: ${state.mailboxAutoRefresh.attempted}`);
+  lines.push(`  in_flight: ${state.mailboxAutoRefresh.inFlight}`);
+  lines.push(`  failed_to_fill_content: ${state.mailboxAutoRefresh.failedToFillContent}`);
+  lines.push(`  error: ${state.mailboxAutoRefresh.error || 'none'}`);
+  lines.push(`  before_missing_content_count: ${state.mailboxAutoRefresh.before?.cache?.missingContentCount ?? 'n/a'}`);
+  lines.push(`  before_content_coverage_pct: ${state.mailboxAutoRefresh.before?.cache?.contentCoveragePct ?? 'n/a'}`);
+  lines.push(`  after_missing_content_count: ${state.mailboxAutoRefresh.after?.live?.missingContentCount ?? 'n/a'}`);
+  lines.push(`  after_content_coverage_pct: ${state.mailboxAutoRefresh.after?.live?.contentCoveragePct ?? 'n/a'}`);
+  lines.push('');
+
+  lines.push('contact_live_refetch:');
+  lines.push(`  attempted: ${contactDebug.attempted}`);
+  lines.push(`  in_flight: ${contactDebug.inFlight}`);
+  lines.push(`  contact_email: ${contactDebug.contactEmail || selectedContactEmail || '(none)'}`);
+  lines.push(`  before_count: ${contactDebug.beforeCount}`);
+  lines.push(`  after_count: ${contactDebug.afterCount}`);
+  lines.push(`  before_missing_content_count: ${contactDebug.beforeMissingContentCount}`);
+  lines.push(`  after_missing_content_count: ${contactDebug.afterMissingContentCount}`);
+  lines.push(`  error: ${contactDebug.error || 'none'}`);
+  lines.push('');
+
+  messages.forEach((message, index) => {
+    const snippet = String(message?.snippet || '');
+    const preview = snippet.slice(0, 240).replace(/\n/g, '\\n') || '(empty)';
+    lines.push(`message_${index + 1}:`);
+    lines.push(`  id: ${message.id || ''}`);
+    lines.push(`  uid: ${message.uid ?? ''}`);
+    lines.push(`  message_id: ${message.messageId || ''}`);
+    lines.push(`  folder: ${message.folder || ''}`);
+    lines.push(`  date: ${message.date || ''}`);
+    lines.push(`  from: ${message.from?.name || ''} <${message.from?.email || ''}>`);
+    lines.push(`  to: ${(message.to || []).map((entry) => `${entry?.name || ''} <${entry?.email || ''}>`).join(', ')}`);
+    lines.push(`  subject: ${message.subject || ''}`);
+    lines.push(`  snippet_health: ${snippetHealth(message)}`);
+    lines.push(`  snippet_length: ${snippet.length}`);
+    lines.push(`  snippet_preview: ${preview}`);
+    if (message?.debug && typeof message.debug === 'object') {
+      lines.push(`  extraction_empty_reason: ${message.debug.emptyReason || 'unknown'}`);
+      lines.push(`  extraction_selected_part: ${message.debug.selectedPart || 'none'}`);
+      lines.push(`  extraction_parser_source: ${message.debug.parserSource || 'none'}`);
+      lines.push(`  extraction_sanitized_length: ${message.debug.sanitizedLength ?? 0}`);
+    }
+    lines.push('');
+  });
+
+  if (contactDebug.perMessageExtraction.length) {
+    lines.push('per_message_extraction:');
+    contactDebug.perMessageExtraction.forEach((entry, index) => {
+      lines.push(`  extraction_${index + 1}:`);
+      lines.push(`    id: ${entry.id || ''}`);
+      lines.push(`    uid: ${entry.uid ?? ''}`);
+      lines.push(`    folder: ${entry.folder || ''}`);
+      lines.push(`    has_body_structure: ${Boolean(entry.hasBodyStructure)}`);
+      lines.push(`    selected_part: ${entry.selectedPart || 'none'}`);
+      lines.push(`    selected_part_type: ${entry.selectedPartType || 'none'}`);
+      lines.push(`    selected_part_subtype: ${entry.selectedPartSubtype || 'none'}`);
+      lines.push(`    downloaded_bytes: ${entry.downloadedBytes ?? 0}`);
+      lines.push(`    parser_source: ${entry.parserSource || 'none'}`);
+      lines.push(`    raw_text_length: ${entry.rawTextLength ?? 0}`);
+      lines.push(`    sanitized_length: ${entry.sanitizedLength ?? 0}`);
+      lines.push(`    empty_reason: ${entry.emptyReason || 'unknown'}`);
+    });
+    lines.push('');
+  }
+
+  lines.push('recent_trace:');
+  if (!traceEntries.length) {
+    lines.push('  (no trace entries returned)');
+  } else {
+    traceEntries.slice(-25).forEach((entry) => {
+      lines.push(`  ${formatActivityLine(entry)}`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function renderThreadDebug(group) {
+  const log = document.getElementById('gmailUnifiedDebugLog');
+  const summary = document.getElementById('gmailUnifiedDebugSummary');
+  const status = document.getElementById('gmailUnifiedDebugStatus');
+  if (!log || !summary || !status) return;
+
+  if (!group) {
+    summary.textContent = 'Open a conversation to inspect exactly what the UI received.';
+    status.hidden = true;
+    status.textContent = '';
+    log.value = 'Select a conversation to generate a debug report.';
+    return;
+  }
+
+  const contactDebug = getContactDebugState(group.threadId);
+  const counts = messageContentCounts(group.messages);
+
+  if (contactDebug.inFlight) {
+    status.hidden = false;
+    status.textContent = 'Refreshing this conversation live from Gmail...';
+  } else {
+    status.hidden = true;
+    status.textContent = '';
+  }
+
+  if (contactDebug.attempted && !contactDebug.inFlight) {
+    if (contactDebug.error) {
+      summary.textContent = `Live contact refetch failed: ${contactDebug.error}`;
+    } else if (contactDebug.afterCount > 0) {
+      summary.textContent = `Live contact refetch returned ${contactDebug.afterCount} messages. ${contactDebug.afterMissingContentCount} still have blank content.`;
+    } else {
+      summary.textContent = 'Live contact refetch completed, but Gmail returned no refreshed messages for this contact.';
+    }
+  } else {
+    summary.textContent = counts.missing
+      ? `${counts.missing} message${counts.missing > 1 ? 's' : ''} in this conversation are missing content.`
+      : 'This conversation has message text; use the log below to inspect the exact payload.';
+  }
+
+  log.value = buildThreadDebugReport(group);
 }
 
 function setStateCard(type, text, retryVisible = false) {
@@ -394,26 +832,16 @@ function renderThreads() {
     row.type = 'button';
     row.dataset.threadId = group.threadId;
 
-    const who = latest.isOutgoing
-      ? `To: ${latest.to?.[0]?.name || latest.to?.[0]?.email || 'Unknown recipient'}`
-      : latest.from?.name || latest.from?.email || 'Unknown sender';
+    const who = threadCounterparty(latest);
 
     row.innerHTML = `
       <div class="gmail-unified-thread-top">
-        <span class="gmail-unified-tag ${latest.isOutgoing ? 'sent' : 'inbox'}">${
-      latest.isOutgoing ? 'Sent' : 'Inbox'
-    }</span>
+        <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
         <span class="gmail-unified-date">${formatDate(latest.date)}</span>
       </div>
-      <div class="gmail-unified-thread-who">${escapeHtml(who)}</div>
       <div class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(
       latest.subject || '(no subject)'
     )}</div>
-      <div class="gmail-unified-thread-snippet">${escapeHtml(latest.snippet || '(no preview)')}</div>
-      <div class="gmail-unified-thread-meta">
-        <span>${group.messages.length} message${group.messages.length > 1 ? 's' : ''}</span>
-        ${unread ? '<span class="gmail-unified-unread-dot" title="Unread"></span>' : ''}
-      </div>
     `;
 
     row.addEventListener('click', () => {
@@ -425,6 +853,90 @@ function renderThreads() {
   });
 
   console.log(`[Extension] Rendering message list - ${threadGroups.length} items`);
+  renderThreadDebug(findSelectedGroup());
+}
+
+async function maybeDebugRefetchContact(group) {
+  if (!group?.threadId) return;
+
+  const contactEmail = getGroupContactEmail(group);
+  if (!contactEmail) return;
+
+  const counts = messageContentCounts(group.messages);
+  if (!counts.missing) return;
+
+  const existing = getContactDebugState(group.threadId);
+  if (existing.attempted || existing.inFlight) return;
+
+  state.contactDebug[group.threadId] = {
+    ...defaultContactDebugState(),
+    attempted: true,
+    inFlight: true,
+    contactEmail,
+    beforeCount: counts.total,
+    beforeMissingContentCount: counts.missing,
+    requestedAt: new Date().toISOString()
+  };
+  renderThreadDebug(group);
+
+  appendUiActivity({
+    source: 'UI',
+    level: 'info',
+    stage: 'contact_debug_refetch_started',
+    message: 'Refreshing the selected conversation live from Gmail for debug.',
+    details: `contactEmail=${contactEmail}; beforeCount=${counts.total}; beforeMissing=${counts.missing}`
+  }).catch(() => {});
+
+  const response = await sendWorker('DEBUG_REFETCH_CONTACT', {
+    contactEmail,
+    selectedMessageIds: buildSelectedMessageRefs(group)
+  });
+
+  const nextState = {
+    ...getContactDebugState(group.threadId),
+    attempted: true,
+    inFlight: false,
+    contactEmail,
+    completedAt: new Date().toISOString(),
+    backend: normalizeBuildInfo(response?.backend || state.lastMailboxDebug?.backend),
+    trace: normalizeTraceEntries(response?.trace),
+    perMessageExtraction: Array.isArray(response?.debug?.perMessageExtraction)
+      ? response.debug.perMessageExtraction
+      : []
+  };
+
+  if (!response?.success) {
+    nextState.error = response?.error || 'Live contact refetch failed.';
+    state.contactDebug[group.threadId] = nextState;
+    renderThreadDebug(findSelectedGroup());
+    return;
+  }
+
+  const refreshedMessages = Array.isArray(response.messages) ? response.messages : [];
+  nextState.beforeCount = numericValue(response?.debug?.beforeCount, counts.total);
+  nextState.afterCount = numericValue(response?.debug?.afterCount, refreshedMessages.length);
+  nextState.beforeMissingContentCount = numericValue(
+    response?.debug?.beforeMissingContentCount,
+    counts.missing
+  );
+  nextState.afterMissingContentCount = numericValue(
+    response?.debug?.afterMissingContentCount,
+    messageContentCounts(refreshedMessages).missing
+  );
+  state.contactDebug[group.threadId] = nextState;
+
+  if (refreshedMessages.length) {
+    replaceMessagesForThread(group.threadId, refreshedMessages);
+  }
+
+  renderThreads();
+  const selectedGroup = findSelectedGroup();
+  if (selectedGroup) {
+    renderThreadDetail(selectedGroup);
+  } else {
+    renderThreadDebug(null);
+    updateMainPanelVisibility();
+  }
 }
 
 function renderThreadDetail(group) {
@@ -434,7 +946,7 @@ function renderThreadDetail(group) {
   if (!detail || !header || !body) return;
 
   detail.style.display = 'block';
-  header.textContent = group.messages[0]?.subject || '(no subject)';
+  header.textContent = threadCounterparty(group.messages[0]);
 
   body.innerHTML = '';
 
@@ -453,13 +965,15 @@ function renderThreadDetail(group) {
         <span>${escapeHtml(who)}</span>
         <span>${formatDate(message.date)}</span>
       </div>
-      <div class="gmail-unified-message-snippet">${escapeHtml(message.snippet || '(no preview)')}</div>
+      <div class="gmail-unified-message-snippet">${escapeHtml(message.snippet || '(message content unavailable)')}</div>
     `;
 
       body.appendChild(item);
     });
 
+  renderThreadDebug(group);
   updateMainPanelVisibility();
+  maybeDebugRefetchContact(group).catch(() => {});
 }
 
 function clearRetryTimer() {
@@ -505,6 +1019,13 @@ async function loadMessages(options = {}) {
   });
 
   if (!response?.success) {
+    if (options.forceSync && state.mailboxAutoRefresh.inFlight) {
+      state.mailboxAutoRefresh.inFlight = false;
+      state.mailboxAutoRefresh.failedToFillContent = true;
+      state.mailboxAutoRefresh.error = response?.error || response?.code || 'Live mailbox refresh failed.';
+      renderThreadDebug(findSelectedGroup());
+    }
+
     if (response.code === 'NOT_CONNECTED') {
       setStateCard('not-connected', 'Not set up yet. Use the setup guide to connect.');
       return;
@@ -528,6 +1049,20 @@ async function loadMessages(options = {}) {
 
   clearRetryTimer();
   state.messages = Array.isArray(response.messages) ? response.messages : [];
+  state.lastMailboxTrace = normalizeTraceEntries(response.trace);
+  if (response.debug) {
+    state.lastMailboxDebug = normalizeMailboxDebug(response.debug);
+  }
+  state.lastMailboxSource = 'mailbox';
+
+  if (options.forceSync && state.mailboxAutoRefresh.inFlight) {
+    state.mailboxAutoRefresh.inFlight = false;
+    state.mailboxAutoRefresh.after = state.lastMailboxDebug || blankMailboxDebug();
+    state.mailboxAutoRefresh.failedToFillContent =
+      numericValue(state.mailboxAutoRefresh.after?.live?.missingContentCount, 0) > 0;
+    state.mailboxAutoRefresh.error = '';
+  }
+
   renderThreads();
   if (options.trackActivity) {
     appendUiActivity({
@@ -538,6 +1073,35 @@ async function loadMessages(options = {}) {
       details: `Inbox ${response.inboxCount || 0}, Sent ${response.sentCount || 0}.`,
       replaceKey: 'ui-mailbox-rendered'
     }).catch(() => {});
+  }
+
+  const cacheDebug = state.lastMailboxDebug?.cache;
+  if (
+    !options.forceSync &&
+    cacheDebug?.used &&
+    numericValue(cacheDebug.missingContentCount, 0) > 0 &&
+    !state.mailboxAutoRefresh.attempted
+  ) {
+    state.mailboxAutoRefresh.attempted = true;
+    state.mailboxAutoRefresh.inFlight = true;
+    state.mailboxAutoRefresh.before = state.lastMailboxDebug;
+    state.mailboxAutoRefresh.after = null;
+    state.mailboxAutoRefresh.failedToFillContent = false;
+    state.mailboxAutoRefresh.error = '';
+    renderThreadDebug(findSelectedGroup());
+
+    appendUiActivity({
+      source: 'UI',
+      level: 'warning',
+      stage: 'mailbox_live_refresh_started',
+      message: 'Blank cached content detected. Refreshing the mailbox live from Gmail.',
+      details: `missing=${cacheDebug.missingContentCount}; coveragePct=${cacheDebug.contentCoveragePct}`
+    }).catch(() => {});
+
+    await loadMessages({
+      ...options,
+      forceSync: true
+    });
   }
 }
 
@@ -585,6 +1149,8 @@ async function handleSearch(query) {
 
   clearRetryTimer();
   state.messages = Array.isArray(response.messages) ? response.messages : [];
+  state.lastMailboxTrace = normalizeTraceEntries(response.trace);
+  state.lastMailboxSource = response.source || 'search';
   renderThreads();
 }
 
@@ -753,11 +1319,17 @@ async function connectFromGuide() {
       }
     });
     setConnectUiState('Connected. Loading your messages...');
-    document.getElementById('gmailUnifiedSidebar')?.classList.add('gmail-unified-unlocking');
+    state.connected = true;
+    state.guideReviewOpen = false;
+    const sidebar = document.getElementById('gmailUnifiedSidebar');
+    sidebar?.classList.add('gmail-unified-unlocking');
+    applyGmailLayoutMode();
+    window.setTimeout(() => {
+      sidebar?.classList.remove('gmail-unified-unlocking');
+    }, 500);
 
     setTimeout(async () => {
       await refreshGuideAndAuthState();
-      state.guideReviewOpen = false;
       applyGmailLayoutMode();
       await loadMessages({ forceSync: false, trackActivity: true });
       startAutoRefresh();
@@ -886,6 +1458,28 @@ function bindGuideEvents(sidebar) {
   sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
     state.selectedThreadId = '';
     document.getElementById('gmailUnifiedDetail').style.display = 'none';
+    renderThreadDebug(null);
+    updateMainPanelVisibility();
+  });
+
+  sidebar.querySelector('#gmailUnifiedCopyDebugBtn')?.addEventListener('click', async () => {
+    const log = document.getElementById('gmailUnifiedDebugLog');
+    const button = document.getElementById('gmailUnifiedCopyDebugBtn');
+    if (!log || !button) return;
+
+    try {
+      await navigator.clipboard.writeText(log.value || '');
+      button.textContent = 'Copied';
+      window.setTimeout(() => {
+        button.textContent = 'Copy log';
+      }, 1200);
+    } catch {
+      button.textContent = 'Select text';
+      window.setTimeout(() => {
+        button.textContent = 'Copy log';
+      }, 1200);
+    }
+
     updateMainPanelVisibility();
   });
 }
@@ -928,6 +1522,26 @@ function buildSidebar() {
             <div id="gmailUnifiedDetailHeader"></div>
           </div>
           <div id="gmailUnifiedDetailBody" class="gmail-unified-detail-body"></div>
+          <section class="gmail-unified-debug-panel">
+            <div class="gmail-unified-debug-header">
+              <div>
+                <div class="gmail-unified-debug-kicker">Temporary Debug Log</div>
+                <div id="gmailUnifiedDebugSummary" class="gmail-unified-debug-summary">
+                  Open a conversation to inspect exactly what the UI received.
+                </div>
+                <div id="gmailUnifiedDebugStatus" class="gmail-unified-debug-status" hidden></div>
+              </div>
+              <button id="gmailUnifiedCopyDebugBtn" class="gmail-unified-secondary-btn gmail-unified-debug-copy" type="button">
+                Copy log
+              </button>
+            </div>
+            <textarea
+              id="gmailUnifiedDebugLog"
+              class="gmail-unified-debug-log"
+              readonly
+              spellcheck="false"
+            >Select a conversation to generate a debug report.</textarea>
+          </section>
         </section>
       </section>
     </div>
@@ -977,14 +1591,14 @@ function buildSidebar() {
           <input id="gmailUnifiedConnectEmail" class="gmail-unified-field" type="email" placeholder="you@gmail.com" />
           <label for="gmailUnifiedConnectPassword" class="gmail-unified-field-label">App password</label>
           <input id="gmailUnifiedConnectPassword" class="gmail-unified-field" type="password" placeholder="xxxx xxxx xxxx xxxx" />
-          <div class="gmail-unified-guide-actions">
+          <div class="gmail-unified-guide-actions gmail-unified-connect-actions">
             <button id="gmailUnifiedConnectBtn" class="gmail-unified-primary-btn">Connect my account</button>
-          </div>
-          <div class="gmail-unified-guide-helper">
-            <span>No App Password yet?</span>
-            <button id="gmailUnifiedConnectOpenAppBtn" class="gmail-unified-link-btn" type="button">
+            <button id="gmailUnifiedConnectOpenAppBtn" class="gmail-unified-secondary-btn" type="button">
               Open App Passwords
             </button>
+          </div>
+          <div class="gmail-unified-guide-helper">
+            <span>Need 2-Step Verification first?</span>
             <button id="gmailUnifiedConnectOpenTwoFactorBtn" class="gmail-unified-link-btn" type="button">
               Open 2-Step Verification
             </button>
@@ -992,12 +1606,7 @@ function buildSidebar() {
           <div id="gmailUnifiedConnectStatus" class="gmail-unified-connect-status"></div>
         </article>
 
-        <section class="gmail-unified-activity-panel">
-          <div class="gmail-unified-activity-header">
-            <div class="gmail-unified-activity-kicker">Activity</div>
-          </div>
-          <pre id="gmailUnifiedActivityLog" class="gmail-unified-activity-log"></pre>
-        </section>
+        ${buildActivityPanelMarkup()}
       </div>
     </section>
   `;

@@ -69,6 +69,10 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   height: 100%;
 }
 
+.gmail-unified-shell[hidden] {
+  display: none !important;
+}
+
 #gmailUnifiedSidebar.gmail-unified-setup-mode .gmail-unified-shell {
   display: block;
   height: auto;
@@ -84,6 +88,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 #gmailUnifiedSidebar.gmail-unified-setup-mode .gmail-unified-left {
@@ -266,31 +271,35 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 .gmail-unified-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 0 12px 12px;
 }
 
 .gmail-unified-thread-row {
   width: 100%;
-  border: 1px solid #363636;
-  border-radius: 12px;
-  background: #141414;
+  border: 0;
+  border-bottom: 1px solid #242424;
+  border-radius: 0;
+  background: transparent;
   text-align: left;
-  padding: 10px;
-  margin-bottom: 10px;
+  padding: 14px 4px 12px;
+  margin-bottom: 0;
   cursor: pointer;
   color: #e2e2e2;
 }
 
 .gmail-unified-thread-row:hover {
-  border-color: #666666;
-  background: #1f1f1f;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .gmail-unified-thread-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
 }
 
 .gmail-unified-tag {
@@ -312,24 +321,38 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 }
 
 .gmail-unified-date {
-  font-size: 11px;
+  font-size: 12px;
   color: #a7a7a7;
+  flex: 0 0 auto;
 }
 
 .gmail-unified-thread-who {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #b8b8b8;
+  margin-top: 0;
+  min-width: 0;
+  font-size: 15px;
+  color: #f2f2f2;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gmail-unified-thread-who.unread {
+  color: #ffffff;
 }
 
 .gmail-unified-thread-subject {
   margin-top: 4px;
   font-size: 13px;
-  color: #f1f1f1;
+  color: #a9a9a9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gmail-unified-thread-subject.unread {
   font-weight: 700;
+  color: #dddddd;
 }
 
 .gmail-unified-thread-snippet {
@@ -437,6 +460,71 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 .gmail-unified-message-snippet {
   color: inherit;
   line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gmail-unified-debug-panel {
+  border-top: 1px solid #2a2a2a;
+  background: #0d0d0d;
+  padding: 12px 16px 16px;
+}
+
+.gmail-unified-debug-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gmail-unified-debug-kicker {
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gmail-unified-debug-summary {
+  margin-top: 4px;
+  color: #a7a7a7;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.gmail-unified-debug-status {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #f5f5f5;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 6px 10px;
+}
+
+.gmail-unified-debug-copy {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+}
+
+.gmail-unified-debug-log {
+  width: 100%;
+  min-height: 220px;
+  margin-top: 10px;
+  box-sizing: border-box;
+  border: 1px solid #2f2f2f;
+  border-radius: 12px;
+  background: #121212;
+  color: #d8d8d8;
+  padding: 12px;
+  resize: vertical;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
 }
 
 @media (max-width: 1000px) {
@@ -460,6 +548,10 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   justify-content: center;
   padding: 24px;
   z-index: 2147483646;
+}
+
+.gmail-unified-onboarding-overlay[hidden] {
+  display: none !important;
 }
 
 .gmail-unified-modal {
@@ -629,6 +721,11 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.gmail-unified-connect-actions > button {
+  flex: 1 1 220px;
+  justify-content: center;
 }
 
 .gmail-unified-guide-helper {

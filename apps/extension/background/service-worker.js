@@ -36,6 +36,7 @@ const GUIDE_ACTIONS = new Set([
   'CONNECT',
   'DISCONNECT',
   'FETCH_MESSAGES',
+  'DEBUG_REFETCH_CONTACT',
   'SEARCH_MESSAGES',
   'SYNC_MESSAGES',
   'HEALTH_CHECK',
@@ -623,7 +624,10 @@ async function fetchHealth() {
       success: true,
       status: data?.status || 'ok',
       timestamp: data?.timestamp || null,
-      uptime: data?.uptime
+      uptime: data?.uptime,
+      version: data?.version || 'unknown',
+      buildSha: data?.buildSha || 'unknown',
+      deployedAt: data?.deployedAt || null
     };
   } catch (error) {
     if (error.name === 'AbortError' || String(error.message || '').includes('Failed to fetch')) {
@@ -1052,6 +1056,49 @@ async function handleBackendAction(message) {
     }
 
     return response;
+  }
+
+  if (action === 'DEBUG_REFETCH_CONTACT') {
+    const { userId } = await getStoredUser();
+    if (!userId) {
+      return {
+        success: false,
+        code: 'NOT_CONNECTED',
+        error: 'Not connected. Please set up the extension.'
+      };
+    }
+
+    const response = await fetchBackend('/api/messages/debug/contact', {
+      method: 'POST',
+      body: JSON.stringify({
+        userId,
+        contactEmail: payload.contactEmail,
+        selectedMessageIds: Array.isArray(payload.selectedMessageIds) ? payload.selectedMessageIds : []
+      })
+    });
+
+    const backendTrace = normalizeTraceEntries(response.trace);
+    const extTrace = [
+      buildDiagnosticEntry(
+        'EXT',
+        response.success ? 'success' : 'info',
+        response.success ? 'contact_debug_refetch_complete' : 'contact_debug_refetch_failed',
+        response.success
+          ? 'Backend returned the live contact debug refresh payload.'
+          : 'Backend contact debug refresh failed.',
+        {
+          code: response.success ? undefined : response.code,
+          details: response.success
+            ? `Returned ${Array.isArray(response.messages) ? response.messages.length : 0} messages.`
+            : response.error
+        }
+      )
+    ];
+
+    return {
+      ...response,
+      trace: mergeTraceLists(backendTrace, extTrace)
+    };
   }
 
   if (action === 'SEARCH_MESSAGES') {

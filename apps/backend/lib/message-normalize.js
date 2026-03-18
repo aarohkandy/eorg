@@ -31,11 +31,12 @@ export function normalizeImapMessage(message, folder, userEmail) {
     from,
     to,
     date: safeDate(message?.internalDate),
-    snippet: String(message?.snippet || '').slice(0, 200),
+    snippet: String(message?.snippet || ''),
     isOutgoing,
     folder,
     threadId: deriveThreadId(message),
-    flags: Array.isArray(message?.flags) ? message.flags.map((flag) => String(flag)) : []
+    flags: Array.isArray(message?.flags) ? message.flags.map((flag) => String(flag)) : [],
+    debug: message?.debug || null
   };
 }
 
@@ -55,7 +56,8 @@ export function mapRowToMessage(row) {
     isOutgoing: Boolean(row.is_outgoing),
     folder: row.folder,
     threadId: row.thread_id || row.message_id || row.id,
-    flags: Array.isArray(row.flags) ? row.flags : []
+    flags: Array.isArray(row.flags) ? row.flags : [],
+    debug: null
   };
 }
 

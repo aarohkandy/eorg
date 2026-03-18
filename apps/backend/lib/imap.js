@@ -5,6 +5,7 @@ import { parseImapError, pushTrace, sanitizeTraceDetails } from './errors.js';
 const IMAP_HOST = 'imap.gmail.com';
 const IMAP_PORT = 993;
 const DEFAULT_HEADER_FIELDS = ['references', 'in-reply-to'];
+const MAX_MESSAGE_TEXT_LENGTH = 4000;
 const DEFAULT_FETCH_FIELDS = [
   'uid',
   'envelope',
@@ -219,19 +220,23 @@ function walkParts(node, acc = []) {
   return acc;
 }
 
-function selectTextPart(bodyStructure) {
+function selectTextPartNode(bodyStructure) {
   const leaves = walkParts(bodyStructure, []);
   const textPlain = leaves.find((part) =>
     String(part.type || '').toLowerCase() === 'text' &&
     String(part.subtype || '').toLowerCase() === 'plain'
   );
-  if (textPlain?.part) return textPlain.part;
+  if (textPlain?.part) return textPlain;
 
   const textHtml = leaves.find((part) =>
     String(part.type || '').toLowerCase() === 'text' &&
     String(part.subtype || '').toLowerCase() === 'html'
   );
-  return textHtml?.part || null;
+  return textHtml || null;
+}
+
+function selectTextPart(bodyStructure) {
+  return selectTextPartNode(bodyStructure)?.part || null;
 }
 
 async function streamToBuffer(stream) {
@@ -260,25 +265,123 @@ function parseHeaderValue(headers, key) {
   return '';
 }
 
-function sanitizeSnippet(value) {
+function stripHtmlTags(value) {
   return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 200);
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
 }
 
-async function extractSnippet(client, message) {
-  const part = selectTextPart(message.bodyStructure);
-  if (!part) return '';
+function sanitizeSnippet(value) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, MAX_MESSAGE_TEXT_LENGTH);
+}
+
+function defaultExtractionDebug(message, folder) {
+  return {
+    uid: message?.uid,
+    folder,
+    hasBodyStructure: Boolean(message?.bodyStructure),
+    selectedPart: null,
+    selectedPartType: null,
+    selectedPartSubtype: null,
+    downloadedBytes: 0,
+    parserSource: 'none',
+    rawTextLength: 0,
+    sanitizedLength: 0,
+    emptyReason: 'success'
+  };
+}
+
+async function extractMessageContent(client, message, trace = [], options = {}) {
+  const selectedNode = selectTextPartNode(message.bodyStructure);
+  const debug = defaultExtractionDebug(message, options.folder);
+
+  if (selectedNode?.part) {
+    debug.selectedPart = String(selectedNode.part);
+    debug.selectedPartType = String(selectedNode.type || '').toLowerCase() || null;
+    debug.selectedPartSubtype = String(selectedNode.subtype || '').toLowerCase() || null;
+  }
+
+  if (!selectedNode?.part) {
+    debug.emptyReason = message?.bodyStructure ? 'no_text_part' : 'no_body_structure';
+    if (options.includeExtractionDebug) {
+      pushImapTrace(trace, 'warning', 'imap_extract_empty', `Message text was empty for UID ${message.uid}.`, {
+        requestId: options.requestId,
+        folder: options.folder,
+        uid: message?.uid,
+        emptyReason: debug.emptyReason
+      });
+    }
+    return { text: '', debug };
+  }
 
   try {
-    const { content } = await client.download(message.uid, part, { uid: true });
+    const { content } = await client.download(message.uid, selectedNode.part, { uid: true });
     const rawBuffer = await streamToBuffer(content);
+    debug.downloadedBytes = rawBuffer.length;
     const parsed = await simpleParser(rawBuffer);
-    return sanitizeSnippet(parsed.text || parsed.html || rawBuffer.toString('utf8'));
+    let parsedText = '';
+
+    if (parsed.text) {
+      parsedText = parsed.text;
+      debug.parserSource = 'text';
+      debug.rawTextLength = parsed.text.length;
+    } else if (parsed.html) {
+      parsedText = stripHtmlTags(parsed.html || '');
+      debug.parserSource = 'html';
+      debug.rawTextLength = String(parsed.html || '').length;
+    } else {
+      parsedText = rawBuffer.toString('utf8');
+      debug.parserSource = 'raw';
+      debug.rawTextLength = parsedText.length;
+    }
+
+    const sanitized = sanitizeSnippet(parsedText);
+    debug.sanitizedLength = sanitized.length;
+    debug.emptyReason = sanitized ? 'success' : 'sanitized_empty';
+
+    if (options.includeExtractionDebug) {
+      pushImapTrace(
+        trace,
+        sanitized ? 'success' : 'warning',
+        sanitized ? 'imap_extract_success' : 'imap_extract_empty',
+        sanitized
+          ? `Extracted message text for UID ${message.uid}.`
+          : `Message text was empty for UID ${message.uid}.`,
+        {
+          requestId: options.requestId,
+          folder: options.folder,
+          uid: message?.uid,
+          selectedPart: debug.selectedPart,
+          parserSource: debug.parserSource,
+          sanitizedLength: debug.sanitizedLength,
+          emptyReason: debug.emptyReason
+        }
+      );
+    }
+
+    return { text: sanitized, debug };
   } catch (error) {
     console.warn(`[IMAP] Failed to parse snippet for UID ${message.uid}: ${error.message}`);
-    return '';
+    debug.emptyReason = error?.name === 'ParserError' ? 'parse_failed' : 'download_failed';
+    if (options.includeExtractionDebug) {
+      pushImapTrace(trace, 'warning', 'imap_extract_empty', `Message text was empty for UID ${message.uid}.`, {
+        requestId: options.requestId,
+        folder: options.folder,
+        uid: message?.uid,
+        emptyReason: debug.emptyReason
+      });
+    }
+    return { text: '', debug };
   }
 }
 
@@ -295,7 +398,8 @@ async function attachSnippets(email, appPassword, folder, messages) {
 
     try {
       for (const message of messages) {
-        message.snippet = await extractSnippet(client, message);
+        const extraction = await extractMessageContent(client, message, [], { folder });
+        message.snippet = extraction.text;
       }
     } finally {
       lock.release();
@@ -467,6 +571,18 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
 
       for await (const message of client.fetch(fetchTarget.target, fetchQuery)) {
         collected.push({ ...message, snippet: '' });
+      }
+
+      for (const message of collected) {
+        const extraction = await extractMessageContent(client, message, trace, {
+          folder,
+          requestId,
+          includeExtractionDebug: Boolean(options.includeExtractionDebug)
+        });
+        message.snippet = extraction.text;
+        if (options.includeExtractionDebug) {
+          message.debug = extraction.debug;
+        }
       }
 
       console.log(`[IMAP] requestId=${requestId} fetched ${collected.length} message envelopes from ${folder}`);
