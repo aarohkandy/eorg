@@ -558,6 +558,20 @@ function snippetHealth(message) {
   return 'present';
 }
 
+function formatCandidatePartsShort(parts) {
+  const list = Array.isArray(parts) ? parts : [];
+  if (!list.length) return 'none';
+
+  return list
+    .slice(0, 8)
+    .map((part) => {
+      const type = `${part?.type || 'unknown'}${part?.subtype ? `/${part.subtype}` : ''}`;
+      const disposition = part?.disposition || (part?.isAttachment ? 'attachment' : 'inline');
+      return `${part?.part || 'root'}:${type}[${disposition}]@d${part?.pathDepth ?? 0}`;
+    })
+    .join(', ');
+}
+
 function buildDebugDiagnosis(group, traceEntries) {
   const messages = Array.isArray(group?.messages) ? group.messages : [];
   const missingCount = messages.filter((message) => snippetHealth(message) === 'missing').length;
@@ -697,6 +711,14 @@ function buildThreadDebugReport(group) {
     lines.push(`  snippet_length: ${snippet.length}`);
     lines.push(`  snippet_preview: ${preview}`);
     if (message?.debug && typeof message.debug === 'object') {
+      lines.push(`  structure_summary: ${message.debug.structureSummary || 'none'}`);
+      lines.push(`  selection_strategy: ${message.debug.selectionStrategy || 'none'}`);
+      lines.push(`  fallback_attempted: ${Boolean(message.debug.fallbackAttempted)}`);
+      lines.push(`  fallback_stage: ${message.debug.fallbackStage || 'none'}`);
+      lines.push(`  fallback_trigger_reason: ${message.debug.fallbackTriggerReason || 'none'}`);
+      lines.push(`  final_content_source: ${message.debug.finalContentSource || 'none'}`);
+      lines.push(`  final_empty_reason: ${message.debug.finalEmptyReason || message.debug.emptyReason || 'unknown'}`);
+      lines.push(`  candidate_parts: ${formatCandidatePartsShort(message.debug.candidateParts)}`);
       lines.push(`  extraction_empty_reason: ${message.debug.emptyReason || 'unknown'}`);
       lines.push(`  extraction_selected_part: ${message.debug.selectedPart || 'none'}`);
       lines.push(`  extraction_parser_source: ${message.debug.parserSource || 'none'}`);
@@ -716,11 +738,21 @@ function buildThreadDebugReport(group) {
       lines.push(`    selected_part: ${entry.selectedPart || 'none'}`);
       lines.push(`    selected_part_type: ${entry.selectedPartType || 'none'}`);
       lines.push(`    selected_part_subtype: ${entry.selectedPartSubtype || 'none'}`);
+      lines.push(`    structure_summary: ${entry.structureSummary || 'none'}`);
+      lines.push(`    selection_strategy: ${entry.selectionStrategy || 'none'}`);
+      lines.push(`    fallback_attempted: ${Boolean(entry.fallbackAttempted)}`);
+      lines.push(`    fallback_stage: ${entry.fallbackStage || 'none'}`);
+      lines.push(`    fallback_trigger_reason: ${entry.fallbackTriggerReason || 'none'}`);
       lines.push(`    downloaded_bytes: ${entry.downloadedBytes ?? 0}`);
+      lines.push(`    raw_download_bytes: ${entry.rawDownloadBytes ?? 0}`);
       lines.push(`    parser_source: ${entry.parserSource || 'none'}`);
+      lines.push(`    raw_fallback_parser_source: ${entry.rawFallbackParserSource || 'none'}`);
       lines.push(`    raw_text_length: ${entry.rawTextLength ?? 0}`);
       lines.push(`    sanitized_length: ${entry.sanitizedLength ?? 0}`);
+      lines.push(`    final_content_source: ${entry.finalContentSource || 'none'}`);
+      lines.push(`    final_empty_reason: ${entry.finalEmptyReason || entry.emptyReason || 'unknown'}`);
       lines.push(`    empty_reason: ${entry.emptyReason || 'unknown'}`);
+      lines.push(`    candidate_parts: ${formatCandidatePartsShort(entry.candidateParts)}`);
     });
     lines.push('');
   }

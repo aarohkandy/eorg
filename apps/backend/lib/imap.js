@@ -209,36 +209,6 @@ function pushImapTrace(trace, level, stage, message, details = {}, extra = {}) {
   });
 }
 
-function walkParts(node, acc = []) {
-  if (!node) return acc;
-  if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
-    node.childNodes.forEach((child) => walkParts(child, acc));
-    return acc;
-  }
-
-  acc.push(node);
-  return acc;
-}
-
-function selectTextPartNode(bodyStructure) {
-  const leaves = walkParts(bodyStructure, []);
-  const textPlain = leaves.find((part) =>
-    String(part.type || '').toLowerCase() === 'text' &&
-    String(part.subtype || '').toLowerCase() === 'plain'
-  );
-  if (textPlain?.part) return textPlain;
-
-  const textHtml = leaves.find((part) =>
-    String(part.type || '').toLowerCase() === 'text' &&
-    String(part.subtype || '').toLowerCase() === 'html'
-  );
-  return textHtml || null;
-}
-
-function selectTextPart(bodyStructure) {
-  return selectTextPartNode(bodyStructure)?.part || null;
-}
-
 async function streamToBuffer(stream) {
   const chunks = [];
   for await (const chunk of stream) {
@@ -269,8 +239,10 @@ function stripHtmlTags(value) {
   return String(value || '')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<\/(head|title)>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
     .replace(/<[^>]+>/g, ' ');
 }
 
@@ -285,104 +257,423 @@ function sanitizeSnippet(value) {
     .slice(0, MAX_MESSAGE_TEXT_LENGTH);
 }
 
+function normalizePartType(node) {
+  return String(node?.type || '').toLowerCase();
+}
+
+function normalizePartSubtype(node) {
+  return String(node?.subtype || '').toLowerCase();
+}
+
+function normalizePartDisposition(node) {
+  return String(node?.disposition || '').toLowerCase();
+}
+
+function isAttachmentNode(node) {
+  const disposition = normalizePartDisposition(node);
+  return disposition === 'attachment' || Boolean(node?.dispositionParameters?.filename);
+}
+
+function collectStructureNodes(
+  node,
+  depth = 0,
+  acc = [],
+  ancestors = [],
+  path = '1',
+  isRoot = true
+) {
+  if (!node || typeof node !== 'object') return acc;
+
+  const type = normalizePartType(node);
+  const subtype = normalizePartSubtype(node);
+  const disposition = normalizePartDisposition(node);
+  const hasChildren = Array.isArray(node.childNodes) && node.childNodes.length > 0;
+  const part = isRoot && type === 'multipart' && hasChildren ? null : path;
+
+  acc.push({
+    part,
+    type,
+    subtype,
+    disposition: disposition || null,
+    encoding: typeof node?.encoding === 'string' ? String(node.encoding).toLowerCase() : null,
+    isAttachment: isAttachmentNode(node),
+    pathDepth: depth,
+    containerPath: ancestors,
+    hasChildren,
+    size: Number.isFinite(Number(node?.size)) ? Number(node.size) : null
+  });
+
+  if (hasChildren) {
+    const nextAncestors = [...ancestors, `${type}/${subtype || '*'}`];
+    node.childNodes.forEach((child, index) => {
+      const childPath = isRoot && type === 'multipart'
+        ? `${index + 1}`
+        : `${path}.${index + 1}`;
+      collectStructureNodes(child, depth + 1, acc, nextAncestors, childPath, false);
+    });
+  }
+
+  return acc;
+}
+
+function structureNodeLabel(node) {
+  const part = node.part || 'root';
+  const type = node.type || 'unknown';
+  const subtype = node.subtype ? `/${node.subtype}` : '';
+  const attachment = node.isAttachment ? '[attachment]' : '';
+  const disposition = node.disposition && node.disposition !== 'attachment'
+    ? `[${node.disposition}]`
+    : '';
+  return `${'>'.repeat(node.pathDepth)}${part}:${type}${subtype}${attachment || disposition}`;
+}
+
+function buildStructureSummary(bodyStructure) {
+  if (!bodyStructure) return 'none';
+  return collectStructureNodes(bodyStructure)
+    .map((node) => structureNodeLabel(node))
+    .join(' | ')
+    .slice(0, 2000);
+}
+
+function collectCandidateParts(bodyStructure) {
+  return collectStructureNodes(bodyStructure)
+    .filter((node) => node.part)
+    .filter((node) => (
+      node.type === 'text'
+      || (node.type === 'message' && node.subtype === 'rfc822')
+    ));
+}
+
+function selectBestCandidate(candidates) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (!list.length) return null;
+
+  const score = (node) => {
+    let priority = 99;
+    if (node.type === 'text' && node.subtype === 'plain' && !node.isAttachment) priority = 0;
+    else if (node.type === 'text' && node.subtype === 'html' && !node.isAttachment) priority = 1;
+    else if (node.type === 'text' && !node.isAttachment) priority = 2;
+    else if (node.type === 'message' && node.subtype === 'rfc822' && !node.isAttachment) priority = 3;
+    else if (node.type === 'text' && node.subtype === 'plain') priority = 10;
+    else if (node.type === 'text' && node.subtype === 'html') priority = 11;
+    else if (node.type === 'text') priority = 12;
+    else if (node.type === 'message' && node.subtype === 'rfc822') priority = 13;
+
+    return [
+      priority,
+      node.pathDepth ?? 99,
+      Number.parseInt(String(node.part || '999').split('.').join(''), 10) || 999
+    ];
+  };
+
+  return [...list].sort((left, right) => {
+    const leftScore = score(left);
+    const rightScore = score(right);
+    for (let index = 0; index < leftScore.length; index += 1) {
+      if (leftScore[index] !== rightScore[index]) {
+        return leftScore[index] - rightScore[index];
+      }
+    }
+    return 0;
+  })[0] || null;
+}
+
+function selectionStrategyForCandidate(candidate) {
+  if (!candidate) return 'none';
+  if (candidate.type === 'text' && candidate.subtype === 'plain') return 'part_text_plain';
+  if (candidate.type === 'text' && candidate.subtype === 'html') return 'part_text_html';
+  if (candidate.type === 'text') return 'part_text_other';
+  if (candidate.type === 'message' && candidate.subtype === 'rfc822') return 'embedded_rfc822_text';
+  return 'none';
+}
+
+function hasAttachmentOnlyStructure(bodyStructure, candidates = []) {
+  const nodes = collectStructureNodes(bodyStructure)
+    .filter((node) => node.part && !node.hasChildren);
+  return Boolean(nodes.length) && !candidates.length && nodes.every((node) => node.isAttachment);
+}
+
 function defaultExtractionDebug(message, folder) {
   return {
     uid: message?.uid,
     folder,
     hasBodyStructure: Boolean(message?.bodyStructure),
+    structureSummary: buildStructureSummary(message?.bodyStructure),
+    candidateParts: [],
     selectedPart: null,
     selectedPartType: null,
     selectedPartSubtype: null,
+    selectionStrategy: 'none',
+    fallbackAttempted: false,
+    fallbackStage: 'none',
+    fallbackTriggerReason: 'none',
     downloadedBytes: 0,
+    rawDownloadBytes: 0,
     parserSource: 'none',
+    rawFallbackParserSource: 'none',
+    finalContentSource: 'none',
     rawTextLength: 0,
     sanitizedLength: 0,
+    finalEmptyReason: 'success',
     emptyReason: 'success'
   };
 }
 
-async function extractMessageContent(client, message, trace = [], options = {}) {
-  const selectedNode = selectTextPartNode(message.bodyStructure);
-  const debug = defaultExtractionDebug(message, options.folder);
-
-  if (selectedNode?.part) {
-    debug.selectedPart = String(selectedNode.part);
-    debug.selectedPartType = String(selectedNode.type || '').toLowerCase() || null;
-    debug.selectedPartSubtype = String(selectedNode.subtype || '').toLowerCase() || null;
-  }
-
-  if (!selectedNode?.part) {
-    debug.emptyReason = message?.bodyStructure ? 'no_text_part' : 'no_body_structure';
-    if (options.includeExtractionDebug) {
-      pushImapTrace(trace, 'warning', 'imap_extract_empty', `Message text was empty for UID ${message.uid}.`, {
-        requestId: options.requestId,
-        folder: options.folder,
-        uid: message?.uid,
-        emptyReason: debug.emptyReason
-      });
-    }
-    return { text: '', debug };
-  }
-
+async function parseBufferToText(rawBuffer, options = {}) {
   try {
-    const { content } = await client.download(message.uid, selectedNode.part, { uid: true });
-    const rawBuffer = await streamToBuffer(content);
-    debug.downloadedBytes = rawBuffer.length;
     const parsed = await simpleParser(rawBuffer);
     let parsedText = '';
+    let parserSource = 'none';
+    let rawTextLength = 0;
+    let finalContentSource = 'none';
 
     if (parsed.text) {
       parsedText = parsed.text;
-      debug.parserSource = 'text';
-      debug.rawTextLength = parsed.text.length;
+      parserSource = 'text';
+      rawTextLength = parsed.text.length;
+      finalContentSource = options.mode === 'raw' ? 'raw_text' : 'part_text';
     } else if (parsed.html) {
       parsedText = stripHtmlTags(parsed.html || '');
-      debug.parserSource = 'html';
-      debug.rawTextLength = String(parsed.html || '').length;
+      parserSource = 'html';
+      rawTextLength = String(parsed.html || '').length;
+      finalContentSource = options.mode === 'raw' ? 'raw_html' : 'part_html';
     } else {
       parsedText = rawBuffer.toString('utf8');
-      debug.parserSource = 'raw';
-      debug.rawTextLength = parsedText.length;
+      parserSource = 'raw';
+      rawTextLength = parsedText.length;
+      finalContentSource = options.mode === 'raw' ? 'raw_utf8' : 'part_text';
     }
 
     const sanitized = sanitizeSnippet(parsedText);
-    debug.sanitizedLength = sanitized.length;
-    debug.emptyReason = sanitized ? 'success' : 'sanitized_empty';
-
-    if (options.includeExtractionDebug) {
-      pushImapTrace(
-        trace,
-        sanitized ? 'success' : 'warning',
-        sanitized ? 'imap_extract_success' : 'imap_extract_empty',
-        sanitized
-          ? `Extracted message text for UID ${message.uid}.`
-          : `Message text was empty for UID ${message.uid}.`,
-        {
-          requestId: options.requestId,
-          folder: options.folder,
-          uid: message?.uid,
-          selectedPart: debug.selectedPart,
-          parserSource: debug.parserSource,
-          sanitizedLength: debug.sanitizedLength,
-          emptyReason: debug.emptyReason
-        }
-      );
-    }
-
-    return { text: sanitized, debug };
+    return {
+      success: true,
+      text: sanitized,
+      parserSource,
+      rawTextLength,
+      sanitizedLength: sanitized.length,
+      finalContentSource
+    };
   } catch (error) {
-    console.warn(`[IMAP] Failed to parse snippet for UID ${message.uid}: ${error.message}`);
-    debug.emptyReason = error?.name === 'ParserError' ? 'parse_failed' : 'download_failed';
+    return {
+      success: false,
+      error
+    };
+  }
+}
+
+function finalizeExtractionDebug(debug, finalEmptyReason) {
+  debug.finalEmptyReason = finalEmptyReason;
+  debug.emptyReason = finalEmptyReason;
+  return debug;
+}
+
+function pushFinalExtractionTrace(trace, message, debug, options = {}) {
+  if (!options.includeExtractionDebug) return;
+
+  pushImapTrace(
+    trace,
+    debug.finalEmptyReason === 'success' ? 'success' : 'warning',
+    debug.finalEmptyReason === 'success' ? 'imap_extract_success' : 'imap_extract_empty',
+    debug.finalEmptyReason === 'success'
+      ? `Extracted message text for UID ${message.uid}.`
+      : `Message text was empty for UID ${message.uid}.`,
+    {
+      requestId: options.requestId,
+      folder: options.folder,
+      uid: message?.uid,
+      selectionStrategy: debug.selectionStrategy,
+      finalContentSource: debug.finalContentSource,
+      finalEmptyReason: debug.finalEmptyReason,
+      fallbackTriggerReason: debug.fallbackTriggerReason,
+      sanitizedLength: debug.sanitizedLength
+    }
+  );
+}
+
+async function attemptRawMessageFallback(client, message, debug, trace = [], options = {}) {
+  debug.fallbackAttempted = true;
+  debug.fallbackStage = 'raw_message_parse';
+  debug.selectionStrategy = 'raw_full_message';
+
+  if (options.includeExtractionDebug) {
+    pushImapTrace(trace, 'info', 'imap_raw_fallback_started', `Starting full-message fallback for UID ${message.uid}.`, {
+      requestId: options.requestId,
+      folder: options.folder,
+      uid: message?.uid,
+      fallbackTriggerReason: debug.fallbackTriggerReason
+    });
+  }
+
+  let rawBuffer = null;
+  try {
+    const { content } = await client.download(message.uid, undefined, { uid: true });
+    rawBuffer = await streamToBuffer(content);
+    debug.rawDownloadBytes = rawBuffer.length;
+  } catch (error) {
+    finalizeExtractionDebug(debug, 'raw_download_failed');
     if (options.includeExtractionDebug) {
-      pushImapTrace(trace, 'warning', 'imap_extract_empty', `Message text was empty for UID ${message.uid}.`, {
+      pushImapTrace(trace, 'warning', 'imap_raw_fallback_failed', `Full-message fallback download failed for UID ${message.uid}.`, {
         requestId: options.requestId,
         folder: options.folder,
         uid: message?.uid,
-        emptyReason: debug.emptyReason
+        finalEmptyReason: debug.finalEmptyReason
       });
     }
     return { text: '', debug };
   }
+
+  const parsedResult = await parseBufferToText(rawBuffer, { mode: 'raw' });
+  if (!parsedResult.success) {
+    finalizeExtractionDebug(debug, 'raw_parse_failed');
+    if (options.includeExtractionDebug) {
+      pushImapTrace(trace, 'warning', 'imap_raw_fallback_failed', `Full-message fallback parse failed for UID ${message.uid}.`, {
+        requestId: options.requestId,
+        folder: options.folder,
+        uid: message?.uid,
+        finalEmptyReason: debug.finalEmptyReason
+      });
+    }
+    return { text: '', debug };
+  }
+
+  debug.rawFallbackParserSource = parsedResult.parserSource;
+  debug.rawTextLength = parsedResult.rawTextLength;
+  debug.sanitizedLength = parsedResult.sanitizedLength;
+  debug.finalContentSource = parsedResult.text ? parsedResult.finalContentSource : 'none';
+  debug.parserSource = parsedResult.parserSource;
+
+  if (parsedResult.text) {
+    finalizeExtractionDebug(debug, 'success');
+    if (options.includeExtractionDebug) {
+      pushImapTrace(trace, 'success', 'imap_raw_fallback_success', `Full-message fallback recovered text for UID ${message.uid}.`, {
+        requestId: options.requestId,
+        folder: options.folder,
+        uid: message?.uid,
+        rawFallbackParserSource: debug.rawFallbackParserSource,
+        finalContentSource: debug.finalContentSource,
+        sanitizedLength: debug.sanitizedLength
+      });
+    }
+    return { text: parsedResult.text, debug };
+  }
+
+  finalizeExtractionDebug(debug, 'raw_sanitized_empty');
+  if (options.includeExtractionDebug) {
+    pushImapTrace(trace, 'warning', 'imap_raw_fallback_failed', `Full-message fallback still produced empty text for UID ${message.uid}.`, {
+      requestId: options.requestId,
+      folder: options.folder,
+      uid: message?.uid,
+      rawFallbackParserSource: debug.rawFallbackParserSource,
+      finalEmptyReason: debug.finalEmptyReason
+    });
+  }
+  return { text: '', debug };
+}
+
+async function extractMessageContent(client, message, trace = [], options = {}) {
+  const debug = defaultExtractionDebug(message, options.folder);
+  const candidateParts = collectCandidateParts(message.bodyStructure);
+  const selectedNode = selectBestCandidate(candidateParts);
+
+  debug.candidateParts = candidateParts.map((node) => ({
+    part: node.part,
+    type: node.type,
+    subtype: node.subtype,
+    disposition: node.disposition,
+    encoding: node.encoding,
+    isAttachment: node.isAttachment,
+    pathDepth: node.pathDepth
+  }));
+
+  if (options.includeExtractionDebug) {
+    pushImapTrace(trace, 'info', 'imap_structure_scanned', `Scanned MIME structure for UID ${message.uid}.`, {
+      requestId: options.requestId,
+      folder: options.folder,
+      uid: message?.uid,
+      structureSummary: debug.structureSummary,
+      candidateCount: debug.candidateParts.length
+    });
+  }
+
+  if (selectedNode?.part) {
+    debug.selectedPart = String(selectedNode.part);
+    debug.selectedPartType = selectedNode.type || null;
+    debug.selectedPartSubtype = selectedNode.subtype || null;
+    debug.selectionStrategy = selectionStrategyForCandidate(selectedNode);
+    if (options.includeExtractionDebug) {
+      pushImapTrace(trace, 'info', 'imap_part_selected', `Selected MIME part ${selectedNode.part} for UID ${message.uid}.`, {
+        requestId: options.requestId,
+        folder: options.folder,
+        uid: message?.uid,
+        selectionStrategy: debug.selectionStrategy,
+        selectedPart: debug.selectedPart
+      });
+    }
+  }
+
+  if (!selectedNode?.part) {
+    debug.fallbackTriggerReason = 'no_candidate_part';
+    finalizeExtractionDebug(
+      debug,
+      message?.bodyStructure
+        ? (hasAttachmentOnlyStructure(message.bodyStructure, candidateParts)
+          ? 'attachment_only_structure'
+          : 'no_candidate_part')
+        : 'no_body_structure'
+    );
+    const fallbackResult = await attemptRawMessageFallback(client, message, debug, trace, options);
+    pushFinalExtractionTrace(trace, message, fallbackResult.debug, options);
+    return fallbackResult;
+  }
+
+  let partBuffer = null;
+  try {
+    const { content } = await client.download(message.uid, selectedNode.part, { uid: true });
+    partBuffer = await streamToBuffer(content);
+    debug.downloadedBytes = partBuffer.length;
+  } catch (error) {
+    console.warn(`[IMAP] Failed to download part ${selectedNode.part} for UID ${message.uid}: ${error.message}`);
+    debug.fallbackTriggerReason = 'part_download_failed';
+    finalizeExtractionDebug(debug, 'part_download_failed');
+    if (options.includeExtractionDebug) {
+      pushImapTrace(trace, 'warning', 'imap_part_download_failed', `Selected MIME part download failed for UID ${message.uid}.`, {
+        requestId: options.requestId,
+        folder: options.folder,
+        uid: message?.uid,
+        selectedPart: debug.selectedPart,
+        finalEmptyReason: debug.finalEmptyReason
+      });
+    }
+    const fallbackResult = await attemptRawMessageFallback(client, message, debug, trace, options);
+    pushFinalExtractionTrace(trace, message, fallbackResult.debug, options);
+    return fallbackResult;
+  }
+
+  const parsedResult = await parseBufferToText(partBuffer, { mode: 'part' });
+  if (!parsedResult.success) {
+    debug.fallbackTriggerReason = 'part_parse_empty';
+    finalizeExtractionDebug(debug, 'part_parse_failed');
+    const fallbackResult = await attemptRawMessageFallback(client, message, debug, trace, options);
+    pushFinalExtractionTrace(trace, message, fallbackResult.debug, options);
+    return fallbackResult;
+  }
+
+  debug.parserSource = parsedResult.parserSource;
+  debug.rawTextLength = parsedResult.rawTextLength;
+  debug.sanitizedLength = parsedResult.sanitizedLength;
+
+  if (parsedResult.text) {
+    debug.finalContentSource = parsedResult.finalContentSource;
+    finalizeExtractionDebug(debug, 'success');
+    pushFinalExtractionTrace(trace, message, debug, options);
+    return { text: parsedResult.text, debug };
+  }
+
+  debug.fallbackTriggerReason = 'part_parse_empty';
+  finalizeExtractionDebug(debug, 'part_sanitized_empty');
+  const fallbackResult = await attemptRawMessageFallback(client, message, debug, trace, options);
+  pushFinalExtractionTrace(trace, message, fallbackResult.debug, options);
+  return fallbackResult;
 }
 
 async function attachSnippets(email, appPassword, folder, messages) {
