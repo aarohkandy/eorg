@@ -14,7 +14,15 @@
   "content_scripts": [
     {
       "matches": ["https://mail.google.com/*"],
-      "js": ["content/gmail-inject.js"],
+      "js": [
+        "content/gmail-inject-foundation.js",
+        "content/gmail-inject-render.js",
+        "content/gmail-inject-mailbox.js",
+        "content/gmail-inject-setup.js",
+        "content/gmail-inject-sidebar.js",
+        "content/gmail-inject-main.js",
+        "content/gmail-inject.js"
+      ],
       "css": ["content/styles.css"],
       "run_at": "document_idle"
     }
