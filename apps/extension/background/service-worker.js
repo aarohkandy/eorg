@@ -14,6 +14,8 @@ const WRAPPER_FAILURE_STAGES = new Set([
   'messages_fetch_failed',
   'messages_search_failed',
   'messages_sync_failed',
+  'message_summaries_failed',
+  'contact_messages_failed',
   'messages_failed',
   'search_failed',
   'sync_failed',
@@ -35,6 +37,8 @@ const GUIDE_SUBSTEPS = {
 const GUIDE_ACTIONS = new Set([
   'CONNECT',
   'DISCONNECT',
+  'FETCH_MESSAGE_SUMMARIES',
+  'FETCH_CONTACT_MESSAGES',
   'FETCH_MESSAGES',
   'DEBUG_REFETCH_CONTACT',
   'SEARCH_MESSAGES',
@@ -522,6 +526,28 @@ function coldStartError(trace = []) {
   };
 }
 
+function timedOutError(message, trace = [], retryAfterSec = 15) {
+  return {
+    success: false,
+    code: 'BACKEND_REQUEST_TIMEOUT',
+    error: message || `Backend request timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)} seconds.`,
+    retriable: true,
+    retryAfterSec,
+    trace: normalizeTraceEntries(trace)
+  };
+}
+
+function networkError(code, message, trace = [], retryAfterSec = 15) {
+  return {
+    success: false,
+    code,
+    error: message || 'Backend request failed before a response was received.',
+    retriable: true,
+    retryAfterSec,
+    trace: normalizeTraceEntries(trace)
+  };
+}
+
 function normalizeError(payload, fallbackCode = 'BACKEND_UNAVAILABLE') {
   if (!payload || typeof payload !== 'object') {
     return {
@@ -542,6 +568,128 @@ function normalizeError(payload, fallbackCode = 'BACKEND_UNAVAILABLE') {
   };
 }
 
+async function runHealthProbe(timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${BACKEND_URL}/health`, {
+      method: 'GET',
+      signal: controller.signal
+    });
+
+    if ([502, 503, 504].includes(response.status)) {
+      return {
+        success: false,
+        code: 'BACKEND_COLD_START',
+        status: response.status,
+        error: COLD_START_MESSAGE,
+        trace: [
+          buildDiagnosticEntry(
+            'EXT',
+            'warning',
+            'health_probe_cold_start',
+            'Backend health probe returned a wake-up status.',
+            {
+              code: 'BACKEND_COLD_START',
+              details: `status=${response.status}`
+            }
+          )
+        ]
+      };
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        code: 'BACKEND_HEALTH_FAILED',
+        status: response.status,
+        error: `Backend health check failed with HTTP ${response.status}.`,
+        trace: [
+          buildDiagnosticEntry(
+            'EXT',
+            'error',
+            'health_probe_http_error',
+            'Backend health probe returned a non-OK HTTP status.',
+            {
+              code: 'BACKEND_HEALTH_FAILED',
+              details: `status=${response.status}`
+            }
+          )
+        ]
+      };
+    }
+
+    return {
+      success: true,
+      status: data?.status || 'ok',
+      timestamp: data?.timestamp || null,
+      uptime: data?.uptime,
+      version: data?.version || 'unknown',
+      buildSha: data?.buildSha || 'unknown',
+      deployedAt: data?.deployedAt || null,
+      trace: [
+        buildDiagnosticEntry(
+          'EXT',
+          'success',
+          'health_probe_ok',
+          'Backend health probe succeeded.',
+          {
+            details: `status=${response.status}; version=${data?.version || 'unknown'}; buildSha=${data?.buildSha || 'unknown'}`
+          }
+        )
+      ]
+    };
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      return {
+        success: false,
+        code: 'BACKEND_HEALTH_TIMEOUT',
+        error: `Backend health check timed out after ${Math.round(timeoutMs / 1000)} seconds.`,
+        trace: [
+          buildDiagnosticEntry(
+            'EXT',
+            'warning',
+            'health_probe_timeout',
+            'Backend health probe timed out.',
+            {
+              code: 'BACKEND_HEALTH_TIMEOUT',
+              details: `timeoutMs=${timeoutMs}`
+            }
+          )
+        ]
+      };
+    }
+
+    return {
+      success: false,
+      code: 'BACKEND_HEALTH_UNREACHABLE',
+      error: 'Browser could not reach the backend health endpoint.',
+      trace: [
+        buildDiagnosticEntry(
+          'EXT',
+          'error',
+          'health_probe_network_error',
+          'Backend health probe failed before a response was received.',
+          {
+            code: 'BACKEND_HEALTH_UNREACHABLE',
+            details: error.message || 'unknown'
+          }
+        )
+      ]
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function fetchBackend(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -558,7 +706,18 @@ async function fetchBackend(path, options = {}) {
 
     if ([502, 503, 504].includes(response.status)) {
       console.error('[Extension SW ERROR] Backend cold start detected (Render sleeping). Retry in 60s.');
-      return coldStartError();
+      return coldStartError([
+        buildDiagnosticEntry(
+          'EXT',
+          'warning',
+          'backend_http_wakeup_status',
+          'Backend API returned a wake-up status.',
+          {
+            code: 'BACKEND_COLD_START',
+            details: `path=${path}; status=${response.status}`
+          }
+        )
+      ]);
     }
 
     let data = null;
@@ -569,14 +728,81 @@ async function fetchBackend(path, options = {}) {
     }
 
     if (!response.ok || !data?.success) {
-      return normalizeError(data, response.status === 401 ? 'NOT_CONNECTED' : 'BACKEND_UNAVAILABLE');
+      const normalized = normalizeError(data, response.status === 401 ? 'NOT_CONNECTED' : 'BACKEND_UNAVAILABLE');
+      normalized.trace = mergeTraceLists(
+        normalized.trace,
+        [
+          buildDiagnosticEntry(
+            'EXT',
+            response.status >= 500 ? 'error' : 'info',
+            'backend_http_response_error',
+            'Backend API returned an error response.',
+            {
+              code: normalized.code,
+              details: `path=${path}; status=${response.status}`
+            }
+          )
+        ]
+      );
+      return normalized;
     }
 
     return data;
   } catch (error) {
-    if (error.name === 'AbortError' || String(error.message || '').includes('Failed to fetch')) {
-      console.error('[Extension SW ERROR] Backend cold start detected (Render sleeping). Retry in 60s.');
-      return coldStartError();
+    const message = String(error.message || '');
+    const isAbort = error.name === 'AbortError';
+    const isFailedFetch = message.includes('Failed to fetch');
+
+    if (isAbort || isFailedFetch) {
+      const localTrace = [
+        buildDiagnosticEntry(
+          'EXT',
+          isAbort ? 'warning' : 'error',
+          isAbort ? 'backend_request_timeout' : 'backend_request_network_error',
+          isAbort
+            ? 'Backend API request timed out in the browser.'
+            : 'Backend API request failed before a response was received.',
+          {
+            code: isAbort ? 'BACKEND_REQUEST_TIMEOUT' : 'BACKEND_REQUEST_FAILED',
+            details: `path=${path}; timeoutMs=${FETCH_TIMEOUT_MS}; message=${message || 'unknown'}`
+          }
+        )
+      ];
+
+      const probe = await runHealthProbe(Math.min(FETCH_TIMEOUT_MS, 5000));
+
+      if (probe.success) {
+        if (isAbort) {
+          return timedOutError(
+            `Backend /health is up, but ${path} timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)} seconds. This points to a slow API path or a network bottleneck from this browser.`,
+            mergeTraceLists(localTrace, probe.trace)
+          );
+        }
+
+        return networkError(
+          'BACKEND_REQUEST_FAILED',
+          `Backend /health is up, but the browser could not complete ${path}. This points to a local browser/network fetch problem instead of Render sleeping.`,
+          mergeTraceLists(localTrace, probe.trace)
+        );
+      }
+
+      if (probe.code === 'BACKEND_COLD_START') {
+        console.error('[Extension SW ERROR] Backend cold start confirmed by health probe.');
+        return coldStartError(mergeTraceLists(localTrace, probe.trace));
+      }
+
+      if (isAbort) {
+        return timedOutError(
+          `Mailbox request timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)} seconds, and /health also did not respond from this browser. This looks like a local network timeout rather than a confirmed Render sleep.`,
+          mergeTraceLists(localTrace, probe.trace)
+        );
+      }
+
+      return networkError(
+        'BACKEND_UNREACHABLE',
+        'Browser could not reach the backend API, and /health also failed from this browser. This looks like a local network or browser fetch failure.',
+        mergeTraceLists(localTrace, probe.trace)
+      );
     }
 
     return {
@@ -591,57 +817,17 @@ async function fetchBackend(path, options = {}) {
 }
 
 async function fetchHealth() {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(`${BACKEND_URL}/health`, {
-      method: 'GET',
-      signal: controller.signal
-    });
-
-    if ([502, 503, 504].includes(response.status)) {
-      return coldStartError();
-    }
-
-    let data = null;
-    try {
-      data = await response.json();
-    } catch {
-      data = null;
-    }
-
-    if (!response.ok) {
-      return {
-        success: false,
-        code: 'BACKEND_UNAVAILABLE',
-        error: 'Backend health check failed.',
-        trace: []
-      };
-    }
-
-    return {
-      success: true,
-      status: data?.status || 'ok',
-      timestamp: data?.timestamp || null,
-      uptime: data?.uptime,
-      version: data?.version || 'unknown',
-      buildSha: data?.buildSha || 'unknown',
-      deployedAt: data?.deployedAt || null
-    };
-  } catch (error) {
-    if (error.name === 'AbortError' || String(error.message || '').includes('Failed to fetch')) {
-      return coldStartError();
-    }
-    return {
-      success: false,
-      code: 'BACKEND_UNAVAILABLE',
-      error: error.message || 'Backend health check failed.',
-      trace: []
-    };
-  } finally {
-    clearTimeout(timeout);
+  const probe = await runHealthProbe(FETCH_TIMEOUT_MS);
+  if (probe.success) return probe;
+  if (probe.code === 'BACKEND_COLD_START') {
+    return coldStartError(probe.trace);
   }
+  return {
+    success: false,
+    code: probe.code || 'BACKEND_UNAVAILABLE',
+    error: probe.error || 'Backend health check failed.',
+    trace: normalizeTraceEntries(probe.trace)
+  };
 }
 
 async function getStoredUser() {
@@ -1056,6 +1242,162 @@ async function handleBackendAction(message) {
     }
 
     return response;
+  }
+
+  if (action === 'FETCH_MESSAGE_SUMMARIES') {
+    const trackActivity = shouldTrackActivity(payload);
+    const { userId } = await getStoredUser();
+    if (!userId) {
+      if (trackActivity) {
+        await appendSetupDiagnostics([
+          buildDiagnosticEntry('EXT', 'error', 'summaries_not_connected', 'Summary load is unavailable until setup finishes.', {
+            code: 'NOT_CONNECTED'
+          })
+        ]);
+      }
+      return {
+        success: false,
+        code: 'NOT_CONNECTED',
+        error: 'Not connected. Please set up the extension.'
+      };
+    }
+
+    const startTrace = trackActivity
+      ? [
+        buildDiagnosticEntry('EXT', 'info', 'summaries_requested', 'Loading mailbox summaries.'),
+        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Requesting message summaries from the backend.')
+      ]
+      : [];
+    if (trackActivity && startTrace.length) {
+      await appendSetupDiagnostics(startTrace);
+    }
+
+    const params = new URLSearchParams({
+      userId,
+      folder: payload.folder || 'all',
+      limit: String(payload.limit || 50),
+      forceSync: String(Boolean(payload.forceSync))
+    });
+
+    const response = await fetchBackend(`/api/messages/summary?${params.toString()}`);
+    if (response.success) {
+      await chrome.storage.local.set({ lastSyncTime: nowIso() });
+      const backendTrace = normalizeTraceEntries(response.trace);
+      const extTrace = [
+        buildDiagnosticEntry('EXT', 'success', 'backend_response_received', 'Backend replied to the mailbox summary request.', {
+          details: `Loaded ${response.count || 0} summaries.`
+        }),
+        buildDiagnosticEntry('EXT', 'success', 'message_summaries_loaded', `Mailbox summary load complete: ${response.count || 0} summaries.`, {
+          details: `Source ${response.source || 'unknown'}.`
+        })
+      ];
+
+      if (trackActivity) {
+        await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
+      }
+
+      return {
+        ...response,
+        trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+      };
+    }
+
+    const backendTrace = normalizeTraceEntries(response.trace);
+    const extTrace = [
+      buildDiagnosticEntry(
+        'EXT',
+        response.code === 'BACKEND_COLD_START' ? 'warning' : 'info',
+        'backend_response_received',
+        'Backend replied to the mailbox summary request.',
+        {
+          code: response.code,
+          details: response.error,
+          replaceKey: response.code === 'BACKEND_COLD_START' ? 'summary-cold-start' : undefined
+        }
+      ),
+      ...(
+        hasSpecificDiagnosticFailure(backendTrace)
+          ? []
+          : [buildDiagnosticEntry(
+            'EXT',
+            response.code === 'BACKEND_COLD_START' ? 'warning' : 'error',
+            response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'message_summaries_failed',
+            response.code === 'BACKEND_COLD_START'
+              ? 'Backend is waking up before mailbox summary load can continue.'
+              : 'Mailbox summary load failed in the extension.',
+            {
+              code: response.code,
+              details: response.error,
+              replaceKey: response.code === 'BACKEND_COLD_START' ? 'summary-cold-start' : undefined
+            }
+          )]
+      )
+    ];
+
+    if (trackActivity) {
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
+    }
+
+    return {
+      ...response,
+      trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+    };
+  }
+
+  if (action === 'FETCH_CONTACT_MESSAGES') {
+    const trackActivity = shouldTrackActivity(payload);
+    const { userId } = await getStoredUser();
+    if (!userId) {
+      return {
+        success: false,
+        code: 'NOT_CONNECTED',
+        error: 'Not connected. Please set up the extension.'
+      };
+    }
+
+    const startTrace = trackActivity
+      ? [
+        buildDiagnosticEntry('EXT', 'info', 'contact_messages_requested', 'Loading contact messages.'),
+        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Requesting contact messages from the backend.')
+      ]
+      : [];
+    if (trackActivity && startTrace.length) {
+      await appendSetupDiagnostics(startTrace);
+    }
+
+    const params = new URLSearchParams({
+      userId,
+      contactEmail: String(payload.contactEmail || ''),
+      limitPerFolder: String(payload.limitPerFolder || 50),
+      forceSync: String(Boolean(payload.forceSync))
+    });
+    const response = await fetchBackend(`/api/messages/contact?${params.toString()}`);
+    const backendTrace = normalizeTraceEntries(response.trace);
+    const extTrace = [
+      buildDiagnosticEntry(
+        'EXT',
+        response.success ? 'success' : (response.code === 'BACKEND_COLD_START' ? 'warning' : 'info'),
+        response.success ? 'contact_messages_loaded' : 'contact_messages_failed',
+        response.success
+          ? 'Backend returned contact messages.'
+          : 'Backend contact message load failed.',
+        {
+          code: response.success ? undefined : response.code,
+          details: response.success
+            ? `Returned ${Array.isArray(response.messages) ? response.messages.length : 0} messages.`
+            : response.error
+        }
+      )
+    ];
+
+    if (trackActivity) {
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
+    }
+
+    return {
+      ...response,
+      trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+    };
   }
 
   if (action === 'DEBUG_REFETCH_CONTACT') {

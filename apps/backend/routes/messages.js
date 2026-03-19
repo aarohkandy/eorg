@@ -53,10 +53,10 @@ function parseFolder(folder) {
   return 'all';
 }
 
-function parseLimit(raw, fallback) {
+function parseLimit(raw, fallback, max = 200) {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.min(Math.floor(parsed), 200);
+  return Math.min(Math.floor(parsed), max);
 }
 
 function parseBoolean(value) {
@@ -149,6 +149,140 @@ function buildMailboxDebug(options = {}) {
       contentCoveragePct: options.liveCoverage?.contentCoveragePct ?? 100
     }
   };
+}
+
+function defaultTimings() {
+  return {
+    user_lookup_ms: 0,
+    cache_freshness_ms: 0,
+    cache_read_ms: 0,
+    grouping_ms: 0,
+    imap_fetch_ms: 0,
+    upsert_ms: 0,
+    total_ms: 0
+  };
+}
+
+async function measureAsync(timings, key, task) {
+  const startedAt = Date.now();
+  const result = await task();
+  timings[key] = Date.now() - startedAt;
+  return result;
+}
+
+function measureSync(timings, key, task) {
+  const startedAt = Date.now();
+  const result = task();
+  timings[key] = Date.now() - startedAt;
+  return result;
+}
+
+function finalizeTimings(timings, startedAt) {
+  return {
+    ...defaultTimings(),
+    ...(timings || {}),
+    total_ms: Math.max(0, Date.now() - startedAt)
+  };
+}
+
+function timingDetails(timings) {
+  return Object.entries({
+    ...defaultTimings(),
+    ...(timings || {})
+  })
+    .map(([key, value]) => `${key}=${Number(value) || 0}`)
+    .join('; ');
+}
+
+function pushTimingTrace(trace, stage, requestId, timings, extra = {}) {
+  pushTrace(trace, 'API', 'info', stage, 'Mailbox route timings collected.', {
+    details: appendDetails(timingDetails(timings), { requestId, ...extra })
+  });
+}
+
+function counterpartyFromMessage(message) {
+  if (message?.isOutgoing) {
+    const primaryRecipient = Array.isArray(message?.to) ? message.to[0] : null;
+    return {
+      name: String(primaryRecipient?.name || '').trim(),
+      email: normalizeEmail(primaryRecipient?.email)
+    };
+  }
+
+  return {
+    name: String(message?.from?.name || '').trim(),
+    email: normalizeEmail(message?.from?.email)
+  };
+}
+
+function contactKeyFromIdentity(identity) {
+  const email = normalizeEmail(identity?.email);
+  if (email) return `contact:${email}`;
+
+  const label = String(identity?.name || '').trim().toLowerCase();
+  if (label) return `contact-label:${label}`;
+
+  return '';
+}
+
+function displayNameFromIdentity(identity) {
+  const name = String(identity?.name || '').trim();
+  const email = normalizeEmail(identity?.email);
+  return name || email || 'Unknown contact';
+}
+
+function unreadMessage(message) {
+  const flags = Array.isArray(message?.flags) ? message.flags : [];
+  return !flags.includes('\\Seen');
+}
+
+function buildContactSummaries(messages, limit = 50) {
+  const map = new Map();
+
+  (Array.isArray(messages) ? messages : []).forEach((message) => {
+    const identity = counterpartyFromMessage(message);
+    const contactKey = contactKeyFromIdentity(identity);
+    if (!contactKey) return;
+
+    if (!map.has(contactKey)) {
+      map.set(contactKey, {
+        contactKey,
+        contactEmail: normalizeEmail(identity.email),
+        displayName: displayNameFromIdentity(identity),
+        latestSubject: message?.subject || '(no subject)',
+        latestDate: message?.date || new Date(0).toISOString(),
+        latestDirection: message?.isOutgoing ? 'outgoing' : 'incoming',
+        latestMessageId: message?.messageId || message?.id || '',
+        messageCount: 0,
+        unreadCount: 0,
+        hasMissingContent: false
+      });
+    }
+
+    const summary = map.get(contactKey);
+    summary.messageCount += 1;
+    if (unreadMessage(message)) {
+      summary.unreadCount += 1;
+    }
+    if (String(message?.snippet || '').trim().length === 0) {
+      summary.hasMissingContent = true;
+    }
+
+    const currentLatest = new Date(summary.latestDate).getTime();
+    const candidateDate = new Date(message?.date || 0).getTime();
+    if (!Number.isFinite(currentLatest) || candidateDate >= currentLatest) {
+      summary.latestSubject = message?.subject || '(no subject)';
+      summary.latestDate = message?.date || summary.latestDate;
+      summary.latestDirection = message?.isOutgoing ? 'outgoing' : 'incoming';
+      summary.latestMessageId = message?.messageId || message?.id || summary.latestMessageId;
+      summary.displayName = displayNameFromIdentity(identity);
+      summary.contactEmail = normalizeEmail(identity.email) || summary.contactEmail;
+    }
+  });
+
+  return [...map.values()]
+    .sort((a, b) => new Date(b.latestDate).getTime() - new Date(a.latestDate).getTime())
+    .slice(0, limit);
 }
 
 async function getUser(userId, trace = [], requestId = '') {
@@ -334,9 +468,244 @@ function buildCounts(messages) {
   return { inboxCount, sentCount };
 }
 
+router.get('/summary', async (req, res) => {
+  const trace = [];
+  const requestId = createRequestId('summary');
+  const requestStartedAt = Date.now();
+  const timings = defaultTimings();
+
+  try {
+    pushTrace(trace, 'API', 'info', 'messages_summary_received', 'Mailbox summary request received.', {
+      details: `requestId=${requestId}`
+    });
+
+    const userId = String(req.query?.userId || '').trim();
+    if (!userId) {
+      throw new AppError('NOT_CONNECTED', 'userId query parameter is required.', 400, { trace });
+    }
+
+    const folder = parseFolder(req.query?.folder);
+    const limit = parseLimit(req.query?.limit, 50);
+    const forceSync = parseBoolean(req.query?.forceSync);
+    const requestedFolders = getRequestedFolders(folder);
+    const fetchLimit = folder === 'all' ? limit * 2 : limit;
+
+    pushTrace(trace, 'API', 'success', 'messages_summary_valid', 'Mailbox summary request validated.', {
+      details: `requestId=${requestId}; folder=${folder}; limit=${limit}; forceSync=${forceSync}; requestedFolders=${requestedFolders.join(',')}`
+    });
+
+    const user = await measureAsync(timings, 'user_lookup_ms', () => getUser(userId, trace, requestId));
+
+    let newestCachedAt = null;
+    if (!forceSync) {
+      const latestCacheTimestamp = await measureAsync(
+        timings,
+        'cache_freshness_ms',
+        () => loadLatestCacheTimestamp(userId, requestedFolders, trace, requestId)
+      );
+      newestCachedAt = latestCacheTimestamp ? new Date(latestCacheTimestamp).toISOString() : null;
+
+      const cached = await measureAsync(
+        timings,
+        'cache_read_ms',
+        () => loadCachedMessages(userId, requestedFolders, fetchLimit, trace, requestId)
+      );
+      const sortedCached = sortByDateDesc(cached).slice(0, fetchLimit);
+
+      if (sortedCached.length) {
+        const summaries = measureSync(timings, 'grouping_ms', () => buildContactSummaries(sortedCached, limit));
+        const completeTimings = finalizeTimings(timings, requestStartedAt);
+        pushTrace(trace, 'API', 'info', 'messages_summary_cache_hit', 'Returning cached contact summaries.', {
+          details: `requestId=${requestId}; summaries=${summaries.length}; messages=${sortedCached.length}; newestCachedAt=${newestCachedAt || 'none'}`
+        });
+        pushTimingTrace(trace, 'messages_summary_timing', requestId, completeTimings, { source: 'cache' });
+
+        return res.status(200).json({
+          success: true,
+          source: 'cache',
+          summaries,
+          count: summaries.length,
+          trace,
+          timings: completeTimings,
+          debug: {
+            backend: getBuildInfo()
+          }
+        });
+      }
+    }
+
+    pushTrace(trace, 'API', 'info', 'messages_summary_live_refresh_started', 'No cached summaries available. Fetching from Gmail.', {
+      details: `requestId=${requestId}; limitPerFolder=${limit}`
+    });
+
+    const fresh = await measureAsync(
+      timings,
+      'imap_fetch_ms',
+      () => fetchFromImap(user, requestedFolders, limit, trace, { requestId, fetchStrategy: 'parallel' })
+    );
+    await measureAsync(timings, 'upsert_ms', () => upsertMessages(userId, fresh, trace, requestId));
+    await updateLastSync(userId, trace, requestId);
+
+    const summaries = measureSync(timings, 'grouping_ms', () => buildContactSummaries(fresh, limit));
+    const completeTimings = finalizeTimings(timings, requestStartedAt);
+    pushTrace(trace, 'API', 'success', 'messages_summary_live_refresh_complete', 'Live mailbox summary refresh completed.', {
+      details: `requestId=${requestId}; summaries=${summaries.length}; messages=${fresh.length}`
+    });
+    pushTimingTrace(trace, 'messages_summary_timing', requestId, completeTimings, { source: 'live' });
+
+    return res.status(200).json({
+      success: true,
+      source: 'live',
+      summaries,
+      count: summaries.length,
+      trace,
+      timings: completeTimings,
+      debug: {
+        backend: getBuildInfo()
+      }
+    });
+  } catch (error) {
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'messages_summary_failed', 'Mailbox summary load failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
+    const payload = buildErrorResponse(error, trace);
+    return res.status(payload.status).json(payload.body);
+  }
+});
+
+router.get('/contact', async (req, res) => {
+  const trace = [];
+  const requestId = createRequestId('contact');
+  const requestStartedAt = Date.now();
+  const timings = defaultTimings();
+
+  try {
+    pushTrace(trace, 'API', 'info', 'messages_contact_received', 'Contact mailbox request received.', {
+      details: `requestId=${requestId}`
+    });
+
+    const userId = String(req.query?.userId || '').trim();
+    const contactEmail = normalizeEmail(req.query?.contactEmail);
+    const limitPerFolder = parseLimit(req.query?.limitPerFolder, 50, 250);
+    const forceSync = parseBoolean(req.query?.forceSync);
+
+    if (!userId) {
+      throw new AppError('NOT_CONNECTED', 'userId query parameter is required.', 400, { trace });
+    }
+
+    if (!contactEmail) {
+      throw new AppError('BACKEND_UNAVAILABLE', 'contactEmail query parameter is required.', 400, { trace });
+    }
+
+    pushTrace(trace, 'API', 'success', 'messages_contact_valid', 'Contact mailbox request validated.', {
+      details: `requestId=${requestId}; contactEmail=${contactEmail}; limitPerFolder=${limitPerFolder}; forceSync=${forceSync}`
+    });
+
+    const user = await measureAsync(timings, 'user_lookup_ms', () => getUser(userId, trace, requestId));
+    let newestCachedAt = null;
+    const cacheReadLimit = limitPerFolder * 10;
+
+    if (!forceSync) {
+      const latestCacheTimestamp = await measureAsync(
+        timings,
+        'cache_freshness_ms',
+        () => loadLatestCacheTimestamp(userId, ['INBOX', 'SENT'], trace, requestId)
+      );
+      newestCachedAt = latestCacheTimestamp ? new Date(latestCacheTimestamp).toISOString() : null;
+
+      const cached = await measureAsync(
+        timings,
+        'cache_read_ms',
+        () => loadCachedMessages(userId, ['INBOX', 'SENT'], cacheReadLimit, trace, requestId)
+      );
+      const contactMessages = measureSync(
+        timings,
+        'grouping_ms',
+        () => filterMessagesByContact(cached, contactEmail)
+      );
+
+      if (cached.length) {
+        const completeTimings = finalizeTimings(timings, requestStartedAt);
+        pushTrace(trace, 'API', 'info', 'messages_contact_cache_hit', 'Returning cached contact messages.', {
+          details: `requestId=${requestId}; contactEmail=${contactEmail}; messages=${contactMessages.length}; newestCachedAt=${newestCachedAt || 'none'}`
+        });
+        pushTimingTrace(trace, 'messages_contact_timing', requestId, completeTimings, { source: 'cache' });
+
+        return res.status(200).json({
+          success: true,
+          source: 'cache',
+          contactKey: contactKeyFromIdentity({ email: contactEmail }),
+          contactEmail,
+          messages: contactMessages,
+          count: contactMessages.length,
+          trace,
+          timings: completeTimings,
+          debug: {
+            backend: getBuildInfo()
+          }
+        });
+      }
+    }
+
+    pushTrace(trace, 'API', 'info', 'messages_contact_live_refresh_started', 'No cached contact messages available. Fetching from Gmail.', {
+      details: `requestId=${requestId}; contactEmail=${contactEmail}; limitPerFolder=${limitPerFolder}`
+    });
+
+    const live = await measureAsync(
+      timings,
+      'imap_fetch_ms',
+      () => fetchFromImap(user, ['INBOX', 'SENT'], limitPerFolder, trace, { requestId, fetchStrategy: 'parallel' })
+    );
+    const contactMessages = measureSync(
+      timings,
+      'grouping_ms',
+      () => filterMessagesByContact(live, contactEmail)
+    );
+
+    if (contactMessages.length) {
+      await measureAsync(timings, 'upsert_ms', () => upsertMessages(userId, contactMessages, trace, requestId));
+    }
+    await updateLastSync(userId, trace, requestId);
+
+    const completeTimings = finalizeTimings(timings, requestStartedAt);
+    pushTrace(trace, 'API', 'success', 'messages_contact_live_refresh_complete', 'Live contact mailbox refresh completed.', {
+      details: `requestId=${requestId}; contactEmail=${contactEmail}; messages=${contactMessages.length}`
+    });
+    pushTimingTrace(trace, 'messages_contact_timing', requestId, completeTimings, { source: 'live' });
+
+    return res.status(200).json({
+      success: true,
+      source: 'live',
+      contactKey: contactKeyFromIdentity({ email: contactEmail }),
+      contactEmail,
+      messages: contactMessages,
+      count: contactMessages.length,
+      trace,
+      timings: completeTimings,
+      debug: {
+        backend: getBuildInfo()
+      }
+    });
+  } catch (error) {
+    if (!hasSpecificFailure(trace)) {
+      pushTrace(trace, 'API', 'error', 'messages_contact_failed', 'Contact mailbox load failed.', {
+        code: error?.code || 'BACKEND_UNAVAILABLE',
+        details: error?.message || 'Unexpected backend error'
+      });
+    }
+    const payload = buildErrorResponse(error, trace);
+    return res.status(payload.status).json(payload.body);
+  }
+});
+
 router.get('/', async (req, res) => {
   const trace = [];
   const requestId = createRequestId('mailbox');
+  const requestStartedAt = Date.now();
+  const timings = defaultTimings();
 
   try {
     pushTrace(trace, 'API', 'info', 'messages_fetch_received', 'Mailbox load request received.', {
@@ -361,19 +730,27 @@ router.get('/', async (req, res) => {
 
     console.log(`[Messages] requestId=${requestId} fetching for userId ${userId}`);
 
-    const user = await getUser(userId, trace, requestId);
+    const user = await measureAsync(timings, 'user_lookup_ms', () => getUser(userId, trace, requestId));
     pushTrace(trace, 'API', 'success', 'messages_user_loaded', 'Connected user loaded successfully.');
 
     let latestCacheTimestamp = 0;
     let newestCachedAt = null;
 
     if (!forceSync) {
-      latestCacheTimestamp = await loadLatestCacheTimestamp(userId, requestedFolders, trace, requestId);
+      latestCacheTimestamp = await measureAsync(
+        timings,
+        'cache_freshness_ms',
+        () => loadLatestCacheTimestamp(userId, requestedFolders, trace, requestId)
+      );
       newestCachedAt = latestCacheTimestamp ? new Date(latestCacheTimestamp).toISOString() : null;
       const ageMs = latestCacheTimestamp ? Date.now() - latestCacheTimestamp : Number.POSITIVE_INFINITY;
 
       if (ageMs < 5 * 60 * 1000) {
-        const cached = await loadCachedMessages(userId, requestedFolders, fetchLimit, trace, requestId);
+        const cached = await measureAsync(
+          timings,
+          'cache_read_ms',
+          () => loadCachedMessages(userId, requestedFolders, fetchLimit, trace, requestId)
+        );
         const sortedCached = sortByDateDesc(cached).slice(0, fetchLimit);
         const cacheCoverage = buildContentCoverage(sortedCached);
         if (sortedCached.length && hasPreviewContent(sortedCached)) {
@@ -390,6 +767,8 @@ router.get('/', async (req, res) => {
           console.log(
             `[Messages] requestId=${requestId} cache hit for userId ${userId} - returning ${sortedCached.length} cached messages (age: ${ageSec}s)`
           );
+          const completeTimings = finalizeTimings(timings, requestStartedAt);
+          pushTimingTrace(trace, 'messages_fetch_timing', requestId, completeTimings, { source: 'cache' });
 
           return res.status(200).json({
             success: true,
@@ -397,6 +776,7 @@ router.get('/', async (req, res) => {
             count: sortedCached.length,
             ...counts,
             trace,
+            timings: completeTimings,
             debug: buildMailboxDebug({
               cacheUsed: true,
               newestCachedAt,
@@ -430,11 +810,15 @@ router.get('/', async (req, res) => {
     pushTrace(trace, 'API', 'info', 'messages_imap_fetch_start', 'Starting Gmail mailbox sync.', {
       details: `requestId=${requestId}; fetchStrategy=parallel; requestedFolders=${requestedFolders.join(',')}`
     });
-    const fresh = await fetchFromImap(user, requestedFolders, limit, trace, {
-      requestId,
-      fetchStrategy: 'parallel'
-    });
-    await upsertMessages(userId, fresh, trace, requestId);
+    const fresh = await measureAsync(
+      timings,
+      'imap_fetch_ms',
+      () => fetchFromImap(user, requestedFolders, limit, trace, {
+        requestId,
+        fetchStrategy: 'parallel'
+      })
+    );
+    await measureAsync(timings, 'upsert_ms', () => upsertMessages(userId, fresh, trace, requestId));
     await updateLastSync(userId, trace, requestId);
 
     const counts = buildCounts(fresh);
@@ -449,6 +833,8 @@ router.get('/', async (req, res) => {
       `[Messages] requestId=${requestId} normalized ${fresh.length} messages (${counts.inboxCount} inbox, ${counts.sentCount} sent)`
     );
     console.log(`[Messages] requestId=${requestId} returning ${fresh.length} messages to client`);
+    const completeTimings = finalizeTimings(timings, requestStartedAt);
+    pushTimingTrace(trace, 'messages_fetch_timing', requestId, completeTimings, { source: 'live' });
 
     return res.status(200).json({
       success: true,
@@ -456,6 +842,7 @@ router.get('/', async (req, res) => {
       count: fresh.length,
       ...counts,
       trace,
+      timings: completeTimings,
       debug: buildMailboxDebug({
         cacheUsed: false,
         newestCachedAt,

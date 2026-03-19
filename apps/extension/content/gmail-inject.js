@@ -30,6 +30,9 @@ const GUIDE_SUBSTEP_COPY = {
 
 const state = {
   messages: [],
+  contactSummaries: [],
+  contactMessagesByKey: {},
+  contactLoadStateByKey: {},
   filter: 'all',
   selectedThreadId: '',
   searchQuery: '',
@@ -42,6 +45,9 @@ const state = {
   lastMailboxTrace: [],
   lastMailboxDebug: null,
   lastMailboxSource: 'mailbox',
+  lastMailboxTimings: null,
+  mailboxMode: 'summary',
+  useLegacyMailboxFallback: false,
   mailboxAutoRefresh: {
     attempted: false,
     inFlight: false,
@@ -245,6 +251,68 @@ function blankMailboxDebug() {
   return normalizeMailboxDebug(null);
 }
 
+function defaultMailboxTimings() {
+  return {
+    user_lookup_ms: 0,
+    cache_freshness_ms: 0,
+    cache_read_ms: 0,
+    grouping_ms: 0,
+    imap_fetch_ms: 0,
+    upsert_ms: 0,
+    total_ms: 0
+  };
+}
+
+function normalizeTimings(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const defaults = defaultMailboxTimings();
+  return {
+    user_lookup_ms: numericValue(src.user_lookup_ms, defaults.user_lookup_ms),
+    cache_freshness_ms: numericValue(src.cache_freshness_ms, defaults.cache_freshness_ms),
+    cache_read_ms: numericValue(src.cache_read_ms, defaults.cache_read_ms),
+    grouping_ms: numericValue(src.grouping_ms, defaults.grouping_ms),
+    imap_fetch_ms: numericValue(src.imap_fetch_ms, defaults.imap_fetch_ms),
+    upsert_ms: numericValue(src.upsert_ms, defaults.upsert_ms),
+    total_ms: numericValue(src.total_ms, defaults.total_ms)
+  };
+}
+
+function normalizeContactSummary(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const contactKey = String(src.contactKey || '').trim();
+  return {
+    contactKey,
+    threadId: contactKey,
+    contactEmail: String(src.contactEmail || '').trim().toLowerCase(),
+    displayName: String(src.displayName || '').trim()
+      || String(src.contactEmail || '').trim().toLowerCase()
+      || 'Unknown contact',
+    latestSubject: String(src.latestSubject || '(no subject)').trim() || '(no subject)',
+    latestDate: String(src.latestDate || new Date(0).toISOString()).trim() || new Date(0).toISOString(),
+    latestDirection: src.latestDirection === 'outgoing' ? 'outgoing' : 'incoming',
+    latestMessageId: String(src.latestMessageId || '').trim(),
+    messageCount: numericValue(src.messageCount, 0),
+    unreadCount: numericValue(src.unreadCount, 0),
+    hasMissingContent: Boolean(src.hasMissingContent)
+  };
+}
+
+function defaultContactLoadState() {
+  return {
+    attempted: false,
+    loaded: false,
+    inFlight: false,
+    error: '',
+    source: 'contact',
+    count: 0,
+    trace: [],
+    timings: defaultMailboxTimings(),
+    backend: normalizeBuildInfo(null),
+    requestedAt: null,
+    completedAt: null
+  };
+}
+
 async function readUiSettings() {
   const stored = await chrome.storage.local.get([UI_SETTINGS_STORAGE_KEY]);
   return normalizeUiSettings(stored[UI_SETTINGS_STORAGE_KEY]);
@@ -257,8 +325,59 @@ async function persistUiSettings(nextSettings) {
   return normalized;
 }
 
+function resetSectionedMailboxCaches(options = {}) {
+  state.contactSummaries = [];
+  state.contactMessagesByKey = {};
+  state.contactLoadStateByKey = {};
+  if (options.resetContactDebug !== false) {
+    state.contactDebug = {};
+  }
+}
+
 function accountEmailLower() {
   return String(state.accountSnapshot?.userEmail || '').trim().toLowerCase();
+}
+
+function usingLegacyMailboxFlow() {
+  return state.mailboxMode === 'legacy' || state.mailboxMode === 'search' || state.useLegacyMailboxFallback;
+}
+
+function activeMailboxSourceLabel() {
+  if (state.mailboxMode === 'search' || state.searchQuery) return 'search';
+  if (state.useLegacyMailboxFallback || state.mailboxMode === 'legacy') return 'legacy';
+  return 'summary';
+}
+
+function filteredMessagesForCurrentFilter(messages) {
+  let current = [...(Array.isArray(messages) ? messages : [])];
+
+  if (state.filter === 'inbox') {
+    current = current.filter((message) => !message.isOutgoing);
+  }
+
+  if (state.filter === 'sent') {
+    current = current.filter((message) => message.isOutgoing);
+  }
+
+  return current.sort(byDateDesc);
+}
+
+function getContactLoadState(contactKey) {
+  const key = String(contactKey || '').trim();
+  if (!key) return defaultContactLoadState();
+  if (!state.contactLoadStateByKey[key]) {
+    state.contactLoadStateByKey[key] = defaultContactLoadState();
+  }
+  return state.contactLoadStateByKey[key];
+}
+
+function storeContactMessages(contactKey, messages) {
+  const deduped = new Map();
+  (Array.isArray(messages) ? messages : []).forEach((message) => {
+    if (!message?.id) return;
+    deduped.set(message.id, message);
+  });
+  state.contactMessagesByKey[contactKey] = [...deduped.values()].sort(byDateDesc);
 }
 
 function settingsHoverAllowed() {
@@ -318,6 +437,9 @@ function threadIdToContactEmail(threadId) {
 }
 
 function getGroupContactEmail(group) {
+  const summaryEmail = String(group?.summary?.contactEmail || '').trim().toLowerCase();
+  if (summaryEmail) return summaryEmail;
+
   const fromThreadId = threadIdToContactEmail(group?.threadId);
   if (fromThreadId) return fromThreadId;
 
@@ -353,6 +475,9 @@ function replaceMessagesForThread(threadId, nextMessages) {
   });
 
   state.messages = [...merged.values()];
+  if (threadId) {
+    storeContactMessages(threadId, replacements);
+  }
 }
 
 function messageContentCounts(messages) {
@@ -392,6 +517,10 @@ function getContactDebugState(threadId) {
     state.contactDebug[key] = defaultContactDebugState();
   }
   return state.contactDebug[key];
+}
+
+function findSummaryByThreadId(threadId) {
+  return state.contactSummaries.find((summary) => summary.contactKey === threadId) || null;
 }
 
 async function appendUiActivity(entry, options = {}) {
@@ -556,8 +685,8 @@ function escapeHtml(value) {
 function topBarContextLabel() {
   if (state.selectedThreadId) {
     const group = findSelectedGroup();
-    if (group?.messages?.length) {
-      return threadCounterparty(group.messages[0]);
+    if (group) {
+      return groupDisplayName(group);
     }
   }
 
@@ -1151,6 +1280,10 @@ async function submitThreadReply(group) {
   };
 
   state.messages = [optimisticMessage, ...state.messages];
+  if (activeGroup?.threadId) {
+    const existing = state.contactMessagesByKey[activeGroup.threadId] || [];
+    storeContactMessages(activeGroup.threadId, [optimisticMessage, ...existing]);
+  }
   state.composer = {
     ...defaultComposerState(),
     mode: state.composer.mode,
@@ -1266,9 +1399,48 @@ function groupByThread(messages) {
     .sort((a, b) => byDateDesc(a.messages[0], b.messages[0]));
 }
 
+function currentThreadGroups() {
+  if (usingLegacyMailboxFlow()) {
+    return groupByThread(filteredMessages());
+  }
+
+  return state.contactSummaries.map((summary) => {
+    const allMessages = state.contactMessagesByKey[summary.contactKey] || [];
+    return {
+      threadId: summary.contactKey,
+      summary,
+      messages: filteredMessagesForCurrentFilter(allMessages),
+      allMessages
+    };
+  });
+}
+
 function findSelectedGroup() {
   if (!state.selectedThreadId) return null;
-  return groupByThread(filteredMessages()).find((group) => group.threadId === state.selectedThreadId) || null;
+  return currentThreadGroups().find((group) => group.threadId === state.selectedThreadId) || null;
+}
+
+function groupDisplayName(group) {
+  if (group?.summary) {
+    return group.summary.displayName || group.summary.contactEmail || 'Unknown contact';
+  }
+  if (!group?.messages?.length) return 'Unknown contact';
+  return threadCounterparty(group.messages[0]);
+}
+
+function groupLatestSubject(group) {
+  if (group?.summary) return group.summary.latestSubject || '(no subject)';
+  return group?.messages?.[0]?.subject || '(no subject)';
+}
+
+function groupLatestDate(group) {
+  if (group?.summary) return group.summary.latestDate || new Date(0).toISOString();
+  return group?.messages?.[0]?.date || new Date(0).toISOString();
+}
+
+function groupUnread(group) {
+  if (group?.summary) return numericValue(group.summary.unreadCount, 0) > 0;
+  return Array.isArray(group?.messages) ? group.messages.some(isUnread) : false;
 }
 
 function isUnread(message) {
@@ -1316,7 +1488,24 @@ function buildDebugDiagnosis(group, traceEntries) {
   const missingCount = messages.filter((message) => snippetHealth(message) === 'missing').length;
   const shortCount = messages.filter((message) => snippetHealth(message) === 'short').length;
   const contactDebug = getContactDebugState(group?.threadId);
+  const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
   const stages = new Set((traceEntries || []).map((entry) => entry.stage));
+
+  if (!messages.length && group?.summary) {
+    if (contactLoadState.inFlight) {
+      return 'Mailita has the left-rail summary for this person and is currently fetching only this contact conversation.';
+    }
+
+    if (contactLoadState.error) {
+      return 'Mailita loaded the summary row, but the focused contact request failed before the conversation body could render.';
+    }
+
+    if (contactLoadState.loaded) {
+      return 'Mailita loaded the contact request, but no messages were returned for the currently selected filter.';
+    }
+
+    return 'Mailita has the summary row for this person, but the focused contact request has not completed yet.';
+  }
 
   if (!messages.length) {
     return 'No selected thread was available when this debug snapshot was generated.';
@@ -1370,19 +1559,25 @@ function buildDebugDiagnosis(group, traceEntries) {
 function buildThreadDebugReport(group) {
   const mailboxDebug = state.lastMailboxDebug || blankMailboxDebug();
   const contactDebug = getContactDebugState(group?.threadId);
-  const traceEntries = mergeTraceEntries(state.lastMailboxTrace, contactDebug.trace);
+  const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
+  const traceEntries = mergeTraceEntries(state.lastMailboxTrace, contactLoadState.trace, contactDebug.trace);
   const messages = [...(group?.messages || [])].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   const selectedContactEmail = getGroupContactEmail(group);
   const backendInfo = contactDebug.attempted
     ? normalizeBuildInfo(contactDebug.backend)
-    : normalizeBuildInfo(mailboxDebug.backend);
+    : (
+      contactLoadState.loaded || contactLoadState.inFlight || contactLoadState.error
+        ? normalizeBuildInfo(contactLoadState.backend)
+        : normalizeBuildInfo(mailboxDebug.backend)
+    );
   const lines = [
     'MAILITA TEMP DEBUG',
     `generated_at: ${new Date().toISOString()}`,
     `trace_source: ${contactDebug.attempted ? 'mailbox+contact_debug' : (state.lastMailboxSource || 'mailbox')}`,
+    `mailbox_source_path: ${activeMailboxSourceLabel()}`,
     `selected_thread_id: ${group?.threadId || 'none'}`,
     `selected_contact: ${selectedContactEmail || '(no contact email)'}`,
-    `selected_subject: ${group?.messages?.[0]?.subject || '(no subject)'}`,
+    `selected_subject: ${group?.messages?.[0]?.subject || group?.summary?.latestSubject || '(no subject)'}`,
     `message_count: ${messages.length}`,
     `diagnosis: ${buildDebugDiagnosis(group, traceEntries)}`,
     ''
@@ -1392,6 +1587,16 @@ function buildThreadDebugReport(group) {
   lines.push(`  version: ${backendInfo.version}`);
   lines.push(`  build_sha: ${backendInfo.buildSha}`);
   lines.push(`  deployed_at: ${backendInfo.deployedAt || 'unknown'}`);
+  lines.push('');
+
+  lines.push('mailbox_timings:');
+  lines.push(`  user_lookup_ms: ${normalizeTimings(state.lastMailboxTimings).user_lookup_ms}`);
+  lines.push(`  cache_freshness_ms: ${normalizeTimings(state.lastMailboxTimings).cache_freshness_ms}`);
+  lines.push(`  cache_read_ms: ${normalizeTimings(state.lastMailboxTimings).cache_read_ms}`);
+  lines.push(`  grouping_ms: ${normalizeTimings(state.lastMailboxTimings).grouping_ms}`);
+  lines.push(`  imap_fetch_ms: ${normalizeTimings(state.lastMailboxTimings).imap_fetch_ms}`);
+  lines.push(`  upsert_ms: ${normalizeTimings(state.lastMailboxTimings).upsert_ms}`);
+  lines.push(`  total_ms: ${normalizeTimings(state.lastMailboxTimings).total_ms}`);
   lines.push('');
 
   lines.push('mailbox_cache_coverage:');
@@ -1421,6 +1626,22 @@ function buildThreadDebugReport(group) {
   lines.push(`  before_content_coverage_pct: ${state.mailboxAutoRefresh.before?.cache?.contentCoveragePct ?? 'n/a'}`);
   lines.push(`  after_missing_content_count: ${state.mailboxAutoRefresh.after?.live?.missingContentCount ?? 'n/a'}`);
   lines.push(`  after_content_coverage_pct: ${state.mailboxAutoRefresh.after?.live?.contentCoveragePct ?? 'n/a'}`);
+  lines.push('');
+
+  lines.push('selected_contact_request:');
+  lines.push(`  attempted: ${contactLoadState.attempted}`);
+  lines.push(`  loaded: ${contactLoadState.loaded}`);
+  lines.push(`  in_flight: ${contactLoadState.inFlight}`);
+  lines.push(`  source: ${contactLoadState.source || 'none'}`);
+  lines.push(`  error: ${contactLoadState.error || 'none'}`);
+  lines.push(`  count: ${contactLoadState.count}`);
+  lines.push(`  user_lookup_ms: ${normalizeTimings(contactLoadState.timings).user_lookup_ms}`);
+  lines.push(`  cache_freshness_ms: ${normalizeTimings(contactLoadState.timings).cache_freshness_ms}`);
+  lines.push(`  cache_read_ms: ${normalizeTimings(contactLoadState.timings).cache_read_ms}`);
+  lines.push(`  grouping_ms: ${normalizeTimings(contactLoadState.timings).grouping_ms}`);
+  lines.push(`  imap_fetch_ms: ${normalizeTimings(contactLoadState.timings).imap_fetch_ms}`);
+  lines.push(`  upsert_ms: ${normalizeTimings(contactLoadState.timings).upsert_ms}`);
+  lines.push(`  total_ms: ${normalizeTimings(contactLoadState.timings).total_ms}`);
   lines.push('');
 
   lines.push('contact_live_refetch:');
@@ -1523,14 +1744,31 @@ function renderThreadDebug(group) {
   }
 
   const contactDebug = getContactDebugState(group.threadId);
+  const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
   const counts = messageContentCounts(group.messages);
 
-  if (contactDebug.inFlight) {
+  if (contactLoadState.inFlight || contactDebug.inFlight) {
     status.hidden = false;
-    status.textContent = 'Refreshing this conversation live from Gmail...';
+    status.textContent = contactDebug.inFlight
+      ? 'Refreshing this conversation live from Gmail...'
+      : 'Loading this conversation from Mailita...';
   } else {
     status.hidden = true;
     status.textContent = '';
+  }
+
+  if (group?.summary && !group.messages.length && !contactDebug.attempted) {
+    if (contactLoadState.error) {
+      summary.textContent = `Conversation load failed: ${contactLoadState.error}`;
+    } else if (contactLoadState.inFlight) {
+      summary.textContent = 'Loading this conversation from the new contact endpoint.';
+    } else if (contactLoadState.loaded) {
+      summary.textContent = 'The focused contact request completed, but no messages were returned for the current filter.';
+    } else {
+      summary.textContent = 'Select a person to trigger the focused contact request.';
+    }
+    log.value = buildThreadDebugReport(group);
+    return;
   }
 
   if (contactDebug.attempted && !contactDebug.inFlight) {
@@ -1583,7 +1821,7 @@ function renderThreads() {
   const list = document.getElementById('gmailUnifiedList');
   if (!list) return;
 
-  const threadGroups = groupByThread(filteredMessages());
+  const threadGroups = currentThreadGroups();
 
   if (!threadGroups.length) {
     setStateCard('empty', 'No messages found.');
@@ -1595,8 +1833,7 @@ function renderThreads() {
   list.innerHTML = '';
 
   threadGroups.forEach((group) => {
-    const latest = group.messages[0];
-    const unread = group.messages.some(isUnread);
+    const unread = groupUnread(group);
     const selected = state.selectedThreadId === group.threadId;
 
     const row = document.createElement('button');
@@ -1605,16 +1842,18 @@ function renderThreads() {
     row.dataset.threadId = group.threadId;
     row.classList.toggle('is-selected', selected);
 
-    const who = threadCounterparty(latest);
+    const who = groupDisplayName(group);
+    const latestDate = groupLatestDate(group);
+    const latestSubject = groupLatestSubject(group);
 
     row.innerHTML = `
       <div class="gmail-unified-thread-row-shell">
         <div class="gmail-unified-thread-top">
           <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
-          <span class="gmail-unified-date">${formatDate(latest.date)}</span>
+          <span class="gmail-unified-date">${formatDate(latestDate)}</span>
         </div>
         <div class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(
-          latest.subject || '(no subject)'
+          latestSubject || '(no subject)'
         )}</div>
       </div>
     `;
@@ -1624,8 +1863,13 @@ function renderThreads() {
         state.composer = defaultComposerState();
       }
       state.selectedThreadId = group.threadId;
-      state.composer.targetMessageId = selectedComposerMessage(group)?.id || '';
+      if (usingLegacyMailboxFlow()) {
+        state.composer.targetMessageId = selectedComposerMessage(group)?.id || '';
+      }
       renderThreads();
+      if (!usingLegacyMailboxFlow()) {
+        loadContactMessagesForThread(group.threadId).catch(() => {});
+      }
     });
 
     list.appendChild(row);
@@ -1743,11 +1987,50 @@ function renderThreadDetail(group) {
   const composerSend = document.getElementById('gmailUnifiedComposerSend');
   if (!detail || !header || !body || !composer || !composerInput || !composerReply || !composerStatus || !composerSend) return;
 
+  const detailName = groupDisplayName(group);
+  const detailEmail = getGroupContactEmail(group) || 'Conversation';
+  const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
+
   detail.style.display = 'block';
-  header.textContent = threadCounterparty(group.messages[0]);
-  subheader.textContent = getGroupContactEmail(group) || 'Conversation';
+  header.textContent = detailName;
+  subheader.textContent = detailEmail;
 
   body.innerHTML = '';
+  if (group?.summary && !group.messages.length) {
+    const placeholderText = contactLoadState.inFlight
+      ? 'Loading this conversation from Mailita...'
+      : (
+        contactLoadState.error
+          ? contactLoadState.error
+          : (
+            contactLoadState.loaded
+              ? 'No cached messages were returned for this contact yet.'
+              : 'Open this conversation to load its cached messages.'
+          )
+      );
+
+    body.innerHTML = `
+      <div class="gmail-unified-message incoming gmail-unified-message-placeholder">
+        <div class="gmail-unified-message-meta">
+          <span class="gmail-unified-message-subject">${escapeHtml(group.summary.latestSubject || '(no subject)')}</span>
+          <span class="gmail-unified-message-time">${formatDate(group.summary.latestDate)}</span>
+        </div>
+        <div class="gmail-unified-message-bubble-shell">
+          <div class="gmail-unified-message-bubble">
+            <div class="gmail-unified-message-eyebrow">${escapeHtml(detailName)}</div>
+            <div class="gmail-unified-message-snippet">${escapeHtml(placeholderText)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+    composer.hidden = true;
+    renderSettingsUi();
+    renderThreadDebug(group);
+    updateMainPanelVisibility();
+    return;
+  }
+
+  composer.hidden = false;
   const selectedMessage = selectedComposerMessage(group) || group.messages[0];
   if (!state.composer.targetMessageId && selectedMessage?.id) {
     state.composer.targetMessageId = selectedMessage.id;
@@ -1812,6 +2095,24 @@ function clearRetryTimer() {
   state.retrySeconds = 0;
 }
 
+function failureMessageForResponse(response, fallback) {
+  if (!response || typeof response !== 'object') return fallback;
+
+  if (response.code === 'BACKEND_REQUEST_TIMEOUT') {
+    return response.error || 'Backend request timed out before the mailbox data came back.';
+  }
+
+  if (response.code === 'BACKEND_REQUEST_FAILED' || response.code === 'BACKEND_UNREACHABLE') {
+    return response.error || 'The browser could not complete the backend request.';
+  }
+
+  if (response.code === 'BACKEND_HEALTH_TIMEOUT' || response.code === 'BACKEND_HEALTH_UNREACHABLE') {
+    return response.error || 'The browser could not confirm backend health from this network.';
+  }
+
+  return response.error || fallback;
+}
+
 function startColdStartCountdown(onDone, options = {}) {
   clearRetryTimer();
   state.retrySeconds = 60;
@@ -1836,7 +2137,7 @@ function startColdStartCountdown(onDone, options = {}) {
   }, 1000);
 }
 
-async function loadMessages(options = {}) {
+async function loadLegacyMessages(options = {}) {
   setStateCard('loading', 'Connecting to Gmail...');
 
   const response = await sendWorker('FETCH_MESSAGES', {
@@ -1847,6 +2148,10 @@ async function loadMessages(options = {}) {
   });
 
   if (!response?.success) {
+    state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
+    state.lastMailboxSource = 'mailbox-error';
+    state.lastMailboxTimings = normalizeTimings(response?.timings);
+
     if (options.forceSync && state.mailboxAutoRefresh.inFlight) {
       state.mailboxAutoRefresh.inFlight = false;
       state.mailboxAutoRefresh.failedToFillContent = true;
@@ -1871,17 +2176,19 @@ async function loadMessages(options = {}) {
       return;
     }
 
-    setStateCard('error', response.error || 'Unable to load messages right now.', true);
+    setStateCard('error', failureMessageForResponse(response, 'Unable to load messages right now.'), true);
     return;
   }
 
   clearRetryTimer();
+  state.mailboxMode = 'legacy';
   state.messages = Array.isArray(response.messages) ? response.messages : [];
+  state.lastMailboxTimings = normalizeTimings(response?.timings);
   state.lastMailboxTrace = normalizeTraceEntries(response.trace);
   if (response.debug) {
     state.lastMailboxDebug = normalizeMailboxDebug(response.debug);
   }
-  state.lastMailboxSource = 'mailbox';
+  state.lastMailboxSource = 'legacy';
 
   if (options.forceSync && state.mailboxAutoRefresh.inFlight) {
     state.mailboxAutoRefresh.inFlight = false;
@@ -1933,6 +2240,200 @@ async function loadMessages(options = {}) {
   }
 }
 
+async function loadContactMessagesForThread(threadId, options = {}) {
+  if (!threadId || state.searchQuery || usingLegacyMailboxFlow()) return null;
+
+  const summary = findSummaryByThreadId(threadId);
+  if (!summary) return null;
+
+  const contactEmail = summary.contactEmail || threadIdToContactEmail(threadId);
+  const existing = getContactLoadState(threadId);
+
+  if (!contactEmail) {
+    state.contactLoadStateByKey[threadId] = {
+      ...existing,
+      attempted: true,
+      loaded: false,
+      inFlight: false,
+      error: 'This conversation does not have a contact email yet.',
+      source: 'contact-error',
+      completedAt: new Date().toISOString()
+    };
+    if (state.selectedThreadId === threadId) {
+      const selectedGroup = findSelectedGroup();
+      if (selectedGroup) renderThreadDetail(selectedGroup);
+    }
+    return null;
+  }
+
+  if (existing.inFlight) return null;
+  if (existing.loaded && !options.forceSync) return state.contactMessagesByKey[threadId] || [];
+
+  const requestedAt = new Date().toISOString();
+  state.contactLoadStateByKey[threadId] = {
+    ...existing,
+    attempted: true,
+    inFlight: true,
+    error: '',
+    source: 'contact',
+    requestedAt
+  };
+
+  if (state.selectedThreadId === threadId) {
+    const selectedGroup = findSelectedGroup();
+    if (selectedGroup) renderThreadDetail(selectedGroup);
+  }
+
+  const response = await sendWorker('FETCH_CONTACT_MESSAGES', {
+    contactEmail,
+    limitPerFolder: options.limitPerFolder || 50,
+    forceSync: Boolean(options.forceSync),
+    trackActivity: Boolean(options.trackActivity)
+  });
+
+  const nextState = {
+    ...defaultContactLoadState(),
+    attempted: true,
+    loaded: Boolean(response?.success),
+    inFlight: false,
+    error: response?.success ? '' : failureMessageForResponse(response, 'Unable to load this conversation.'),
+    source: response?.success ? 'contact' : 'contact-error',
+    count: numericValue(response?.count, 0),
+    trace: normalizeTraceEntries(response?.trace),
+    timings: normalizeTimings(response?.timings),
+    backend: normalizeBuildInfo(response?.debug?.backend),
+    requestedAt,
+    completedAt: new Date().toISOString()
+  };
+
+  if (response?.success) {
+    storeContactMessages(threadId, response.messages);
+  }
+
+  state.contactLoadStateByKey[threadId] = nextState;
+
+  renderThreads();
+  const selectedGroup = findSelectedGroup();
+  if (selectedGroup) {
+    renderThreadDetail(selectedGroup);
+  }
+
+  return response;
+}
+
+async function loadMessageSummaries(options = {}) {
+  setStateCard('loading', 'Loading conversations...');
+  const requestedFolder = options.folder || state.filter || 'all';
+
+  const response = await sendWorker('FETCH_MESSAGE_SUMMARIES', {
+    folder: requestedFolder,
+    limit: 50,
+    forceSync: Boolean(options.forceSync),
+    trackActivity: Boolean(options.trackActivity)
+  });
+
+  if (!response?.success) {
+    state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
+    state.lastMailboxSource = 'summary-error';
+    state.lastMailboxTimings = normalizeTimings(response?.timings);
+
+    if (response.code === 'NOT_CONNECTED') {
+      setStateCard('not-connected', 'Not set up yet. Use the setup guide to connect.');
+      return response;
+    }
+
+    if (response.code === 'AUTH_FAILED') {
+      setStateCard('auth-failed', 'Connection error. Reconnect your account in setup.');
+      return response;
+    }
+
+    if (response.code === 'BACKEND_COLD_START') {
+      startColdStartCountdown(() => loadMessages(options), {
+        message: 'Mailbox summary load is waiting for the backend to wake up.'
+      });
+      return response;
+    }
+
+    setStateCard('error', failureMessageForResponse(response, 'Unable to load conversations right now.'), true);
+    return response;
+  }
+
+  clearRetryTimer();
+  if (!state.searchQuery && requestedFolder !== state.filter) {
+    return response;
+  }
+  state.mailboxMode = 'summary';
+  state.useLegacyMailboxFallback = false;
+  state.messages = [];
+  state.mailboxAutoRefresh = {
+    attempted: false,
+    inFlight: false,
+    before: null,
+    after: null,
+    failedToFillContent: false,
+    error: ''
+  };
+  state.lastMailboxTrace = normalizeTraceEntries(response.trace);
+  state.lastMailboxSource = 'summary';
+  state.lastMailboxTimings = normalizeTimings(response?.timings);
+  state.lastMailboxDebug = normalizeMailboxDebug(response?.debug);
+  state.contactSummaries = Array.isArray(response.summaries)
+    ? response.summaries.map(normalizeContactSummary).filter((summary) => summary.contactKey)
+    : [];
+
+  if (state.selectedThreadId && !findSummaryByThreadId(state.selectedThreadId)) {
+    state.selectedThreadId = '';
+    state.composer = defaultComposerState();
+  }
+
+  renderThreads();
+
+  if (options.trackActivity) {
+    appendUiActivity({
+      source: 'UI',
+      level: 'success',
+      stage: 'mailbox_summary_rendered',
+      message: `Mailbox summary view rendered with ${response.count || state.contactSummaries.length || 0} people.`,
+      details: `Source ${response.source || 'unknown'}.`
+    }).catch(() => {});
+  }
+
+  if (state.selectedThreadId) {
+    loadContactMessagesForThread(state.selectedThreadId, {
+      trackActivity: Boolean(options.trackActivity)
+    }).catch(() => {});
+  }
+
+  return response;
+}
+
+async function loadMessages(options = {}) {
+  if (state.useLegacyMailboxFallback && !options.forceSectionedRetry) {
+    return loadLegacyMessages(options);
+  }
+
+  const summaryResponse = await loadMessageSummaries(options);
+  if (summaryResponse?.success) {
+    return summaryResponse;
+  }
+
+  if (
+    options.allowLegacyFallback === false
+    || summaryResponse?.code === 'NOT_CONNECTED'
+    || summaryResponse?.code === 'AUTH_FAILED'
+    || summaryResponse?.code === 'BACKEND_COLD_START'
+  ) {
+    return summaryResponse;
+  }
+
+  const fallbackResponse = await loadLegacyMessages(options);
+  if (fallbackResponse?.success) {
+    state.useLegacyMailboxFallback = true;
+    resetSectionedMailboxCaches();
+  }
+  return fallbackResponse;
+}
+
 function setFilter(filter) {
   state.filter = filter;
 
@@ -1941,9 +2442,19 @@ function setFilter(filter) {
     button.classList.toggle('active', button.dataset.filter === filter);
   });
 
-  const visible = filteredMessages().length;
-  console.log(`[Extension] Filter changed to: ${filter} - showing ${visible} messages`);
-  renderThreads();
+  if (state.searchQuery || state.useLegacyMailboxFallback) {
+    const visible = filteredMessages().length;
+    console.log(`[Extension] Filter changed to: ${filter} - showing ${visible} messages`);
+    renderThreads();
+    return;
+  }
+
+  console.log(`[Extension] Filter changed to: ${filter} - reloading contact summaries`);
+  loadMessages({
+    folder: filter,
+    forceSync: false,
+    trackActivity: false
+  }).catch(() => {});
 }
 
 let searchDebounce = null;
@@ -1952,6 +2463,7 @@ async function handleSearch(query) {
   state.searchQuery = trimmed;
 
   if (!trimmed) {
+    state.mailboxMode = state.useLegacyMailboxFallback ? 'legacy' : 'summary';
     await loadMessages();
     return;
   }
@@ -1964,6 +2476,10 @@ async function handleSearch(query) {
   });
 
   if (!response?.success) {
+    state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
+    state.lastMailboxSource = 'search-error';
+    state.lastMailboxTimings = normalizeTimings(response?.timings);
+
     if (response.code === 'BACKEND_COLD_START') {
       startColdStartCountdown(() => handleSearch(trimmed), {
         message: 'Search is waiting for the backend to wake up.'
@@ -1971,14 +2487,16 @@ async function handleSearch(query) {
       return;
     }
 
-    setStateCard('error', response.error || 'Search failed.', true);
+    setStateCard('error', failureMessageForResponse(response, 'Search failed.'), true);
     return;
   }
 
   clearRetryTimer();
+  state.mailboxMode = 'search';
   state.messages = Array.isArray(response.messages) ? response.messages : [];
   state.lastMailboxTrace = normalizeTraceEntries(response.trace);
   state.lastMailboxSource = response.source || 'search';
+  state.lastMailboxTimings = normalizeTimings(response?.timings);
   renderThreads();
 }
 
@@ -2050,6 +2568,11 @@ async function refreshGuideAndAuthState() {
     state.settingsOpen = false;
     state.settingsPreviewOpen = false;
     state.composer = defaultComposerState();
+    state.mailboxMode = 'summary';
+    state.useLegacyMailboxFallback = false;
+    state.messages = [];
+    state.lastMailboxTimings = normalizeTimings(null);
+    resetSectionedMailboxCaches();
   }
 
   return { storage, guide: state.guideState };
@@ -2180,6 +2703,9 @@ async function connectFromGuide() {
 
     setTimeout(async () => {
       await refreshGuideAndAuthState();
+      state.useLegacyMailboxFallback = false;
+      state.mailboxMode = 'summary';
+      resetSectionedMailboxCaches();
       applyGmailLayoutMode();
       await loadMessages({ forceSync: false, trackActivity: true });
       startAutoRefresh();
@@ -2269,11 +2795,16 @@ function bindGuideEvents(sidebar) {
         return;
       }
 
-      setStateCard('error', result.error || 'Sync failed.', true);
+      state.lastMailboxTrace = normalizeTraceEntries(result?.trace);
+      state.lastMailboxSource = 'sync-error';
+      setStateCard('error', failureMessageForResponse(result, 'Sync failed.'), true);
       return;
     }
 
-    await loadMessages({ forceSync: true, trackActivity: state.guideReviewOpen });
+    resetSectionedMailboxCaches();
+    state.useLegacyMailboxFallback = false;
+    state.mailboxMode = 'summary';
+    await loadMessages({ forceSync: true, forceSectionedRetry: true, trackActivity: state.guideReviewOpen });
   });
 
   sidebar.querySelectorAll('.gmail-unified-filter-btn').forEach((button) => {
@@ -2432,8 +2963,11 @@ function bindGuideEvents(sidebar) {
     const response = await sendWorker('DISCONNECT');
     if (!response?.success) return;
     state.messages = [];
+    resetSectionedMailboxCaches();
     state.selectedThreadId = '';
     state.composer = defaultComposerState();
+    state.useLegacyMailboxFallback = false;
+    state.mailboxMode = 'summary';
     await refreshGuideAndAuthState();
     applyGmailLayoutMode();
     renderThreads();
@@ -2739,7 +3273,7 @@ async function bootGmailSurface() {
       refreshGuideAndAuthState()
         .then(async () => {
           applyGmailLayoutMode();
-          if (state.connected && state.messages.length === 0) {
+          if (state.connected && state.messages.length === 0 && state.contactSummaries.length === 0) {
             await loadMessages();
           }
         })
