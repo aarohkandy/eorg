@@ -295,6 +295,11 @@ function verifyAutomaticSyncAndSettingsContracts() {
     'Mailita UI must not render the old top-bar Sync button.'
   );
   assertNotIncludes(
+    injector,
+    '<header class="gmail-unified-topbar">',
+    'Mailita UI must not render the removed global top bar.'
+  );
+  assertNotIncludes(
     popupHtml,
     'syncBtn',
     'Popup must not expose the old manual sync button.'

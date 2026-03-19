@@ -232,12 +232,16 @@ function buildContactSummaries(messages, limit = 50) {
         latestMessageId: message?.messageId || message?.id || '',
         messageCount: 0,
         unreadCount: 0,
-        hasMissingContent: false
+        hasMissingContent: false,
+        inboxCount: 0,
+        sentCount: 0
       });
     }
 
     const summary = map.get(contactKey);
     summary.messageCount += 1;
+    if (message?.folder === 'INBOX') summary.inboxCount += 1;
+    if (message?.folder === 'SENT') summary.sentCount += 1;
     if (unreadMessage(message)) {
       summary.unreadCount += 1;
     }
@@ -338,7 +342,10 @@ async function loadCachedMessagesForContact(userId, contactEmail, limit, trace =
         details: appendDetails(error.message, { requestId, contactEmail })
       });
       const cached = await loadCachedMessages(userId, ['INBOX', 'SENT'], Math.min(limit * 10, 5000), trace, requestId);
-      return filterMessagesByContact(cached, contactEmail).slice(0, limit);
+      return {
+        messages: filterMessagesByContact(cached, contactEmail).slice(0, limit),
+        schemaFallbackUsed: true
+      };
     }
 
     pushDbTrace(trace, 'error', 'db_contact_cache_read_failed', 'Could not load cached contact messages from Supabase.', {
@@ -352,7 +359,14 @@ async function loadCachedMessagesForContact(userId, contactEmail, limit, trace =
   pushDbTrace(trace, 'success', 'db_contact_cache_read_complete', `Loaded ${messages.length} cached contact messages from Supabase.`, {
     details: appendDetails(`contactEmail=${contactEmail}; limit=${limit}`, { requestId })
   });
-  return sortByDateDesc(messages);
+  return {
+    messages: sortByDateDesc(messages),
+    schemaFallbackUsed: false
+  };
+}
+
+function hasRichHtml(messages) {
+  return (Array.isArray(messages) ? messages : []).some((message) => String(message?.bodyHtml || '').trim());
 }
 
 async function loadLatestCacheTimestamp(userId, folders, trace = [], requestId = '') {
@@ -819,6 +833,8 @@ router.get('/contact', async (req, res) => {
     const user = await measureAsync(timings, 'user_lookup_ms', () => getUser(userId, trace, requestId));
     let newestCachedAt = null;
     const cacheReadLimit = Math.min(limitPerFolder * 2, 500);
+    let cachedFallbackMessages = [];
+    let schemaFallbackUsed = false;
 
     if (!forceSync) {
       const latestCacheTimestamp = await measureAsync(
@@ -828,14 +844,17 @@ router.get('/contact', async (req, res) => {
       );
       newestCachedAt = latestCacheTimestamp ? new Date(latestCacheTimestamp).toISOString() : null;
 
-      const cached = await measureAsync(
+      const cachedResult = await measureAsync(
         timings,
         'cache_read_ms',
         () => loadCachedMessagesForContact(userId, contactEmail, cacheReadLimit, trace, requestId)
       );
-      const contactMessages = sortByDateDesc(cached).slice(0, cacheReadLimit);
+      schemaFallbackUsed = Boolean(cachedResult?.schemaFallbackUsed);
+      const contactMessages = sortByDateDesc(cachedResult?.messages || []).slice(0, cacheReadLimit);
+      cachedFallbackMessages = contactMessages;
+      const richContentAvailable = hasRichHtml(contactMessages);
 
-      if (contactMessages.length) {
+      if (contactMessages.length && !schemaFallbackUsed && richContentAvailable) {
         const completeTimings = finalizeTimings(timings, requestStartedAt);
         pushTrace(trace, 'API', 'info', 'messages_contact_cache_hit', 'Returning cached contact messages.', {
           details: `requestId=${requestId}; contactEmail=${contactEmail}; messages=${contactMessages.length}; newestCachedAt=${newestCachedAt || 'none'}`
@@ -852,8 +871,19 @@ router.get('/contact', async (req, res) => {
           trace,
           timings: completeTimings,
           debug: {
-            backend: getBuildInfo()
+            backend: getBuildInfo(),
+            schemaFallbackUsed: false,
+            richContentSource: 'cache'
           }
+        });
+      }
+
+      if (contactMessages.length) {
+        pushTrace(trace, 'API', 'info', 'messages_contact_cache_upgrade_needed', 'Cached contact rows are missing canonical columns or rich HTML. Fetching live Gmail data for this conversation.', {
+          details: appendDetails(`contactEmail=${contactEmail}; messages=${contactMessages.length}; richHtml=${richContentAvailable}`, {
+            requestId,
+            schemaFallbackUsed
+          })
         });
       }
     }
@@ -878,6 +908,11 @@ router.get('/contact', async (req, res) => {
     }
     await updateLastSync(userId, trace, requestId);
 
+    const responseMessages = contactMessages.length ? contactMessages : cachedFallbackMessages;
+    const responseSource = contactMessages.length ? 'live_fallback' : 'cache';
+    const responseSchemaFallback = schemaFallbackUsed;
+    const responseRichContentSource = contactMessages.length ? 'live_fallback' : 'cache';
+
     const completeTimings = finalizeTimings(timings, requestStartedAt);
     pushTrace(trace, 'API', 'success', 'messages_contact_live_refresh_complete', 'Live contact mailbox refresh completed.', {
       details: `requestId=${requestId}; contactEmail=${contactEmail}; messages=${contactMessages.length}`
@@ -886,15 +921,17 @@ router.get('/contact', async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      source: 'live',
+      source: responseSource,
       contactKey: contactKeyFromIdentity({ email: contactEmail }),
       contactEmail,
-      messages: contactMessages,
-      count: contactMessages.length,
+      messages: responseMessages,
+      count: responseMessages.length,
       trace,
       timings: completeTimings,
       debug: {
-        backend: getBuildInfo()
+        backend: getBuildInfo(),
+        schemaFallbackUsed: responseSchemaFallback,
+        richContentSource: responseRichContentSource
       }
     });
   } catch (error) {
