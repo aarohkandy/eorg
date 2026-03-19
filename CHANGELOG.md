@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.5.0 - 2026-03-18
+
+- Rebranded the active product/runtime surfaces to `Mailita`.
+- Switched the preferred mailbox flow to summary-first + per-contact loading while keeping the
+  legacy full mailbox route for fallback.
+- Replaced the blocking sync path with a background sync-job model and worker-side polling.
+- Added canonical backend contact identity fields to stabilize sent/received conversation
+  merging.
+- Added rich body fields (`bodyText`, `bodyHtml`, image flags) so the chat pane can render real
+  email bodies instead of snippet-only output.
+- Removed visible manual Sync controls from the product UI and popup in favor of automatic sync.
+- Pinned the conversation composer and moved the temporary debug surface into Settings > Privacy.
+- Added Render/operator/bootstrap/troubleshooting docs for 1.5.0 setup and recovery.
+- Added contract/backend helper tests around the 1.5.0 runtime shape and contact/body mapping.
+
 ## v1.2.21 - 2026-03-11
 
 - Made `apps/extension/manifest.json` the canonical Gmail Unified runtime and aligned root `manifest.json` to delegate to it.

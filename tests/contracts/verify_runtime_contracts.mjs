@@ -34,8 +34,14 @@ function verifyActiveManifest() {
 
   assert.deepEqual(
     permissions,
-    ['storage', 'unlimitedStorage', 'tabs'],
-    'Active manifest permissions must be scoped to storage/unlimitedStorage/tabs only.'
+    ['storage', 'unlimitedStorage', 'tabs', 'alarms'],
+    'Active manifest permissions must be scoped to storage/unlimitedStorage/tabs/alarms only.'
+  );
+  assert.equal(manifest.name, 'Mailita', 'Active manifest name must be Mailita.');
+  assert.match(
+    String(manifest.description || ''),
+    /Mailita backend/i,
+    'Active manifest description must reflect the Mailita backend runtime.'
   );
   assert.ok(
     !('web_accessible_resources' in manifest),
@@ -51,12 +57,12 @@ function verifyActiveManifest() {
   assert.deepEqual(
     script?.js,
     ['content/gmail-inject.js'],
-    'Active manifest must load the Gmail Unified injector only.'
+    'Active manifest must load the Mailita injector only.'
   );
   assert.deepEqual(
     script?.css,
     ['content/styles.css'],
-    'Active manifest must load the Gmail Unified stylesheet only.'
+    'Active manifest must load the Mailita stylesheet only.'
   );
   assert.ok(
     hostPermissions.includes('https://mail.google.com/*'),
@@ -257,12 +263,66 @@ function verifyOnboardingModel() {
   );
 }
 
+function verifyAutomaticSyncAndSettingsContracts() {
+  const worker = readText('apps/extension/background/service-worker.js');
+  const injector = readText('apps/extension/content/gmail-inject.js');
+  const popupHtml = readText('apps/extension/popup/popup.html');
+  const popupJs = readText('apps/extension/popup/popup.js');
+
+  assertIncludes(
+    worker,
+    'const SYNC_FETCH_TIMEOUT_MS = 10000;',
+    'Service worker sync timeout must be 10 seconds per request.'
+  );
+  assertIncludes(
+    worker,
+    "const SYNC_ALARM_NAME = 'mailita-sync-cadence';",
+    'Service worker must keep the automatic sync cadence alarm.'
+  );
+  assertIncludes(
+    worker,
+    "fetchBackend(`/api/messages/sync/status?${params.toString()}`",
+    'Service worker must poll sync status instead of waiting on one blocking sync response.'
+  );
+  assertIncludes(
+    injector,
+    "sendWorker('SYNC_MESSAGES', { trackActivity: false })",
+    'Mailita UI must auto-trigger background sync from the content runtime.'
+  );
+  assertNotIncludes(
+    injector,
+    'id="gmailUnifiedSync"',
+    'Mailita UI must not render the old top-bar Sync button.'
+  );
+  assertNotIncludes(
+    popupHtml,
+    'syncBtn',
+    'Popup must not expose the old manual sync button.'
+  );
+  assertNotIncludes(
+    popupHtml,
+    'retrySyncBtn',
+    'Popup must not expose the old retry sync button.'
+  );
+  assertNotIncludes(
+    popupJs,
+    'syncBtn',
+    'Popup runtime must not wire the removed manual sync button.'
+  );
+  assertNotIncludes(
+    popupJs,
+    'retrySyncBtn',
+    'Popup runtime must not wire the removed retry sync button.'
+  );
+}
+
 function main() {
   verifyActiveManifest();
   verifyRootManifestWrapper();
   verifyWorkerContracts();
   verifyClientCredentialSafety();
   verifyOnboardingModel();
+  verifyAutomaticSyncAndSettingsContracts();
   console.log('Runtime contract checks passed.');
 }
 

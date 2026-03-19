@@ -91,7 +91,7 @@ function sendWorker(action, payload = {}) {
 function openExternalPage(url) {
   const shouldConfirm = normalizeUiSettings(state.uiSettings).confirmExternalLinks;
   if (shouldConfirm) {
-    const confirmed = window.confirm('Open this Google page in a new tab?');
+    const confirmed = window.confirm('Open this link in a new tab?');
     if (!confirmed) return;
   }
   window.open(url, '_blank', 'noopener,noreferrer');
@@ -186,7 +186,7 @@ function defaultUiSettings() {
   return {
     themeMode: 'dark',
     showDebugPanel: false,
-    loadRemoteContent: false,
+    loadRemoteImages: true,
     confirmExternalLinks: true
   };
 }
@@ -199,7 +199,9 @@ function normalizeUiSettings(input) {
   return {
     themeMode,
     showDebugPanel: src.showDebugPanel == null ? defaults.showDebugPanel : Boolean(src.showDebugPanel),
-    loadRemoteContent: src.loadRemoteContent == null ? defaults.loadRemoteContent : Boolean(src.loadRemoteContent),
+    loadRemoteImages: src.loadRemoteImages == null
+      ? (src.loadRemoteContent == null ? defaults.loadRemoteImages : Boolean(src.loadRemoteContent))
+      : Boolean(src.loadRemoteImages),
     confirmExternalLinks: src.confirmExternalLinks == null ? defaults.confirmExternalLinks : Boolean(src.confirmExternalLinks)
   };
 }
@@ -444,6 +446,8 @@ function getGroupContactEmail(group) {
   if (fromThreadId) return fromThreadId;
 
   const messages = Array.isArray(group?.messages) ? group.messages : [];
+  const canonical = messages.find((message) => message?.contactEmail)?.contactEmail;
+  if (canonical) return String(canonical).trim().toLowerCase();
   const fromIncoming = messages.find((message) => !message?.isOutgoing && message?.from?.email)?.from?.email;
   if (fromIncoming) return String(fromIncoming).trim().toLowerCase();
 
@@ -682,14 +686,71 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function topBarContextLabel() {
-  if (state.selectedThreadId) {
-    const group = findSelectedGroup();
-    if (group) {
-      return groupDisplayName(group);
+function messageBodyPlainText(message) {
+  return String(message?.bodyText || message?.snippet || '').trim();
+}
+
+function htmlToDisplayMarkup(html, options = {}) {
+  const source = String(html || '').trim();
+  if (!source) return '';
+
+  const parser = new DOMParser();
+  const parsed = parser.parseFromString(`<div>${source}</div>`, 'text/html');
+  const root = parsed.body.firstElementChild;
+  if (!root) return '';
+
+  root.querySelectorAll('a[href]').forEach((link) => {
+    const href = String(link.getAttribute('href') || '').trim();
+    if (!href) return;
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', 'noopener noreferrer');
+    link.setAttribute('data-mailita-link', 'true');
+  });
+
+  root.querySelectorAll('img').forEach((image) => {
+    const src = String(image.getAttribute('src') || '').trim();
+    image.setAttribute('loading', 'lazy');
+    image.setAttribute('referrerpolicy', 'no-referrer');
+    image.classList.add('gmail-unified-message-image');
+    if (!options.loadRemoteImages && /^https?:\/\//i.test(src)) {
+      image.setAttribute('data-mailita-blocked-image', 'true');
+      image.setAttribute('data-mailita-src', src);
+      image.removeAttribute('src');
+      image.setAttribute('alt', image.getAttribute('alt') || 'Remote image blocked');
     }
+  });
+
+  return root.innerHTML.trim();
+}
+
+function messageDisplayMarkup(message) {
+  const settings = normalizeUiSettings(state.uiSettings);
+  const html = htmlToDisplayMarkup(message?.bodyHtml, {
+    loadRemoteImages: settings.loadRemoteImages
+  });
+
+  if (html) {
+    return {
+      kind: 'html',
+      content: html
+    };
   }
 
+  const plain = messageBodyPlainText(message);
+  if (plain) {
+    return {
+      kind: 'text',
+      content: escapeHtml(plain)
+    };
+  }
+
+  return {
+    kind: 'placeholder',
+    content: escapeHtml('(message content unavailable)')
+  };
+}
+
+function topBarContextLabel() {
   if (state.accountSnapshot?.userEmail) {
     return state.accountSnapshot.userEmail;
   }
@@ -743,9 +804,9 @@ function renderSettingsUi() {
   }
 
   if (previewPrivacy) {
-    previewPrivacy.textContent = settings.showDebugPanel
-      ? 'Privacy · debug panel visible'
-      : 'Privacy · debug panel hidden';
+    const debugLabel = settings.showDebugPanel ? 'debug visible' : 'debug hidden';
+    const imageLabel = settings.loadRemoteImages ? 'images on' : 'images off';
+    previewPrivacy.textContent = `Privacy · ${debugLabel}, ${imageLabel}`;
   }
 
   if (previewAccount) {
@@ -767,16 +828,12 @@ function renderSettingsUi() {
   });
 
   const debugToggle = document.getElementById('gmailUnifiedToggleDebug');
-  const remoteToggle = document.getElementById('gmailUnifiedToggleRemote');
+  const remoteToggle = document.getElementById('gmailUnifiedToggleRemoteImages');
   const linksToggle = document.getElementById('gmailUnifiedToggleConfirmLinks');
-  const syncButton = document.getElementById('gmailUnifiedSync');
-  const settingsSync = document.getElementById('gmailUnifiedSettingsSyncBtn');
   const settingsDisconnect = document.getElementById('gmailUnifiedSettingsDisconnectBtn');
   if (debugToggle) debugToggle.checked = settings.showDebugPanel;
-  if (remoteToggle) remoteToggle.checked = settings.loadRemoteContent;
+  if (remoteToggle) remoteToggle.checked = settings.loadRemoteImages;
   if (linksToggle) linksToggle.checked = settings.confirmExternalLinks;
-  if (syncButton) syncButton.disabled = !state.connected;
-  if (settingsSync) settingsSync.disabled = !state.connected;
   if (settingsDisconnect) settingsDisconnect.disabled = !state.connected;
 
   if (accountEmail) accountEmail.textContent = state.accountSnapshot.userEmail || 'Not connected';
@@ -1274,7 +1331,15 @@ async function submitThreadReply(group) {
     to: recipients,
     subject,
     snippet: body,
+    bodyText: body,
+    bodyHtml: '',
+    bodyFormat: 'text',
+    hasRemoteImages: false,
+    hasLinkedImages: false,
     isOutgoing: true,
+    contactKey: activeGroup.threadId,
+    contactEmail: getGroupContactEmail(activeGroup),
+    contactName: groupDisplayName(activeGroup),
     flags: ['\\Seen'],
     messageId: ''
   };
@@ -1300,6 +1365,10 @@ async function submitThreadReply(group) {
     const currentGroup = findSelectedGroup();
     if (currentGroup) renderThreadDetail(currentGroup);
   }, 1800);
+
+  sendWorker('SYNC_MESSAGES', {
+    trackActivity: false
+  }).catch(() => {});
 }
 
 function formatActivityTime(value) {
@@ -1361,6 +1430,10 @@ function byDateDesc(a, b) {
 }
 
 function threadCounterparty(message) {
+  if (message?.contactName || message?.contactEmail) {
+    return message.contactName || message.contactEmail || 'Unknown contact';
+  }
+
   if (message?.isOutgoing) {
     return message.to?.[0]?.name || message.to?.[0]?.email || 'Unknown recipient';
   }
@@ -1369,6 +1442,9 @@ function threadCounterparty(message) {
 }
 
 function threadCounterpartyKey(message) {
+  const canonical = String(message?.contactKey || '').trim();
+  if (canonical) return canonical;
+
   if (message?.isOutgoing) {
     const email = String(message.to?.[0]?.email || '').trim().toLowerCase();
     if (email) return `contact:${email}`;
@@ -1463,7 +1539,9 @@ function filteredMessages() {
 }
 
 function snippetHealth(message) {
-  const text = String(message?.snippet || '').trim();
+  const text = String(message?.bodyText || message?.snippet || '').trim();
+  const html = String(message?.bodyHtml || '').trim();
+  if (html && !text) return 'present';
   if (!text) return 'missing';
   if (text.length < 40) return 'short';
   return 'present';
@@ -2017,7 +2095,6 @@ function renderThreadDetail(group) {
         </div>
         <div class="gmail-unified-message-bubble-shell">
           <div class="gmail-unified-message-bubble">
-            <div class="gmail-unified-message-eyebrow">${escapeHtml(detailName)}</div>
             <div class="gmail-unified-message-snippet">${escapeHtml(placeholderText)}</div>
           </div>
         </div>
@@ -2046,10 +2123,10 @@ function renderThreadDetail(group) {
       item.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'}`;
       item.dataset.messageId = message.id || '';
       const canReplyAll = replyAllAvailable(message);
-
-      const who = message.isOutgoing
-        ? `You -> ${message.to?.[0]?.name || message.to?.[0]?.email || 'recipient'}`
-        : `${message.from?.name || message.from?.email || 'sender'} -> You`;
+      const renderedBody = messageDisplayMarkup(message);
+      const bodyMarkup = renderedBody.kind === 'html'
+        ? `<div class="gmail-unified-message-html">${renderedBody.content}</div>`
+        : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
 
       item.innerHTML = `
         <div class="gmail-unified-message-meta">
@@ -2058,8 +2135,7 @@ function renderThreadDetail(group) {
         </div>
         <div class="gmail-unified-message-bubble-shell">
           <div class="gmail-unified-message-bubble">
-            <div class="gmail-unified-message-eyebrow">${escapeHtml(who)}</div>
-            <div class="gmail-unified-message-snippet">${escapeHtml(message.snippet || '(message content unavailable)')}</div>
+            ${bodyMarkup}
           </div>
           <div class="gmail-unified-message-actions" aria-hidden="true">
             <button class="gmail-unified-message-action" data-message-action="reply" data-message-id="${escapeHtml(message.id || '')}" type="button">Reply</button>
@@ -2781,32 +2857,6 @@ function bindGuideEvents(sidebar) {
     }
   });
 
-  sidebar.querySelector('#gmailUnifiedSync')?.addEventListener('click', async () => {
-    if (!state.connected) return;
-
-    const result = await sendWorker('SYNC_MESSAGES', {
-      trackActivity: state.guideReviewOpen
-    });
-    if (!result?.success) {
-      if (result.code === 'BACKEND_COLD_START') {
-        startColdStartCountdown(() => loadMessages({ forceSync: true, trackActivity: state.guideReviewOpen }), {
-          message: 'Manual sync is waiting for the backend to wake up.'
-        });
-        return;
-      }
-
-      state.lastMailboxTrace = normalizeTraceEntries(result?.trace);
-      state.lastMailboxSource = 'sync-error';
-      setStateCard('error', failureMessageForResponse(result, 'Sync failed.'), true);
-      return;
-    }
-
-    resetSectionedMailboxCaches();
-    state.useLegacyMailboxFallback = false;
-    state.mailboxMode = 'summary';
-    await loadMessages({ forceSync: true, forceSectionedRetry: true, trackActivity: state.guideReviewOpen });
-  });
-
   sidebar.querySelectorAll('.gmail-unified-filter-btn').forEach((button) => {
     button.addEventListener('click', () => setFilter(button.dataset.filter));
   });
@@ -2926,12 +2976,14 @@ function bindGuideEvents(sidebar) {
     if (group) renderThreadDetail(group);
   });
 
-  sidebar.querySelector('#gmailUnifiedToggleRemote')?.addEventListener('change', async (event) => {
+  sidebar.querySelector('#gmailUnifiedToggleRemoteImages')?.addEventListener('change', async (event) => {
     await persistUiSettings({
       ...state.uiSettings,
-      loadRemoteContent: Boolean(event.target.checked)
+      loadRemoteImages: Boolean(event.target.checked)
     });
     applyGmailLayoutMode();
+    const group = findSelectedGroup();
+    if (group) renderThreadDetail(group);
   });
 
   sidebar.querySelector('#gmailUnifiedToggleConfirmLinks')?.addEventListener('change', async (event) => {
@@ -2940,11 +2992,6 @@ function bindGuideEvents(sidebar) {
       confirmExternalLinks: Boolean(event.target.checked)
     });
     applyGmailLayoutMode();
-  });
-
-  sidebar.querySelector('#gmailUnifiedSettingsSyncBtn')?.addEventListener('click', () => {
-    setSettingsPanelOpen(false);
-    sidebar.querySelector('#gmailUnifiedSync')?.click();
   });
 
   sidebar.querySelector('#gmailUnifiedSettingsGuideBtn')?.addEventListener('click', () => {
@@ -2998,6 +3045,17 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('click', (event) => {
+    const anchor = event.target.closest('a[data-mailita-link]');
+    if (anchor) {
+      event.preventDefault();
+      event.stopPropagation();
+      const href = String(anchor.getAttribute('href') || '').trim();
+      if (href) {
+        openExternalPage(href);
+      }
+      return;
+    }
+
     const actionButton = event.target.closest('[data-message-action]');
     if (!actionButton) return;
     state.composer.targetMessageId = actionButton.dataset.messageId || '';
@@ -3032,7 +3090,6 @@ function buildSidebar() {
           <div id="gmailUnifiedTopContext" class="gmail-unified-top-context">Inbox</div>
         </div>
         <div class="gmail-unified-topbar-actions">
-          <button id="gmailUnifiedSync" class="gmail-unified-sync" type="button">↻ Sync</button>
           <div class="gmail-unified-settings-anchor">
             <button id="gmailUnifiedSettingsBtn" class="gmail-unified-icon-btn" type="button" aria-label="Settings">
               ⚙
@@ -3094,26 +3151,6 @@ function buildSidebar() {
                 <button id="gmailUnifiedComposerSend" class="gmail-unified-primary-btn gmail-unified-composer-send" type="button">Send</button>
               </div>
             </div>
-            <section id="gmailUnifiedDebugPanel" class="gmail-unified-debug-panel" hidden>
-              <div class="gmail-unified-debug-header">
-                <div>
-                  <div class="gmail-unified-debug-kicker">Temporary Debug Log</div>
-                  <div id="gmailUnifiedDebugSummary" class="gmail-unified-debug-summary">
-                    Open a conversation to inspect exactly what the UI received.
-                  </div>
-                  <div id="gmailUnifiedDebugStatus" class="gmail-unified-debug-status" hidden></div>
-                </div>
-                <button id="gmailUnifiedCopyDebugBtn" class="gmail-unified-secondary-btn gmail-unified-debug-copy" type="button">
-                  Copy log
-                </button>
-              </div>
-              <textarea
-                id="gmailUnifiedDebugLog"
-                class="gmail-unified-debug-log"
-                readonly
-                spellcheck="false"
-              >Select a conversation to generate a debug report.</textarea>
-            </section>
           </section>
         </section>
         <aside id="gmailUnifiedSettingsPanel" class="gmail-unified-settings-panel" hidden>
@@ -3146,13 +3183,33 @@ function buildSidebar() {
                 <input id="gmailUnifiedToggleDebug" type="checkbox" />
               </label>
               <label class="gmail-unified-setting-toggle">
-                <span>Load remote message content automatically</span>
-                <input id="gmailUnifiedToggleRemote" type="checkbox" />
+                <span>Load remote images automatically</span>
+                <input id="gmailUnifiedToggleRemoteImages" type="checkbox" />
               </label>
               <label class="gmail-unified-setting-toggle">
                 <span>Confirm before opening external links</span>
                 <input id="gmailUnifiedToggleConfirmLinks" type="checkbox" />
               </label>
+              <section id="gmailUnifiedDebugPanel" class="gmail-unified-debug-panel" hidden>
+                <div class="gmail-unified-debug-header">
+                  <div>
+                    <div class="gmail-unified-debug-kicker">Temporary Debug Log</div>
+                    <div id="gmailUnifiedDebugSummary" class="gmail-unified-debug-summary">
+                      Open a conversation to inspect exactly what the UI received.
+                    </div>
+                    <div id="gmailUnifiedDebugStatus" class="gmail-unified-debug-status" hidden></div>
+                  </div>
+                  <button id="gmailUnifiedCopyDebugBtn" class="gmail-unified-secondary-btn gmail-unified-debug-copy" type="button">
+                    Copy log
+                  </button>
+                </div>
+                <textarea
+                  id="gmailUnifiedDebugLog"
+                  class="gmail-unified-debug-log"
+                  readonly
+                  spellcheck="false"
+                >Select a conversation to generate a debug report.</textarea>
+              </section>
             </section>
             <section class="gmail-unified-settings-section" data-settings-section="account" hidden>
               <h4>Account</h4>
@@ -3162,7 +3219,6 @@ function buildSidebar() {
                 <div class="gmail-unified-account-meta">Last sync · <span id="gmailUnifiedSettingsSyncTime">No sync yet</span></div>
               </div>
               <div class="gmail-unified-account-actions">
-                <button id="gmailUnifiedSettingsSyncBtn" class="gmail-unified-secondary-btn" type="button">Sync now</button>
                 <button id="gmailUnifiedSettingsGuideBtn" class="gmail-unified-secondary-btn" type="button">Open guide</button>
                 <button id="gmailUnifiedSettingsDisconnectBtn" class="gmail-unified-secondary-btn gmail-unified-danger-btn" type="button">Disconnect</button>
               </div>
@@ -3248,8 +3304,8 @@ function startAutoRefresh() {
 
   state.autoRefreshTimer = setInterval(() => {
     if (document.hidden || !state.connected) return;
-    loadMessages();
-  }, 5 * 60 * 1000);
+    sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
+  }, 10 * 60 * 1000);
 }
 
 async function bootGmailSurface() {
@@ -3259,6 +3315,7 @@ async function bootGmailSurface() {
 
   if (state.connected) {
     await loadMessages();
+    sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
     startAutoRefresh();
   }
 
@@ -3269,11 +3326,14 @@ async function bootGmailSurface() {
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
-    if (changes.onboardingGuideState || changes.userId || changes.onboardingComplete) {
+    if (changes.onboardingGuideState || changes.userId || changes.onboardingComplete || changes.lastSyncTime) {
       refreshGuideAndAuthState()
         .then(async () => {
           applyGmailLayoutMode();
-          if (state.connected && state.messages.length === 0 && state.contactSummaries.length === 0) {
+          if (state.connected && (
+            changes.lastSyncTime
+            || (state.messages.length === 0 && state.contactSummaries.length === 0)
+          )) {
             await loadMessages();
           }
         })

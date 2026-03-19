@@ -5,7 +5,8 @@ import { parseImapError, pushTrace, sanitizeTraceDetails } from './errors.js';
 const IMAP_HOST = 'imap.gmail.com';
 const IMAP_PORT = 993;
 const DEFAULT_HEADER_FIELDS = ['references', 'in-reply-to'];
-const MAX_MESSAGE_TEXT_LENGTH = 4000;
+const MAX_SNIPPET_LENGTH = 4000;
+const MAX_BODY_TEXT_LENGTH = 24000;
 const DEFAULT_FETCH_FIELDS = [
   'uid',
   'envelope',
@@ -246,7 +247,7 @@ function stripHtmlTags(value) {
     .replace(/<[^>]+>/g, ' ');
 }
 
-function sanitizeSnippet(value) {
+function sanitizeText(value, maxLength = MAX_SNIPPET_LENGTH) {
   return String(value || '')
     .replace(/\r\n?/g, '\n')
     .replace(/\u00a0/g, ' ')
@@ -254,7 +255,103 @@ function sanitizeSnippet(value) {
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-    .slice(0, MAX_MESSAGE_TEXT_LENGTH);
+    .slice(0, maxLength);
+}
+
+function sanitizeSnippet(value) {
+  return sanitizeText(value, MAX_SNIPPET_LENGTH);
+}
+
+function sanitizeBodyText(value) {
+  return sanitizeText(value, MAX_BODY_TEXT_LENGTH);
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeEmailHtml(value) {
+  let html = String(value || '').trim();
+  if (!html) return '';
+
+  html = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style|form|iframe|object|embed|link|meta|base)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|style|form|iframe|object|embed|link|meta|base)\b[^>]*\/?>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, '')
+    .replace(/\s+srcdoc\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/\s+srcdoc\s*=\s*[^\s>]+/gi, '');
+
+  html = html.replace(/<(a|img)\b([^>]*)>/gi, (match, tag, attrs) => {
+    let nextAttrs = attrs || '';
+    nextAttrs = nextAttrs.replace(/\s+(href|src)\s*=\s*(['"])(.*?)\2/gi, (attrMatch, attrName, quote, url) => {
+      const normalized = String(url || '').trim();
+      const isImageData = /^data:image\//i.test(normalized);
+      const allowed = /^(https?:)?\/\//i.test(normalized) || /^mailto:/i.test(normalized) || isImageData;
+      if (!allowed) return '';
+      return ` ${attrName.toLowerCase()}=${quote}${normalized}${quote}`;
+    });
+    nextAttrs = nextAttrs.replace(/\s+style\s*=\s*(['"])(.*?)\1/gi, (attrMatch, quote, styleValue) => {
+      const style = String(styleValue || '');
+      const lower = style.toLowerCase();
+      if (
+        lower.includes('display:none')
+        || lower.includes('visibility:hidden')
+        || lower.includes('opacity:0')
+      ) {
+        return '';
+      }
+      return ` style=${quote}${style}${quote}`;
+    });
+
+    if (tag.toLowerCase() === 'a') {
+      if (!/\starget=/i.test(nextAttrs)) nextAttrs += ' target="_blank"';
+      if (!/\srel=/i.test(nextAttrs)) nextAttrs += ' rel="noopener noreferrer"';
+    }
+
+    if (tag.toLowerCase() === 'img') {
+      nextAttrs += ' loading="lazy"';
+      nextAttrs += ' referrerpolicy="no-referrer"';
+    }
+
+    return `<${tag}${nextAttrs}>`;
+  });
+
+  html = html.replace(/<img\b([^>]*)>/gi, (match, attrs) => {
+    const lower = String(attrs || '').toLowerCase();
+    const widthMatch = lower.match(/\bwidth\s*=\s*['"]?(\d+)/i);
+    const heightMatch = lower.match(/\bheight\s*=\s*['"]?(\d+)/i);
+    const width = widthMatch ? Number(widthMatch[1]) : null;
+    const height = heightMatch ? Number(heightMatch[1]) : null;
+    if ((width && width <= 2) || (height && height <= 2)) return '';
+    if (lower.includes('display:none') || lower.includes('visibility:hidden') || lower.includes('opacity:0')) return '';
+    return `<img${attrs}>`;
+  });
+
+  return html;
+}
+
+function fallbackHtmlFromText(text) {
+  const normalized = sanitizeBodyText(text);
+  if (!normalized) return '';
+  return normalized
+    .split('\n')
+    .map((line) => escapeHtml(line))
+    .join('<br>');
+}
+
+function htmlSignals(html) {
+  const markup = String(html || '');
+  return {
+    hasRemoteImages: /<img\b[^>]*\bsrc=(['"])(https?:)?\/\//i.test(markup),
+    hasLinkedImages: /<a\b[^>]*href=(['"])(https?:)?\/\//i.test(markup) && /<img\b/i.test(markup)
+  };
 }
 
 function normalizePartType(node) {
@@ -419,10 +516,11 @@ function defaultExtractionDebug(message, folder) {
   };
 }
 
-async function parseBufferToText(rawBuffer, options = {}) {
+async function parseBufferToContent(rawBuffer, options = {}) {
   try {
     const parsed = await simpleParser(rawBuffer);
     let parsedText = '';
+    let parsedHtml = '';
     let parserSource = 'none';
     let rawTextLength = 0;
     let finalContentSource = 'none';
@@ -432,8 +530,10 @@ async function parseBufferToText(rawBuffer, options = {}) {
       parserSource = 'text';
       rawTextLength = parsed.text.length;
       finalContentSource = options.mode === 'raw' ? 'raw_text' : 'part_text';
+      parsedHtml = sanitizeEmailHtml(parsed.html || fallbackHtmlFromText(parsed.text));
     } else if (parsed.html) {
-      parsedText = stripHtmlTags(parsed.html || '');
+      parsedHtml = sanitizeEmailHtml(parsed.html || '');
+      parsedText = stripHtmlTags(parsedHtml || parsed.html || '');
       parserSource = 'html';
       rawTextLength = String(parsed.html || '').length;
       finalContentSource = options.mode === 'raw' ? 'raw_html' : 'part_html';
@@ -444,14 +544,22 @@ async function parseBufferToText(rawBuffer, options = {}) {
       finalContentSource = options.mode === 'raw' ? 'raw_utf8' : 'part_text';
     }
 
-    const sanitized = sanitizeSnippet(parsedText);
+    const bodyText = sanitizeBodyText(parsedText);
+    const snippet = sanitizeSnippet(parsedText);
+    const bodyHtml = parsedHtml || fallbackHtmlFromText(bodyText);
+    const signals = htmlSignals(bodyHtml);
     return {
       success: true,
-      text: sanitized,
+      text: bodyText,
+      snippet,
+      html: bodyHtml,
       parserSource,
       rawTextLength,
-      sanitizedLength: sanitized.length,
-      finalContentSource
+      sanitizedLength: bodyText.length,
+      finalContentSource,
+      hasRemoteImages: signals.hasRemoteImages,
+      hasLinkedImages: signals.hasLinkedImages,
+      bodyFormat: bodyHtml ? 'html' : 'text'
     };
   } catch (error) {
     return {
@@ -519,10 +627,10 @@ async function attemptRawMessageFallback(client, message, debug, trace = [], opt
         finalEmptyReason: debug.finalEmptyReason
       });
     }
-    return { text: '', debug };
+    return { text: '', snippet: '', html: '', bodyFormat: 'text', hasRemoteImages: false, hasLinkedImages: false, debug };
   }
 
-  const parsedResult = await parseBufferToText(rawBuffer, { mode: 'raw' });
+  const parsedResult = await parseBufferToContent(rawBuffer, { mode: 'raw' });
   if (!parsedResult.success) {
     finalizeExtractionDebug(debug, 'raw_parse_failed');
     if (options.includeExtractionDebug) {
@@ -533,7 +641,7 @@ async function attemptRawMessageFallback(client, message, debug, trace = [], opt
         finalEmptyReason: debug.finalEmptyReason
       });
     }
-    return { text: '', debug };
+    return { text: '', snippet: '', html: '', bodyFormat: 'text', hasRemoteImages: false, hasLinkedImages: false, debug };
   }
 
   debug.rawFallbackParserSource = parsedResult.parserSource;
@@ -554,7 +662,15 @@ async function attemptRawMessageFallback(client, message, debug, trace = [], opt
         sanitizedLength: debug.sanitizedLength
       });
     }
-    return { text: parsedResult.text, debug };
+    return {
+      text: parsedResult.text,
+      snippet: parsedResult.snippet,
+      html: parsedResult.html,
+      bodyFormat: parsedResult.bodyFormat,
+      hasRemoteImages: parsedResult.hasRemoteImages,
+      hasLinkedImages: parsedResult.hasLinkedImages,
+      debug
+    };
   }
 
   finalizeExtractionDebug(debug, 'raw_sanitized_empty');
@@ -567,7 +683,7 @@ async function attemptRawMessageFallback(client, message, debug, trace = [], opt
       finalEmptyReason: debug.finalEmptyReason
     });
   }
-  return { text: '', debug };
+  return { text: '', snippet: '', html: '', bodyFormat: 'text', hasRemoteImages: false, hasLinkedImages: false, debug };
 }
 
 async function extractMessageContent(client, message, trace = [], options = {}) {
@@ -649,7 +765,7 @@ async function extractMessageContent(client, message, trace = [], options = {}) 
     return fallbackResult;
   }
 
-  const parsedResult = await parseBufferToText(partBuffer, { mode: 'part' });
+  const parsedResult = await parseBufferToContent(partBuffer, { mode: 'part' });
   if (!parsedResult.success) {
     debug.fallbackTriggerReason = 'part_parse_empty';
     finalizeExtractionDebug(debug, 'part_parse_failed');
@@ -666,7 +782,15 @@ async function extractMessageContent(client, message, trace = [], options = {}) 
     debug.finalContentSource = parsedResult.finalContentSource;
     finalizeExtractionDebug(debug, 'success');
     pushFinalExtractionTrace(trace, message, debug, options);
-    return { text: parsedResult.text, debug };
+    return {
+      text: parsedResult.text,
+      snippet: parsedResult.snippet,
+      html: parsedResult.html,
+      bodyFormat: parsedResult.bodyFormat,
+      hasRemoteImages: parsedResult.hasRemoteImages,
+      hasLinkedImages: parsedResult.hasLinkedImages,
+      debug
+    };
   }
 
   debug.fallbackTriggerReason = 'part_parse_empty';
@@ -690,7 +814,12 @@ async function attachSnippets(email, appPassword, folder, messages) {
     try {
       for (const message of messages) {
         const extraction = await extractMessageContent(client, message, [], { folder });
-        message.snippet = extraction.text;
+        message.snippet = extraction.snippet || extraction.text;
+        message.bodyText = extraction.text || '';
+        message.bodyHtml = extraction.html || '';
+        message.bodyFormat = extraction.bodyFormat || (message.bodyHtml ? 'html' : 'text');
+        message.hasRemoteImages = Boolean(extraction.hasRemoteImages);
+        message.hasLinkedImages = Boolean(extraction.hasLinkedImages);
       }
     } finally {
       lock.release();
@@ -701,6 +830,11 @@ async function attachSnippets(email, appPassword, folder, messages) {
     );
     for (const message of messages) {
       message.snippet ||= '';
+      message.bodyText ||= '';
+      message.bodyHtml ||= '';
+      message.bodyFormat ||= 'text';
+      message.hasRemoteImages = Boolean(message.hasRemoteImages);
+      message.hasLinkedImages = Boolean(message.hasLinkedImages);
     }
   } finally {
     try {
@@ -870,7 +1004,12 @@ export async function fetchMessages(email, appPassword, folder, limit = 50, trac
           requestId,
           includeExtractionDebug: Boolean(options.includeExtractionDebug)
         });
-        message.snippet = extraction.text;
+        message.snippet = extraction.snippet || extraction.text;
+        message.bodyText = extraction.text || '';
+        message.bodyHtml = extraction.html || '';
+        message.bodyFormat = extraction.bodyFormat || (message.bodyHtml ? 'html' : 'text');
+        message.hasRemoteImages = Boolean(extraction.hasRemoteImages);
+        message.hasLinkedImages = Boolean(extraction.hasLinkedImages);
         if (options.includeExtractionDebug) {
           message.debug = extraction.debug;
         }

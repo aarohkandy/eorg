@@ -2,6 +2,9 @@
 
 const BACKEND_URL = 'https://email-bcknd.onrender.com';
 const FETCH_TIMEOUT_MS = 12000;
+const SYNC_FETCH_TIMEOUT_MS = 10000;
+const SYNC_STATUS_POLL_MS = 4000;
+const SYNC_ALARM_NAME = 'mailita-sync-cadence';
 const COLD_START_MESSAGE =
   'Backend server is starting up, please wait 60 seconds and try again.';
 const SETUP_DIAGNOSTICS_KEY = 'setupDiagnostics';
@@ -53,6 +56,7 @@ const GUIDE_ACTIONS = new Set([
 ]);
 
 let diagnosticsWriteChain = Promise.resolve();
+const activeSyncPollers = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -398,13 +402,13 @@ async function setGuideBadge(guideState) {
   const state = recalcGuideState(guideState);
   if (state.connected) {
     await chrome.action.setBadgeText({ text: '' });
-    await chrome.action.setTitle({ title: 'Gmail Unified' });
+    await chrome.action.setTitle({ title: 'Mailita' });
     return;
   }
 
   await chrome.action.setBadgeBackgroundColor({ color: '#1a73e8' });
   await chrome.action.setBadgeText({ text: `${state.progress}/${state.total}` });
-  await chrome.action.setTitle({ title: `Gmail Unified setup: ${state.progress}/${state.total} complete` });
+  await chrome.action.setTitle({ title: `Mailita setup: ${state.progress}/${state.total} complete` });
 }
 
 async function readGuideState() {
@@ -691,8 +695,11 @@ async function runHealthProbe(timeoutMs = FETCH_TIMEOUT_MS) {
 }
 
 async function fetchBackend(path, options = {}) {
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Number(options.timeoutMs)
+    : FETCH_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(`${BACKEND_URL}${path}`, {
@@ -764,17 +771,17 @@ async function fetchBackend(path, options = {}) {
             : 'Backend API request failed before a response was received.',
           {
             code: isAbort ? 'BACKEND_REQUEST_TIMEOUT' : 'BACKEND_REQUEST_FAILED',
-            details: `path=${path}; timeoutMs=${FETCH_TIMEOUT_MS}; message=${message || 'unknown'}`
+            details: `path=${path}; timeoutMs=${timeoutMs}; message=${message || 'unknown'}`
           }
         )
       ];
 
-      const probe = await runHealthProbe(Math.min(FETCH_TIMEOUT_MS, 5000));
+      const probe = await runHealthProbe(Math.min(timeoutMs, 5000));
 
       if (probe.success) {
         if (isAbort) {
           return timedOutError(
-            `Backend /health is up, but ${path} timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)} seconds. This points to a slow API path or a network bottleneck from this browser.`,
+            `Backend /health is up, but ${path} timed out after ${Math.round(timeoutMs / 1000)} seconds. This points to a slow API path or a network bottleneck from this browser.`,
             mergeTraceLists(localTrace, probe.trace)
           );
         }
@@ -793,7 +800,7 @@ async function fetchBackend(path, options = {}) {
 
       if (isAbort) {
         return timedOutError(
-          `Mailbox request timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)} seconds, and /health also did not respond from this browser. This looks like a local network timeout rather than a confirmed Render sleep.`,
+          `Mailbox request timed out after ${Math.round(timeoutMs / 1000)} seconds, and /health also did not respond from this browser. This looks like a local network timeout rather than a confirmed Render sleep.`,
           mergeTraceLists(localTrace, probe.trace)
         );
       }
@@ -850,10 +857,151 @@ async function getStoredUser() {
   };
 }
 
+function stopSyncPoller(userId) {
+  const timer = activeSyncPollers.get(userId);
+  if (timer) {
+    clearTimeout(timer);
+    activeSyncPollers.delete(userId);
+  }
+}
+
+function scheduleSyncPoller(userId, task, delay = SYNC_STATUS_POLL_MS) {
+  stopSyncPoller(userId);
+  const timer = setTimeout(async () => {
+    activeSyncPollers.delete(userId);
+    await task();
+  }, delay);
+  activeSyncPollers.set(userId, timer);
+}
+
+async function fetchSyncStatus(jobId, userId, trackActivity = false) {
+  const params = new URLSearchParams();
+  if (jobId) params.set('jobId', jobId);
+  if (userId) params.set('userId', userId);
+
+  return fetchBackend(`/api/messages/sync/status?${params.toString()}`, {
+    timeoutMs: SYNC_FETCH_TIMEOUT_MS
+  });
+}
+
+async function watchSyncJob(userId, jobId, options = {}) {
+  if (!userId || !jobId) return;
+
+  const trackActivity = Boolean(options.trackActivity);
+  const response = await fetchSyncStatus(jobId, userId, trackActivity);
+  const backendTrace = normalizeTraceEntries(response.trace);
+
+  if (!response?.success) {
+    if (trackActivity) {
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, [
+        buildDiagnosticEntry('EXT', 'warning', 'sync_status_failed', 'Mailbox sync status check failed.', {
+          code: response.code,
+          details: response.error
+        })
+      ]));
+    }
+    if (response?.code !== 'BACKEND_COLD_START') {
+      scheduleSyncPoller(userId, () => watchSyncJob(userId, jobId, options), 6000);
+    }
+    return;
+  }
+
+  await chrome.storage.local.set({
+    mailitaSyncJob: {
+      jobId: response.jobId,
+      status: response.status,
+      phase: response.phase,
+      updatedAt: nowIso()
+    }
+  });
+
+  if (response.status === 'completed') {
+    stopSyncPoller(userId);
+    await chrome.storage.local.set({
+      lastSyncTime: nowIso(),
+      mailitaSyncJob: {
+        jobId: response.jobId,
+        status: response.status,
+        phase: response.phase,
+        updatedAt: nowIso()
+      }
+    });
+    if (trackActivity) {
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, [
+        buildDiagnosticEntry('EXT', 'success', 'sync_complete', 'Automatic mailbox sync completed.', {
+          details: `jobId=${response.jobId}; synced=${response.counts?.synced || 0}`
+        })
+      ]));
+    }
+    return;
+  }
+
+  if (response.status === 'failed') {
+    stopSyncPoller(userId);
+    if (trackActivity) {
+      await appendSetupDiagnostics(mergeTraceLists(backendTrace, [
+        buildDiagnosticEntry('EXT', 'error', 'sync_failed', 'Automatic mailbox sync failed.', {
+          details: response.error || 'Unknown sync failure.'
+        })
+      ]));
+    }
+    return;
+  }
+
+  scheduleSyncPoller(userId, () => watchSyncJob(userId, jobId, options));
+}
+
+async function ensureSyncJobRunning(options = {}) {
+  const { userId } = await getStoredUser();
+  if (!userId) {
+    return {
+      success: false,
+      code: 'NOT_CONNECTED',
+      error: 'Not connected. Please set up the extension.'
+    };
+  }
+
+  const trackActivity = Boolean(options.trackActivity);
+  const response = await fetchBackend('/api/messages/sync', {
+    method: 'POST',
+    body: JSON.stringify({ userId }),
+    timeoutMs: SYNC_FETCH_TIMEOUT_MS
+  });
+
+  if (response?.success && response.jobId) {
+    if (trackActivity) {
+      await appendSetupDiagnostics(mergeTraceLists(normalizeTraceEntries(response.trace), [
+        buildDiagnosticEntry('EXT', 'info', 'sync_job_started', 'Mailbox sync job is running in the background.', {
+          details: `jobId=${response.jobId}; status=${response.status}; phase=${response.phase}`
+        })
+      ]));
+    }
+    watchSyncJob(userId, response.jobId, { trackActivity }).catch(() => {});
+  }
+
+  return response;
+}
+
+async function maybeKickAutomaticSync(reason = 'auto') {
+  const { userId } = await getStoredUser();
+  if (!userId) return;
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const activeGmail = tabs.some((tab) => typeof tab.url === 'string' && tab.url.startsWith('https://mail.google.com/'));
+  if (!activeGmail) return;
+
+  ensureSyncJobRunning({ trackActivity: false, reason }).catch(() => {});
+}
+
 function sanitizePayload(payload) {
   if (payload == null) return {};
   if (typeof payload === 'object' && !Array.isArray(payload)) return payload;
   return null;
+}
+
+async function ensureSyncAlarm() {
+  if (!chrome.alarms?.create) return;
+  await chrome.alarms.create(SYNC_ALARM_NAME, { periodInMinutes: 10 });
 }
 
 async function handleGuideAction(action, payload = {}) {
@@ -1061,6 +1209,7 @@ async function handleBackendAction(message) {
         buildDiagnosticEntry('EXT', 'success', 'local_auth_updated', 'Connected account saved in the extension.')
       ];
       await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
+      ensureSyncJobRunning({ trackActivity: true }).catch(() => {});
       return {
         ...response,
         trace: mergeTraceLists(startTrace, backendTrace, extTrace)
@@ -1078,7 +1227,7 @@ async function handleBackendAction(message) {
           response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'connect_failed',
         response.code === 'BACKEND_COLD_START'
           ? 'Backend is waking up. Retry in about 60 seconds.'
-          : 'Connection failed before Gmail Unified finished setup.',
+          : 'Connection failed before Mailita finished setup.',
           {
             code: response.code,
             details: response.error,
@@ -1542,37 +1691,33 @@ async function handleBackendAction(message) {
 
     const startTrace = trackActivity
       ? [
-        buildDiagnosticEntry('EXT', 'info', 'sync_requested', 'Starting manual mailbox sync.'),
-        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Sending sync request to the backend.')
+        buildDiagnosticEntry('EXT', 'info', 'sync_requested', 'Starting automatic mailbox sync.'),
+        buildDiagnosticEntry('EXT', 'info', 'backend_request', 'Starting or resuming a background sync job.')
       ]
       : [];
     if (trackActivity && startTrace.length) {
       await appendSetupDiagnostics(startTrace);
     }
 
-    const response = await fetchBackend('/api/messages/sync', {
-      method: 'POST',
-      body: JSON.stringify({ userId })
-    });
+    const response = await ensureSyncJobRunning({ trackActivity });
 
     if (response.success) {
-      await chrome.storage.local.set({ lastSyncTime: nowIso() });
+      const backendTrace = normalizeTraceEntries(response.trace);
+      const extTrace = [
+        buildDiagnosticEntry('EXT', 'success', 'backend_response_received', 'Backend replied to the sync start request.', {
+          details: `jobId=${response.jobId}; status=${response.status}; phase=${response.phase}`
+        }),
+        buildDiagnosticEntry('EXT', 'success', 'sync_job_running', 'Mailbox sync is now running in the background.', {
+          details: `jobId=${response.jobId}`
+        })
+      ];
       if (trackActivity) {
-        const backendTrace = normalizeTraceEntries(response.trace);
-        const extTrace = [
-          buildDiagnosticEntry('EXT', 'success', 'backend_response_received', 'Backend replied to the sync request.', {
-            details: `Synced ${response.synced || 0} messages.`
-          }),
-          buildDiagnosticEntry('EXT', 'success', 'sync_complete', `Manual sync complete: ${response.synced || 0} messages.`, {
-            details: 'Mailbox cache updated successfully.'
-          })
-        ];
         await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
-        return {
-          ...response,
-          trace: mergeTraceLists(startTrace, backendTrace, extTrace)
-        };
       }
+      return {
+        ...response,
+        trace: mergeTraceLists(startTrace, backendTrace, extTrace)
+      };
     }
 
     if (trackActivity) {
@@ -1598,7 +1743,7 @@ async function handleBackendAction(message) {
           response.code === 'BACKEND_COLD_START' ? 'backend_cold_start' : 'sync_failed',
           response.code === 'BACKEND_COLD_START'
             ? 'Backend is waking up before sync can continue.'
-            : 'Manual sync failed in the extension.',
+            : 'Automatic sync failed in the extension.',
           {
             code: response.code,
             details: response.error,
@@ -1672,11 +1817,18 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({ onboardingGuideState: normalizeGuideState(null, Boolean(stored.userId)) });
   }
   await setGuideBadge(normalizeGuideState(stored.onboardingGuideState, Boolean(stored.userId)));
+  await ensureSyncAlarm();
 });
 
 chrome.runtime.onStartup?.addListener(async () => {
   const guideState = await readGuideState();
   await setGuideBadge(guideState);
+  await ensureSyncAlarm();
+});
+
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm?.name !== SYNC_ALARM_NAME) return;
+  maybeKickAutomaticSync('alarm').catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

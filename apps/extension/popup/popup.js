@@ -16,9 +16,7 @@ const onboardingSuccess = document.getElementById('onboardingSuccess');
 
 const connectedEmail = document.getElementById('connectedEmail');
 const lastSync = document.getElementById('lastSync');
-const syncBtn = document.getElementById('syncBtn');
 const disconnectBtn = document.getElementById('disconnectBtn');
-const retrySyncBtn = document.getElementById('retrySyncBtn');
 const connectedStatus = document.getElementById('connectedStatus');
 const connectedColdStart = document.getElementById('connectedColdStart');
 const step1OpenTwoFactor = document.getElementById('step1OpenTwoFactor');
@@ -312,32 +310,6 @@ onboardingPasswordInput.addEventListener('keydown', async (event) => {
     event.preventDefault();
     await connectFromOnboarding();
   }
-});
-
-syncBtn.addEventListener('click', async () => {
-  showConnectedStatus('Syncing...', false);
-  showColdStart(connectedColdStart, false);
-
-  const response = await callWorker('SYNC_MESSAGES');
-  if (!response?.success) {
-    if (response.code === 'BACKEND_COLD_START') {
-      showConnectedStatus('', false);
-      showColdStart(connectedColdStart, true);
-      setVisible(retrySyncBtn, true);
-      return;
-    }
-
-    showConnectedStatus(response?.error || 'Sync failed.', true);
-    return;
-  }
-
-  showConnectedStatus(`Done! ${response.synced} messages synced.`, false);
-  setVisible(retrySyncBtn, false);
-  await refreshPopupState();
-});
-
-retrySyncBtn.addEventListener('click', async () => {
-  await syncBtn.click();
 });
 
 disconnectBtn.addEventListener('click', async () => {

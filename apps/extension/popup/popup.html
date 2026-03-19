@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Gmail Unified Setup</title>
+    <title>Mailita Setup</title>
     <style>
       body {
         margin: 0;
@@ -291,7 +291,7 @@
             <ul class="instruction-list">
               <li>Open <strong>App Passwords</strong> for the Google account you want to connect.</li>
               <li>If Google says App Passwords is unavailable, turn on <strong>2-Step Verification</strong> first.</li>
-              <li>Create a new password for <strong>Gmail Unified</strong> and copy the 16-character code.</li>
+              <li>Create a new password for <strong>Mailita</strong> and copy the 16-character code.</li>
               <li>Come back here and paste that code on the next step.</li>
             </ul>
             <div class="helper-actions">
@@ -346,13 +346,12 @@
       </section>
 
       <section id="connectedView" class="hidden">
-        <h1>Gmail Unified</h1>
+        <h1>Mailita</h1>
         <div class="status success">Connected</div>
         <div id="connectedEmail" class="connected-email"></div>
         <div id="lastSync" class="small">Last synced: Never</div>
-        <button id="syncBtn" class="primary">Sync Now</button>
+        <div class="helper">Mailbox sync now runs automatically in the background.</div>
         <button id="disconnectBtn" class="secondary">Disconnect</button>
-        <button id="retrySyncBtn" class="secondary hidden">Retry Sync</button>
         <div id="connectedStatus" class="status"></div>
         <div id="connectedColdStart" class="cold-start-box hidden">
           Backend server is starting up, please wait 60 seconds and try again.

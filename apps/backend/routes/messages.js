@@ -5,10 +5,18 @@ import { fetchMessages, searchMessages } from '../lib/imap.js';
 import { getBuildInfo } from '../lib/build-info.js';
 import {
   normalizeImapMessage,
+  mapMessageToLegacyRow,
   mapMessageToRow,
   mapRowToMessage
 } from '../lib/message-normalize.js';
 import { AppError, buildErrorResponse, pushTrace } from '../lib/errors.js';
+import {
+  buildContactIdentity,
+  contactKeyFromIdentity,
+  displayNameFromIdentity,
+  messageMatchesContact,
+  normalizeEmail
+} from '../lib/message-identity.js';
 
 const router = express.Router();
 
@@ -16,6 +24,11 @@ const IMAP_FOLDERS = {
   INBOX: 'INBOX',
   SENT: '[Gmail]/Sent Mail'
 };
+const SYNC_JOB_FETCH_LIMIT = 100;
+const SYNC_JOB_TERMINAL_STATUSES = new Set(['completed', 'failed']);
+const syncJobs = new Map();
+const syncJobByUser = new Map();
+let syncJobsTableSupported = true;
 
 function createRequestId(prefix = 'messages') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -86,22 +99,6 @@ function hasPreviewContent(messages) {
 
   const populated = messages.filter((message) => String(message?.snippet || '').trim().length >= 20).length;
   return populated / messages.length >= 0.8;
-}
-
-function normalizeEmail(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function messageMatchesContact(message, contactEmail) {
-  const target = normalizeEmail(contactEmail);
-  if (!target) return false;
-
-  const fromEmail = normalizeEmail(message?.from?.email);
-  const toEmails = Array.isArray(message?.to)
-    ? message.to.map((entry) => normalizeEmail(entry?.email)).filter(Boolean)
-    : [];
-
-  return fromEmail === target || toEmails.includes(target);
 }
 
 function filterMessagesByContact(messages, contactEmail) {
@@ -201,34 +198,14 @@ function pushTimingTrace(trace, stage, requestId, timings, extra = {}) {
 }
 
 function counterpartyFromMessage(message) {
-  if (message?.isOutgoing) {
-    const primaryRecipient = Array.isArray(message?.to) ? message.to[0] : null;
+  if (message?.contactKey || message?.contactEmail || message?.contactName) {
     return {
-      name: String(primaryRecipient?.name || '').trim(),
-      email: normalizeEmail(primaryRecipient?.email)
+      name: String(message?.contactName || '').trim(),
+      email: normalizeEmail(message?.contactEmail)
     };
   }
 
-  return {
-    name: String(message?.from?.name || '').trim(),
-    email: normalizeEmail(message?.from?.email)
-  };
-}
-
-function contactKeyFromIdentity(identity) {
-  const email = normalizeEmail(identity?.email);
-  if (email) return `contact:${email}`;
-
-  const label = String(identity?.name || '').trim().toLowerCase();
-  if (label) return `contact-label:${label}`;
-
-  return '';
-}
-
-function displayNameFromIdentity(identity) {
-  const name = String(identity?.name || '').trim();
-  const email = normalizeEmail(identity?.email);
-  return name || email || 'Unknown contact';
+  return buildContactIdentity(message?.from, message?.to, Boolean(message?.isOutgoing));
 }
 
 function unreadMessage(message) {
@@ -342,6 +319,42 @@ async function loadCachedMessages(userId, folders, limit, trace = [], requestId 
   return (data || []).map(mapRowToMessage);
 }
 
+async function loadCachedMessagesForContact(userId, contactEmail, limit, trace = [], requestId = '') {
+  pushDbTrace(trace, 'info', 'db_contact_cache_read_started', 'Loading cached contact messages from Supabase.', {
+    details: appendDetails(`contactEmail=${contactEmail}; limit=${limit}`, { requestId })
+  });
+
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('contact_email', contactEmail)
+    .order('date', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    if (schemaFallbackRequired(error, ['contact_email'])) {
+      pushDbTrace(trace, 'warning', 'db_contact_cache_schema_fallback', 'Messages table is missing canonical contact columns. Falling back to broad cache read.', {
+        details: appendDetails(error.message, { requestId, contactEmail })
+      });
+      const cached = await loadCachedMessages(userId, ['INBOX', 'SENT'], Math.min(limit * 10, 5000), trace, requestId);
+      return filterMessagesByContact(cached, contactEmail).slice(0, limit);
+    }
+
+    pushDbTrace(trace, 'error', 'db_contact_cache_read_failed', 'Could not load cached contact messages from Supabase.', {
+      code: 'BACKEND_UNAVAILABLE',
+      details: error.message
+    });
+    throw new AppError('BACKEND_UNAVAILABLE', error.message, 500, { trace });
+  }
+
+  const messages = (data || []).map(mapRowToMessage);
+  pushDbTrace(trace, 'success', 'db_contact_cache_read_complete', `Loaded ${messages.length} cached contact messages from Supabase.`, {
+    details: appendDetails(`contactEmail=${contactEmail}; limit=${limit}`, { requestId })
+  });
+  return sortByDateDesc(messages);
+}
+
 async function loadLatestCacheTimestamp(userId, folders, trace = [], requestId = '') {
   pushDbTrace(trace, 'info', 'db_cache_freshness_started', 'Checking cached message freshness in Supabase.');
   const { data, error } = await supabase
@@ -405,7 +418,23 @@ async function upsertMessages(userId, messages, trace = [], requestId = '') {
   }
 
   const rows = messages.map((message) => mapMessageToRow(message, userId));
-  const { error } = await supabase.from('messages').upsert(rows, { onConflict: 'id' });
+  let { error } = await supabase.from('messages').upsert(rows, { onConflict: 'id' });
+  if (error && schemaFallbackRequired(error, [
+    'contact_key',
+    'contact_email',
+    'contact_name',
+    'body_text',
+    'body_html',
+    'body_format',
+    'has_remote_images',
+    'has_linked_images'
+  ])) {
+    pushDbTrace(trace, 'warning', 'db_messages_upsert_schema_fallback', 'Messages table is missing 1.5.0 rich-body columns. Falling back to legacy cache shape.', {
+      details: appendDetails(error.message, { requestId })
+    });
+    const legacyRows = messages.map((message) => mapMessageToLegacyRow(message, userId));
+    ({ error } = await supabase.from('messages').upsert(legacyRows, { onConflict: 'id' }));
+  }
   if (error) {
     pushDbTrace(trace, 'error', 'db_messages_upsert_failed', 'Could not save synced messages to Supabase.', {
       code: 'BACKEND_UNAVAILABLE',
@@ -466,6 +495,189 @@ function buildCounts(messages) {
   const inboxCount = messages.filter((message) => message.folder === 'INBOX').length;
   const sentCount = messages.filter((message) => message.folder === 'SENT').length;
   return { inboxCount, sentCount };
+}
+
+function schemaFallbackRequired(error, columns = []) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('column') && columns.some((column) => message.includes(String(column).toLowerCase()));
+}
+
+function syncJobCounts(messages = []) {
+  const counts = buildCounts(messages);
+  return {
+    ...counts,
+    synced: Array.isArray(messages) ? messages.length : 0
+  };
+}
+
+function cloneTrace(trace = []) {
+  return Array.isArray(trace) ? trace.filter(Boolean).map((entry) => ({ ...entry })) : [];
+}
+
+function createSyncJob(userId) {
+  const jobId = createRequestId('sync-job');
+  const createdAt = new Date().toISOString();
+  const job = {
+    jobId,
+    userId,
+    status: 'queued',
+    phase: 'queued',
+    createdAt,
+    startedAt: null,
+    finishedAt: null,
+    error: '',
+    counts: {
+      inboxCount: 0,
+      sentCount: 0,
+      synced: 0
+    },
+    timings: defaultTimings(),
+    trace: []
+  };
+  syncJobs.set(jobId, job);
+  syncJobByUser.set(userId, jobId);
+  return job;
+}
+
+function currentSyncJobForUser(userId) {
+  const currentJobId = syncJobByUser.get(userId);
+  if (!currentJobId) return null;
+  return syncJobs.get(currentJobId) || null;
+}
+
+function syncJobPayload(job) {
+  return {
+    success: true,
+    jobId: job.jobId,
+    status: job.status,
+    phase: job.phase,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    error: job.error || null,
+    counts: job.counts,
+    timings: job.timings,
+    trace: cloneTrace(job.trace),
+    debug: {
+      backend: getBuildInfo()
+    }
+  };
+}
+
+async function persistSyncJob(job) {
+  if (!syncJobsTableSupported || !job) return;
+
+  try {
+    const row = {
+      job_id: job.jobId,
+      user_id: job.userId,
+      status: job.status,
+      phase: job.phase,
+      error: job.error || null,
+      counts: job.counts,
+      timings: job.timings,
+      trace: job.trace,
+      created_at: job.createdAt,
+      started_at: job.startedAt,
+      finished_at: job.finishedAt,
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from('sync_jobs').upsert(row, { onConflict: 'job_id' });
+    if (error) {
+      if (schemaFallbackRequired(error, ['sync_jobs', 'job_id'])) {
+        syncJobsTableSupported = false;
+        return;
+      }
+      throw error;
+    }
+  } catch (error) {
+    const message = String(error?.message || '').toLowerCase();
+    if (message.includes('sync_jobs')) {
+      syncJobsTableSupported = false;
+      return;
+    }
+    throw error;
+  }
+}
+
+async function markSyncJob(job, updates = {}) {
+  if (!job) return;
+  Object.assign(job, updates);
+  syncJobs.set(job.jobId, job);
+  await persistSyncJob(job);
+}
+
+async function runSyncJob(jobId) {
+  const job = syncJobs.get(jobId);
+  if (!job || job.status === 'running' || SYNC_JOB_TERMINAL_STATUSES.has(job.status)) {
+    return job || null;
+  }
+
+  const trace = [];
+  const requestStartedAt = Date.now();
+  const timings = defaultTimings();
+
+  await markSyncJob(job, {
+    status: 'running',
+    phase: 'user_lookup',
+    startedAt: new Date().toISOString(),
+    error: '',
+    trace
+  });
+
+  try {
+    pushTrace(trace, 'API', 'info', 'messages_sync_job_started', 'Background mailbox sync job started.', {
+      details: `jobId=${job.jobId}; userId=${job.userId}`
+    });
+
+    const user = await measureAsync(timings, 'user_lookup_ms', () => getUser(job.userId, trace, job.jobId));
+    await markSyncJob(job, { phase: 'imap_fetch', trace });
+
+    const fresh = await measureAsync(
+      timings,
+      'imap_fetch_ms',
+      () => fetchFromImap(user, ['INBOX', 'SENT'], SYNC_JOB_FETCH_LIMIT, trace, {
+        requestId: job.jobId,
+        fetchStrategy: 'parallel'
+      })
+    );
+
+    await markSyncJob(job, {
+      phase: 'upsert',
+      counts: syncJobCounts(fresh),
+      trace
+    });
+
+    await measureAsync(timings, 'upsert_ms', () => upsertMessages(job.userId, fresh, trace, job.jobId));
+    await updateLastSync(job.userId, trace, job.jobId);
+
+    const completeTimings = finalizeTimings(timings, requestStartedAt);
+    pushTimingTrace(trace, 'messages_sync_job_timing', job.jobId, completeTimings, { source: 'live' });
+    pushTrace(trace, 'API', 'success', 'messages_sync_job_complete', 'Background mailbox sync job completed.', {
+      details: `jobId=${job.jobId}; synced=${fresh.length}`
+    });
+
+    await markSyncJob(job, {
+      status: 'completed',
+      phase: 'completed',
+      finishedAt: new Date().toISOString(),
+      counts: syncJobCounts(fresh),
+      timings: completeTimings,
+      trace
+    });
+    return job;
+  } catch (error) {
+    const payload = buildErrorResponse(error, trace);
+    await markSyncJob(job, {
+      status: 'failed',
+      phase: 'failed',
+      finishedAt: new Date().toISOString(),
+      error: payload.body.error || error?.message || 'Sync failed.',
+      timings: finalizeTimings(timings, requestStartedAt),
+      trace: cloneTrace(payload.body.trace)
+    });
+    return job;
+  }
 }
 
 router.get('/summary', async (req, res) => {
@@ -606,7 +818,7 @@ router.get('/contact', async (req, res) => {
 
     const user = await measureAsync(timings, 'user_lookup_ms', () => getUser(userId, trace, requestId));
     let newestCachedAt = null;
-    const cacheReadLimit = limitPerFolder * 10;
+    const cacheReadLimit = Math.min(limitPerFolder * 2, 500);
 
     if (!forceSync) {
       const latestCacheTimestamp = await measureAsync(
@@ -619,15 +831,11 @@ router.get('/contact', async (req, res) => {
       const cached = await measureAsync(
         timings,
         'cache_read_ms',
-        () => loadCachedMessages(userId, ['INBOX', 'SENT'], cacheReadLimit, trace, requestId)
+        () => loadCachedMessagesForContact(userId, contactEmail, cacheReadLimit, trace, requestId)
       );
-      const contactMessages = measureSync(
-        timings,
-        'grouping_ms',
-        () => filterMessagesByContact(cached, contactEmail)
-      );
+      const contactMessages = sortByDateDesc(cached).slice(0, cacheReadLimit);
 
-      if (cached.length) {
+      if (contactMessages.length) {
         const completeTimings = finalizeTimings(timings, requestStartedAt);
         pushTrace(trace, 'API', 'info', 'messages_contact_cache_hit', 'Returning cached contact messages.', {
           details: `requestId=${requestId}; contactEmail=${contactEmail}; messages=${contactMessages.length}; newestCachedAt=${newestCachedAt || 'none'}`
@@ -1066,12 +1274,38 @@ router.get('/search', async (req, res) => {
   }
 });
 
+router.get('/sync/status', async (req, res) => {
+  const trace = [];
+
+  try {
+    const jobId = String(req.query?.jobId || '').trim();
+    const userId = String(req.query?.userId || '').trim();
+
+    if (!jobId && !userId) {
+      throw new AppError('BACKEND_UNAVAILABLE', 'jobId or userId is required.', 400, { trace });
+    }
+
+    const job = jobId
+      ? syncJobs.get(jobId)
+      : currentSyncJobForUser(userId);
+
+    if (!job) {
+      throw new AppError('BACKEND_UNAVAILABLE', 'Sync job not found.', 404, { trace });
+    }
+
+    return res.status(200).json(syncJobPayload(job));
+  } catch (error) {
+    const payload = buildErrorResponse(error, trace);
+    return res.status(payload.status).json(payload.body);
+  }
+});
+
 router.post('/sync', async (req, res) => {
   const trace = [];
   const requestId = createRequestId('sync');
 
   try {
-    pushTrace(trace, 'API', 'info', 'messages_sync_received', 'Manual sync request received.', {
+    pushTrace(trace, 'API', 'info', 'messages_sync_received', 'Mailbox sync job request received.', {
       details: `requestId=${requestId}`
     });
     const userId = String(req.body?.userId || '').trim();
@@ -1082,34 +1316,33 @@ router.post('/sync', async (req, res) => {
       throw new AppError('NOT_CONNECTED', 'userId is required.', 400, { trace });
     }
 
-    console.log(`[Messages] requestId=${requestId} force-sync requested for userId ${userId}`);
-
-    const user = await getUser(userId, trace, requestId);
+    await getUser(userId, trace, requestId);
     pushTrace(trace, 'API', 'success', 'messages_sync_user_loaded', 'Connected user loaded successfully.');
-    pushTrace(trace, 'API', 'info', 'messages_sync_imap_start', 'Starting manual Gmail sync.', {
-      details: `requestId=${requestId}; fetchStrategy=parallel`
-    });
-    const fresh = await fetchFromImap(user, ['INBOX', 'SENT'], 100, trace, {
-      requestId,
-      fetchStrategy: 'parallel'
-    });
-    await upsertMessages(userId, fresh, trace, requestId);
-    await updateLastSync(userId, trace, requestId);
 
-    console.log(`[Messages] requestId=${requestId} force-sync completed - synced ${fresh.length} messages`);
-    const counts = buildCounts(fresh);
-    pushTrace(trace, 'API', 'success', 'messages_sync_complete', `Manual sync completed: ${fresh.length} messages.`, {
-      details: `requestId=${requestId}; inbox=${counts.inboxCount}; sent=${counts.sentCount}`
-    });
+    const existingJob = currentSyncJobForUser(userId);
+    if (existingJob && !SYNC_JOB_TERMINAL_STATUSES.has(existingJob.status)) {
+      pushTrace(trace, 'API', 'info', 'messages_sync_job_reused', 'Reusing the active mailbox sync job.', {
+        details: `requestId=${requestId}; jobId=${existingJob.jobId}; status=${existingJob.status}; phase=${existingJob.phase}`
+      });
+      return res.status(200).json(syncJobPayload(existingJob));
+    }
 
-    return res.status(200).json({
-      success: true,
-      synced: fresh.length,
-      trace
+    const job = createSyncJob(userId);
+    pushTrace(trace, 'API', 'success', 'messages_sync_job_created', 'Background mailbox sync job created.', {
+      details: `requestId=${requestId}; jobId=${job.jobId}`
     });
+    job.trace = cloneTrace(trace);
+    await persistSyncJob(job);
+    setTimeout(() => {
+      runSyncJob(job.jobId).catch((error) => {
+        console.error(`[Messages] Background sync job ${job.jobId} failed unexpectedly: ${error?.message || String(error)}`);
+      });
+    }, 0);
+
+    return res.status(200).json(syncJobPayload(job));
   } catch (error) {
     if (!hasSpecificFailure(trace)) {
-      pushTrace(trace, 'API', 'error', 'messages_sync_failed', 'Manual sync failed.', {
+      pushTrace(trace, 'API', 'error', 'messages_sync_failed', 'Mailbox sync job request failed.', {
         code: error?.code || 'BACKEND_UNAVAILABLE',
         details: error?.message || 'Unexpected backend error'
       });

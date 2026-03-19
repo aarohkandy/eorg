@@ -1,6 +1,6 @@
 {
-  "name": "gmail-unified-backend",
-  "version": "1.0.0",
+  "name": "mailita-backend",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "main": "server.js",
@@ -9,7 +9,8 @@
     "start": "node server.js",
     "test:imap": "node test-imap.js",
     "test:imap:matrix": "node test-imap.js",
-    "test:errors": "node --test lib/errors.test.js"
+    "test:errors": "node --test lib/errors.test.js",
+    "test:unit": "node --test lib/errors.test.js lib/message-identity.test.js lib/message-normalize.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.50.0",

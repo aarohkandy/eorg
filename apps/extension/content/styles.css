@@ -466,18 +466,16 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 .gmail-unified-detail {
   height: 100%;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .gmail-unified-detail-head {
-  position: sticky;
-  top: 0;
   z-index: 2;
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 18px 24px;
+  padding: 12px 24px 10px;
   background: var(--mailita-structure);
   border-bottom: 1px solid var(--mailita-border);
   backdrop-filter: blur(var(--mailita-topbar-blur));
@@ -490,15 +488,15 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 }
 
 #gmailUnifiedDetailHeader {
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 700;
   line-height: 1.1;
 }
 
 .gmail-unified-detail-subheader {
-  margin-top: 4px;
+  margin-top: 2px;
   color: var(--mailita-text-muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .gmail-unified-back {
@@ -516,9 +514,9 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px;
+  padding: 18px 24px 12px;
   display: grid;
-  gap: 18px;
+  gap: 14px;
   align-content: start;
   content-visibility: auto;
 }
@@ -581,20 +579,56 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   border-color: transparent;
 }
 
-.gmail-unified-message-eyebrow {
-  margin-bottom: 8px;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: inherit;
-  opacity: 0.58;
-}
-
 .gmail-unified-message-snippet {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 15px;
   line-height: 1.54;
+}
+
+.gmail-unified-message-html {
+  color: inherit;
+  font-size: 15px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.gmail-unified-message-html p,
+.gmail-unified-message-html div,
+.gmail-unified-message-html blockquote,
+.gmail-unified-message-html ul,
+.gmail-unified-message-html ol {
+  margin: 0 0 14px;
+}
+
+.gmail-unified-message-html p:last-child,
+.gmail-unified-message-html div:last-child,
+.gmail-unified-message-html blockquote:last-child,
+.gmail-unified-message-html ul:last-child,
+.gmail-unified-message-html ol:last-child {
+  margin-bottom: 0;
+}
+
+.gmail-unified-message-html a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.gmail-unified-message-html img,
+.gmail-unified-message-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 16px;
+  margin: 14px 0;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.12);
+}
+
+.gmail-unified-message-html img[data-mailita-blocked-image='true'] {
+  min-height: 84px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed var(--mailita-border);
 }
 
 .gmail-unified-message-actions {
@@ -693,7 +727,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 }
 
 .gmail-unified-debug-panel {
-  margin: 0 24px 24px;
+  margin-top: 6px;
   padding: 18px;
   border-radius: 22px;
   border: 1px solid var(--mailita-border);
@@ -1180,8 +1214,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
     padding-right: 16px;
   }
 
-  .gmail-unified-composer,
-  .gmail-unified-debug-panel {
+  .gmail-unified-composer {
     margin-left: 16px;
     margin-right: 16px;
   }
