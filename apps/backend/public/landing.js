@@ -1,3 +1,4 @@
+const pageShell = document.getElementById('pageShell');
 const messageNodes = Array.from(document.querySelectorAll('.message'));
 const typingPulse = document.getElementById('typingPulse');
 const ctaPanel = document.getElementById('ctaPanel');
@@ -5,9 +6,11 @@ const getStartedButton = document.getElementById('getStartedButton');
 const installChecklist = document.getElementById('installChecklist');
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-const baseDelayMs = 820;
-const perMessageDelayMs = 900;
-const ctaDelayMs = 880;
+const introDelayMs = 540;
+const typingLeadMs = 340;
+const typingHideMs = 130;
+const settleGapMs = 240;
+const finalHoldMs = 520;
 
 function revealImmediate() {
   if (typingPulse) {
@@ -17,26 +20,47 @@ function revealImmediate() {
 
   messageNodes.forEach((node) => node.classList.add('is-visible'));
   ctaPanel?.classList.add('is-visible');
+  pageShell?.classList.add('is-infused');
 }
 
 function runSequence() {
-  typingPulse?.classList.add('is-visible');
+  let timeline = introDelayMs;
 
-  messageNodes.forEach((node, index) => {
-    const revealDelay = baseDelayMs + index * perMessageDelayMs;
+  messageNodes.forEach((node) => {
+    const isOutgoing = node.classList.contains('message-outgoing');
+    const typingClass = isOutgoing ? 'is-right' : 'is-left';
+    const dwellMs = isOutgoing ? 220 : 320;
 
     window.setTimeout(() => {
-      if (index === 0 && typingPulse) {
+      if (!typingPulse) return;
+      typingPulse.classList.remove('is-hidden', 'is-left', 'is-right');
+      typingPulse.classList.add(typingClass, 'is-visible');
+    }, timeline);
+
+    timeline += typingLeadMs + dwellMs;
+
+    window.setTimeout(() => {
+      if (typingPulse) {
         typingPulse.classList.remove('is-visible');
         typingPulse.classList.add('is-hidden');
       }
+    }, timeline);
 
+    timeline += typingHideMs;
+
+    window.setTimeout(() => {
       node.classList.add('is-visible');
-    }, revealDelay);
+    }, timeline);
+
+    timeline += settleGapMs;
   });
 
-  const finalDelay = baseDelayMs + messageNodes.length * perMessageDelayMs + ctaDelayMs;
-  window.setTimeout(() => ctaPanel?.classList.add('is-visible'), finalDelay);
+  timeline += finalHoldMs;
+
+  window.setTimeout(() => {
+    pageShell?.classList.add('is-infused');
+    ctaPanel?.classList.add('is-visible');
+  }, timeline);
 }
 
 function expandChecklist() {

@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mailita</title>
+    <title>Fun Mail</title>
     <meta
       name="description"
-      content="Mailita turns email into a calm, chat-first experience inside Gmail."
+      content="Fun Mail turns Gmail into something that feels lighter, friendlier, and more like texting."
     />
     <link
       rel="icon"
@@ -21,14 +21,16 @@
     <link rel="stylesheet" href="/landing.css" />
   </head>
   <body>
-    <div class="page-shell">
-      <div class="page-background" aria-hidden="true"></div>
+    <div class="page-shell" id="pageShell">
+      <div class="page-background page-background-mono" aria-hidden="true"></div>
+      <div class="page-background page-background-color" aria-hidden="true"></div>
       <div class="page-atmosphere" aria-hidden="true"></div>
+      <div class="page-color-bloom" aria-hidden="true"></div>
 
       <header class="site-header">
-        <a class="brand-mark" href="/" aria-label="Mailita home">
+        <a class="brand-mark" href="/" aria-label="Fun Mail home">
           <span class="brand-dot"></span>
-          <span class="brand-copy">Mailita</span>
+          <span class="brand-copy">Fun Mail</span>
         </a>
       </header>
 
@@ -37,7 +39,7 @@
           <p class="panel-eyebrow">To get started</p>
           <h1 class="panel-title" id="ctaHeading">Install the extension. Then open Gmail.</h1>
           <p class="panel-body">
-            Mailita lives inside Gmail and replaces the inbox with a calm, chat-first view.
+            Fun Mail lives inside Gmail and gives the inbox a lighter, more conversational feel.
           </p>
 
           <div class="panel-actions">
@@ -65,14 +67,14 @@
               <span class="step-index">1</span>
               <div>
                 <p class="step-title">Install the Chrome extension</p>
-                <p class="step-copy">Load Mailita first so Gmail has the new interface ready.</p>
+                <p class="step-copy">Load Fun Mail first so Gmail has the new interface ready.</p>
               </div>
             </div>
             <div class="checklist-step">
               <span class="step-index">2</span>
               <div>
                 <p class="step-title">Open Gmail</p>
-                <p class="step-copy">Mailita takes over the inbox inside your normal Gmail tab.</p>
+                <p class="step-copy">Fun Mail takes over the inbox inside your normal Gmail tab.</p>
               </div>
             </div>
             <div class="checklist-step">
@@ -87,7 +89,7 @@
           </div>
         </section>
 
-        <section class="conversation-stage" aria-label="Mailita conversation preview">
+        <section class="conversation-stage" aria-label="Fun Mail conversation preview">
           <div class="typing-pulse" id="typingPulse" aria-hidden="true">
             <span></span>
             <span></span>
@@ -96,30 +98,30 @@
 
           <div class="conversation-column" id="conversationColumn">
             <article class="message message-incoming" data-step="0">
-              <p>Hi, I&apos;m Mailita.</p>
+              <p>Hey, I&apos;m Fun Mail.</p>
             </article>
             <article class="message message-outgoing" data-step="1">
-              <p>What do you actually do?</p>
+              <p>What makes you different?</p>
             </article>
             <article class="message message-incoming" data-step="2">
-              <p>I turn email into something that feels like iMessage.</p>
+              <p>I make email feel a lot more like texting.</p>
             </article>
             <article class="message message-outgoing" data-step="3">
-              <p>Email as chat?</p>
+              <p>So it&apos;s not just another inbox?</p>
             </article>
             <article class="message message-incoming message-wide" data-step="4">
               <p>
-                Closer to a clean Discord server. Stripe gets a lane, Notion gets a lane, every
-                sender gets their own channel.
+                Right. Updates, receipts, and real people all become easier to scan, reply to, and
+                come back to.
               </p>
             </article>
             <article class="message message-outgoing" data-step="5">
-              <p>So I just install it and open Gmail?</p>
+              <p>So I install it, open Gmail, and it just clicks?</p>
             </article>
             <article class="message message-incoming message-wide" data-step="6">
               <p>
-                Exactly. Install the extension, open Gmail, connect Google, and Mailita makes the
-                inbox feel human.
+                Exactly. Add the extension, open Gmail, connect Google, and your inbox feels
+                lighter right away.
               </p>
             </article>
           </div>

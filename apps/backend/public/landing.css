@@ -3,10 +3,13 @@
   --page-bg: #b9b1a5;
   --page-ink: #171513;
   --muted-ink: rgba(23, 21, 19, 0.68);
-  --bone: rgba(241, 236, 228, 0.7);
-  --bone-border: rgba(255, 255, 255, 0.35);
-  --smoke: rgba(38, 34, 31, 0.76);
-  --smoke-border: rgba(255, 255, 255, 0.12);
+  --brand-blue: #178bff;
+  --brand-blue-deep: #0a72ee;
+  --incoming-bubble: rgba(241, 236, 228, 0.72);
+  --incoming-border: rgba(255, 255, 255, 0.35);
+  --outgoing-bubble: rgba(38, 34, 31, 0.76);
+  --outgoing-border: rgba(255, 255, 255, 0.12);
+  --outgoing-ink: rgba(249, 244, 237, 0.96);
   --panel: rgba(243, 237, 229, 0.68);
   --panel-border: rgba(255, 255, 255, 0.4);
   --shadow-soft: 0 20px 60px rgba(24, 20, 16, 0.16);
@@ -50,7 +53,8 @@ button {
 }
 
 .page-background,
-.page-atmosphere {
+.page-atmosphere,
+.page-color-bloom {
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -59,12 +63,40 @@ button {
 .page-background {
   background:
     linear-gradient(90deg, rgba(18, 16, 14, 0.18), rgba(18, 16, 14, 0) 32%, rgba(18, 16, 14, 0) 72%, rgba(18, 16, 14, 0.22)),
-    linear-gradient(180deg, rgba(255, 244, 227, 0.22), rgba(235, 228, 216, 0.1) 24%, rgba(58, 51, 45, 0.08) 100%),
-    url("/hero-landscape.png");
+    linear-gradient(180deg, rgba(255, 244, 227, 0.22), rgba(235, 228, 216, 0.1) 24%, rgba(58, 51, 45, 0.08) 100%);
   background-position: 14% center, center, 22% center;
   background-size: cover, cover, cover;
   transform: scale(1.03);
+}
+
+.page-background-mono {
+  background-image:
+    linear-gradient(90deg, rgba(18, 16, 14, 0.18), rgba(18, 16, 14, 0) 32%, rgba(18, 16, 14, 0) 72%, rgba(18, 16, 14, 0.22)),
+    linear-gradient(180deg, rgba(255, 244, 227, 0.22), rgba(235, 228, 216, 0.1) 24%, rgba(58, 51, 45, 0.08) 100%),
+    url("/hero-landscape.png");
   filter: saturate(0.82) contrast(0.96) brightness(0.96);
+}
+
+.page-background-color {
+  background-image:
+    linear-gradient(90deg, rgba(37, 24, 22, 0.12), rgba(37, 24, 22, 0) 28%, rgba(37, 24, 22, 0) 74%, rgba(37, 24, 22, 0.12)),
+    linear-gradient(180deg, rgba(255, 242, 221, 0.04), rgba(255, 242, 221, 0) 30%, rgba(111, 83, 78, 0.1) 100%),
+    url("/hero-landscape-color.png");
+  filter: saturate(1.06) contrast(1.02) brightness(1.01);
+  opacity: 0;
+  transition:
+    opacity 1.45s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 1.45s cubic-bezier(0.16, 1, 0.3, 1),
+    filter 1.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.page-shell.is-infused .page-background-color {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.page-shell.is-infused .page-background-mono {
+  filter: grayscale(1) saturate(0.7) brightness(0.88);
 }
 
 .page-atmosphere {
@@ -72,6 +104,28 @@ button {
     radial-gradient(circle at 70% 38%, rgba(255, 245, 231, 0.64), rgba(255, 245, 231, 0) 30%),
     radial-gradient(circle at 28% 76%, rgba(249, 235, 214, 0.22), rgba(249, 235, 214, 0) 28%),
     linear-gradient(180deg, rgba(15, 13, 11, 0.06), rgba(15, 13, 11, 0.22));
+  transition:
+    opacity 1.2s cubic-bezier(0.16, 1, 0.3, 1),
+    background 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.page-shell.is-infused .page-atmosphere {
+  background:
+    radial-gradient(circle at 70% 36%, rgba(255, 210, 175, 0.35), rgba(255, 210, 175, 0) 34%),
+    radial-gradient(circle at 30% 78%, rgba(241, 198, 193, 0.18), rgba(241, 198, 193, 0) 28%),
+    linear-gradient(180deg, rgba(45, 22, 24, 0.04), rgba(37, 24, 26, 0.14));
+}
+
+.page-color-bloom {
+  background:
+    radial-gradient(circle at 68% 42%, rgba(118, 171, 255, 0.22), rgba(118, 171, 255, 0) 25%),
+    radial-gradient(circle at 72% 52%, rgba(255, 191, 147, 0.24), rgba(255, 191, 147, 0) 28%);
+  opacity: 0;
+  transition: opacity 1.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.page-shell.is-infused .page-color-bloom {
+  opacity: 1;
 }
 
 .site-header {
@@ -99,6 +153,14 @@ button {
   border-radius: 999px;
   background: linear-gradient(180deg, rgba(250, 243, 232, 0.95), rgba(177, 156, 130, 0.9));
   box-shadow: 0 0 16px rgba(255, 244, 227, 0.6);
+  transition:
+    background 1s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.page-shell.is-infused .brand-dot {
+  background: linear-gradient(180deg, rgba(255, 229, 188, 0.95), rgba(255, 157, 78, 0.95));
+  box-shadow: 0 0 18px rgba(255, 190, 119, 0.45);
 }
 
 .brand-copy {
@@ -131,12 +193,19 @@ button {
   transform: translate3d(-24px, 32px, 0);
   transition:
     opacity 0.95s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.95s cubic-bezier(0.16, 1, 0.3, 1);
+    transform 0.95s cubic-bezier(0.16, 1, 0.3, 1),
+    background 1.2s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 1.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .cta-panel.is-visible {
   opacity: 1;
   transform: translate3d(0, 0, 0);
+}
+
+.page-shell.is-infused .cta-panel {
+  background: linear-gradient(180deg, rgba(251, 242, 234, 0.8), rgba(241, 223, 215, 0.66));
+  border-color: rgba(255, 235, 220, 0.52);
 }
 
 .panel-eyebrow {
@@ -200,6 +269,11 @@ button {
   color: rgba(30, 25, 22, 0.86);
   background: rgba(255, 255, 255, 0.18);
   border-color: rgba(74, 63, 54, 0.1);
+}
+
+.page-shell.is-infused .primary-action {
+  background: linear-gradient(180deg, rgba(26, 142, 255, 0.98), rgba(7, 111, 238, 0.98));
+  box-shadow: 0 14px 36px rgba(24, 123, 236, 0.28);
 }
 
 .primary-action:hover,
@@ -285,23 +359,45 @@ button {
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   opacity: 0;
-  transform: translate3d(0, 16px, 0);
+  transform: translate3d(0, 16px, 0) scale(0.96);
+  transition:
+    opacity 320ms ease,
+    transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 800ms ease,
+    border-color 800ms ease;
+}
+
+.typing-pulse.is-right {
+  align-self: flex-end;
+  background: rgba(45, 39, 34, 0.52);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.typing-pulse.is-left {
+  align-self: flex-start;
 }
 
 .typing-pulse.is-visible {
   opacity: 1;
-  transform: translate3d(0, 0, 0);
-  transition:
-    opacity 420ms ease,
-    transform 420ms ease;
+  transform: translate3d(0, 0, 0) scale(1);
 }
 
 .typing-pulse.is-hidden {
   opacity: 0;
-  transform: translate3d(0, -8px, 0);
-  transition:
-    opacity 280ms ease,
-    transform 280ms ease;
+  transform: translate3d(0, -8px, 0) scale(0.94);
+}
+
+.page-shell.is-infused .typing-pulse.is-right {
+  background: rgba(23, 139, 255, 0.22);
+  border-color: rgba(131, 199, 255, 0.34);
+}
+
+.page-shell.is-infused .typing-pulse span {
+  background: rgba(84, 70, 53, 0.5);
+}
+
+.page-shell.is-infused .typing-pulse.is-right span {
+  background: rgba(23, 139, 255, 0.74);
 }
 
 .typing-pulse span {
@@ -335,10 +431,16 @@ button {
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   opacity: 0;
-  transform: translate3d(0, 28px, 0);
+  transform: translate3d(0, 20px, 0) scale(0.985);
+  filter: blur(10px);
   transition:
-    opacity 820ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 820ms cubic-bezier(0.16, 1, 0.3, 1);
+    opacity 560ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 720ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 720ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 1.1s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 1.1s cubic-bezier(0.16, 1, 0.3, 1),
+    color 1.1s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 1.1s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .message p {
@@ -350,25 +452,39 @@ button {
 
 .message.is-visible {
   opacity: 1;
-  transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0) scale(1);
+  filter: blur(0);
 }
 
 .message-incoming {
   align-self: flex-start;
   color: rgba(32, 27, 23, 0.9);
-  background: linear-gradient(180deg, rgba(249, 244, 237, 0.72), rgba(233, 226, 216, 0.56));
-  border: 1px solid var(--bone-border);
+  background: linear-gradient(180deg, var(--incoming-bubble), rgba(233, 226, 216, 0.56));
+  border: 1px solid var(--incoming-border);
 }
 
 .message-outgoing {
   align-self: flex-end;
-  color: rgba(249, 244, 237, 0.96);
-  background: linear-gradient(180deg, rgba(39, 34, 30, 0.8), rgba(27, 23, 20, 0.72));
-  border: 1px solid var(--smoke-border);
+  color: var(--outgoing-ink);
+  background: linear-gradient(180deg, var(--outgoing-bubble), rgba(27, 23, 20, 0.72));
+  border: 1px solid var(--outgoing-border);
 }
 
 .message-wide {
   max-width: min(100%, 476px);
+}
+
+.page-shell.is-infused .message-incoming {
+  background: linear-gradient(180deg, rgba(241, 241, 245, 0.96), rgba(226, 228, 236, 0.9));
+  border-color: rgba(255, 255, 255, 0.48);
+  box-shadow: 0 22px 54px rgba(34, 30, 39, 0.12);
+}
+
+.page-shell.is-infused .message-outgoing {
+  color: rgba(255, 255, 255, 0.98);
+  background: linear-gradient(180deg, rgba(28, 145, 255, 0.98), rgba(8, 116, 239, 0.98));
+  border-color: rgba(152, 214, 255, 0.24);
+  box-shadow: 0 24px 62px rgba(11, 110, 221, 0.26);
 }
 
 @keyframes pulse {
