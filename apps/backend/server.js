@@ -1,9 +1,15 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import authRoutes from './routes/auth.js';
 import messageRoutes from './routes/messages.js';
 import healthRoutes from './routes/health.js';
 import { supabase } from './lib/supabase.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const publicDir = path.join(__dirname, 'public');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -29,6 +35,9 @@ app.use((req, res, next) => {
 app.use('/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/messages', messageRoutes);
+app.get('/', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
+app.use(express.static(publicDir, { index: false }));
 
 app.use((err, _req, res, _next) => {
   console.error(`[Backend ERROR] ${err.message}`);
