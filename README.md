@@ -1,8 +1,8 @@
 # Mailita 1.5.0
 
 Mailita is a Chrome extension that replaces Gmail's visible interface with a chat-style UI.
-It uses a backend on Render, fetches mail from Gmail over IMAP, normalizes/cache-stores it in
-Supabase, and renders conversations by person instead of by Gmail thread.
+The active beta now reads Gmail directly from the extension using Google OAuth and the Gmail API,
+keeps mailbox data local to the browser, and renders conversations by person instead of by Gmail thread.
 
 ## Active Runtime
 
@@ -12,6 +12,7 @@ Supabase, and renders conversations by person instead of by Gmail thread.
 
 The active extension runtime is the raw MV3 manifest under
 `/Users/a_a_k/Downloads/EORG/apps/extension/manifest.json`.
+The backend still exists as an IMAP fallback path, but it is no longer the default beta setup flow.
 
 ## What 1.5.0 Includes
 
@@ -26,20 +27,18 @@ The active extension runtime is the raw MV3 manifest under
 
 ## Quick Start
 
-1. Set up Supabase using `/Users/a_a_k/Downloads/EORG/infra/supabase-schema.sql`.
-2. Configure the backend environment variables listed in
-   `/Users/a_a_k/Downloads/EORG/docs/render-deploy.md`.
-3. Deploy the backend from `/Users/a_a_k/Downloads/EORG/apps/backend`.
-4. Load the extension from `/Users/a_a_k/Downloads/EORG/apps/extension`.
-5. Connect Gmail with a Gmail App Password from the extension popup or the in-app guide.
-6. Open `https://mail.google.com` and verify Mailita takes over the page.
+1. Create a Chrome extension OAuth client for this extension ID in Google Cloud.
+2. Put that client ID in `/Users/a_a_k/Downloads/EORG/apps/extension/manifest.json` under `oauth2.client_id`.
+3. Load the extension from `/Users/a_a_k/Downloads/EORG/apps/extension`.
+4. Open `https://mail.google.com`.
+5. Click `Connect with Google` in the extension popup or the in-page setup overlay.
+6. Approve Gmail read access and verify Mailita takes over the page.
 
 ## Important URLs
 
-- Backend health: [https://email-bcknd.onrender.com/health](https://email-bcknd.onrender.com/health)
 - Gmail: [https://mail.google.com](https://mail.google.com)
-- App Passwords: [https://myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
-- 2-Step Verification: [https://myaccount.google.com/signinoptions/two-step-verification](https://myaccount.google.com/signinoptions/two-step-verification)
+- Chrome extension OAuth: [https://developer.chrome.com/docs/extensions/how-to/integrate/oauth](https://developer.chrome.com/docs/extensions/how-to/integrate/oauth)
+- Gmail API scopes: [https://developers.google.com/workspace/gmail/api/auth/scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
 
 ## Setup and Recovery Docs
 
@@ -52,7 +51,6 @@ The active extension runtime is the raw MV3 manifest under
 
 ## Notes
 
-- `/health` being up does not guarantee `/api/messages` or `/api/messages/sync` are fast.
-- Summary/contact endpoints are intentionally lighter than the legacy full mailbox endpoint.
-- The backend can fall back to legacy cache writes if the Supabase `messages` table is missing
-  the new 1.5.0 rich-body columns, but rich HTML persistence requires the updated schema.
+- The beta default is `gmail_api_local`; backend IMAP remains available only as a fallback path.
+- Reply send still goes through native Gmail compose automation.
+- If you keep the backend path enabled, the old Supabase and Render requirements still apply there.

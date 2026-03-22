@@ -81,7 +81,7 @@ function loadWorkerContext() {
   return context;
 }
 
-test('legacy 4-step in-progress state migrates to 2-step connect stage', () => {
+test('legacy 4-step in-progress state migrates to single-step OAuth connect stage', () => {
   const ctx = loadWorkerContext();
   const legacy = {
     step: 'generate_app_password',
@@ -96,10 +96,9 @@ test('legacy 4-step in-progress state migrates to 2-step connect stage', () => {
 
   const migrated = ctx.normalizeGuideState(legacy, false);
   assert.equal(migrated.step, 'connect_account');
-  assert.equal(migrated.status.welcome, 'done');
   assert.equal(migrated.status.connect_account, 'in_progress');
-  assert.equal(migrated.total, 2);
-  assert.equal(migrated.progress, 1);
+  assert.equal(migrated.total, 1);
+  assert.equal(migrated.progress, 0);
 });
 
 test('legacy connected users remain fully connected after normalization', () => {
@@ -117,20 +116,18 @@ test('legacy connected users remain fully connected after normalization', () => 
 
   const migrated = ctx.normalizeGuideState(legacyConnected, true);
   assert.equal(migrated.connected, true);
-  assert.equal(migrated.status.welcome, 'done');
   assert.equal(migrated.status.connect_account, 'done');
-  assert.equal(migrated.progress, 2);
-  assert.equal(migrated.total, 2);
+  assert.equal(migrated.progress, 1);
+  assert.equal(migrated.total, 1);
 });
 
-test('empty state falls back safely to welcome step', () => {
+test('empty state falls back safely to the single OAuth connect step', () => {
   const ctx = loadWorkerContext();
   const migrated = ctx.normalizeGuideState(null, false);
 
-  assert.equal(migrated.step, 'welcome');
-  assert.equal(migrated.substep, 'intro');
-  assert.equal(migrated.status.welcome, 'in_progress');
-  assert.equal(migrated.status.connect_account, 'pending');
+  assert.equal(migrated.step, 'connect_account');
+  assert.equal(migrated.substep, 'connect_ready');
+  assert.equal(migrated.status.connect_account, 'in_progress');
   assert.equal(migrated.progress, 0);
-  assert.equal(migrated.total, 2);
+  assert.equal(migrated.total, 1);
 });

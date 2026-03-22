@@ -7,8 +7,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..', '..');
 
-const ACTIVE_BACKEND_URL = 'https://email-bcknd.onrender.com';
-
 function readJson(relativePath) {
   const absolutePath = path.join(repoRoot, relativePath);
   return JSON.parse(fs.readFileSync(absolutePath, 'utf8'));
@@ -34,14 +32,14 @@ function verifyActiveManifest() {
 
   assert.deepEqual(
     permissions,
-    ['storage', 'unlimitedStorage', 'tabs', 'alarms'],
-    'Active manifest permissions must be scoped to storage/unlimitedStorage/tabs/alarms only.'
+    ['storage', 'unlimitedStorage', 'tabs', 'alarms', 'identity'],
+    'Active manifest permissions must include identity for Google OAuth.'
   );
   assert.equal(manifest.name, 'Mailita', 'Active manifest name must be Mailita.');
   assert.match(
     String(manifest.description || ''),
-    /Mailita backend/i,
-    'Active manifest description must reflect the Mailita backend runtime.'
+    /direct Gmail OAuth/i,
+    'Active manifest description must reflect the direct Gmail OAuth runtime.'
   );
   assert.ok(
     !('web_accessible_resources' in manifest),
@@ -69,12 +67,12 @@ function verifyActiveManifest() {
     'Active manifest must include Gmail host permission.'
   );
   assert.ok(
-    hostPermissions.includes(`${ACTIVE_BACKEND_URL}/*`),
-    'Active manifest must include backend host permission.'
+    hostPermissions.includes('https://www.googleapis.com/*'),
+    'Active manifest must include Gmail API host permission.'
   );
   assert.ok(
-    !hostPermissions.includes('https://myaccount.google.com/*'),
-    'Active manifest must not inject onboarding runtime into Google Account pages.'
+    manifest.oauth2?.client_id,
+    'Active manifest must declare an OAuth client ID placeholder or value.'
   );
   assert.deepEqual(
     script?.matches,
@@ -117,8 +115,13 @@ function verifyWorkerContracts() {
 
   assertIncludes(
     worker,
-    `const BACKEND_URL = '${ACTIVE_BACKEND_URL}';`,
-    'Service worker must pin BACKEND_URL to Render production backend.'
+    'const DEFAULT_MAIL_SOURCE = MAIL_SOURCE_GMAIL_API_LOCAL;',
+    'Service worker must default to the local Gmail API mail source.'
+  );
+  assertIncludes(
+    worker,
+    "importScripts('gmail-local.js');",
+    'Service worker must import the local Gmail adapter.'
   );
   assertNotIncludes(
     worker,
@@ -159,23 +162,13 @@ function verifyClientCredentialSafety() {
   );
   assertIncludes(
     injector,
-    'passInput.value = \'\';',
-    'Content injector must clear app password input after connect attempt.'
+    "sendWorker('CONNECT_GOOGLE')",
+    'Content injector must start the Google OAuth connect flow.'
   );
   assertIncludes(
     popup,
-    "onboardingPasswordInput.value = '';",
-    'Popup onboarding must clear app password input after connect attempt.'
-  );
-  assertIncludes(
-    injector,
-    "sendWorker('CONNECT', { email, appPassword })",
-    'Content injector must keep CONNECT payload contract { email, appPassword }.'
-  );
-  assertIncludes(
-    popup,
-    "callWorker('CONNECT', { email, appPassword })",
-    'Popup must keep CONNECT payload contract { email, appPassword }.'
+    "callWorker('CONNECT_GOOGLE')",
+    'Popup must start the Google OAuth connect flow.'
   );
 }
 
@@ -188,18 +181,13 @@ function verifyOnboardingModel() {
 
   assertIncludes(
     worker,
-    "const GUIDE_STEPS = ['welcome', 'connect_account'];",
-    'Service worker onboarding model must be two-step (welcome + connect_account).'
+    "const GUIDE_STEPS = ['connect_account'];",
+    'Service worker onboarding model must be a single-step OAuth flow.'
   );
   assertIncludes(
     injector,
-    "const GUIDE_STEPS = ['welcome', 'connect_account'];",
-    'Gmail overlay onboarding model must be two-step (welcome + connect_account).'
-  );
-  assertIncludes(
-    popup,
-    "const GUIDE_STEP_KEYS = ['welcome', 'connect_account'];",
-    'Popup onboarding model must be two-step (welcome + connect_account).'
+    "const GUIDE_STEPS = ['connect_account'];",
+    'Gmail overlay onboarding model must be a single-step OAuth flow.'
   );
   assertNotIncludes(
     injector,
@@ -233,33 +221,23 @@ function verifyOnboardingModel() {
   );
   assertIncludes(
     popupHtml,
-    'Step 1 of 2',
-    'Popup onboarding should present instruction-first two-step copy.'
+    'Connect with Google',
+    'Popup onboarding should offer Google OAuth as the primary action.'
   );
-  assertIncludes(
-    popupHtml,
-    'Before You Connect',
-    'Popup onboarding should start with prerequisite instructions.'
-  );
-  assertIncludes(
+  assertNotIncludes(
     injector,
     'https://myaccount.google.com/apppasswords',
-    'Gmail overlay must provide a direct path to Google App Passwords.'
+    'Gmail overlay must not provide a direct path to Google App Passwords.'
   );
-  assertIncludes(
+  assertNotIncludes(
     popup,
-    'https://myaccount.google.com/apppasswords',
-    'Popup must provide a direct path to Google App Passwords.'
+    'myaccount.google.com/apppasswords',
+    'Popup must not provide a direct path to Google App Passwords.'
   );
   assertIncludes(
     popupHtml,
-    'Open App Passwords',
-    'Popup onboarding should let the user open App Passwords from the flow.'
-  );
-  assertIncludes(
-    popupHtml,
-    'Open 2-Step Verification',
-    'Popup onboarding should let the user recover by opening 2-Step Verification.'
+    'Open Gmail',
+    'Popup should keep a direct path back to Gmail.'
   );
 }
 

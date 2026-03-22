@@ -1,6 +1,34 @@
 /* global chrome */
 
-const BACKEND_URL = 'https://email-bcknd.onrender.com';
+if (typeof importScripts === 'function') {
+  importScripts('gmail-local.js');
+}
+
+const MailitaGmailLocal = globalThis.MailitaGmailLocal || {
+  oauthClientConfigured: () => false,
+  connect: async () => {
+    throw new Error('Mailita Gmail local adapter is unavailable.');
+  },
+  disconnect: async () => {},
+  loadSummaries: async () => ({ summaries: [], count: 0, source: 'gmail_api_local' }),
+  loadContact: async () => ({ messages: [], count: 0, source: 'gmail_api_local_contact' }),
+  search: async () => ({ messages: [], count: 0, source: 'gmail_api_local_search' }),
+  refreshIncremental: async () => ({
+    changed: false,
+    fullResync: false,
+    messages: [],
+    lastHistoryId: '',
+    lastSyncTime: ''
+  }),
+  snapshot: async () => ({
+    accountEmail: '',
+    grantedScopes: [],
+    lastHistoryId: '',
+    lastSyncTime: ''
+  })
+};
+
+const BACKEND_URL = 'http://localhost:7676';
 const FETCH_TIMEOUT_MS = 12000;
 const SYNC_FETCH_TIMEOUT_MS = 10000;
 const SYNC_STATUS_POLL_MS = 4000;
@@ -24,20 +52,23 @@ const WRAPPER_FAILURE_STAGES = new Set([
   'sync_failed',
   'health_check_failed'
 ]);
+const MAIL_SOURCE_GMAIL_API_LOCAL = 'gmail_api_local';
+const MAIL_SOURCE_IMAP_BACKEND = 'imap_backend';
+const DEFAULT_MAIL_SOURCE = MAIL_SOURCE_GMAIL_API_LOCAL;
 
-const GUIDE_STEPS = ['welcome', 'connect_account'];
+const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
 const GUIDE_STEP_ORDER = {
-  welcome: 0,
-  connect_account: 1
+  connect_account: 0
 };
 const GUIDE_SUBSTEPS = {
-  welcome: new Set(['intro']),
-  connect_account: new Set(['connect_ready', 'connect_submitted']),
+  connect_account: new Set(['connect_ready', 'connect_submitted', 'connected']),
   connected: new Set(['connected'])
 };
 
 const GUIDE_ACTIONS = new Set([
+  'CONNECT_GOOGLE',
+  'DISCONNECT_GOOGLE',
   'CONNECT',
   'DISCONNECT',
   'FETCH_MESSAGE_SUMMARIES',
@@ -71,15 +102,14 @@ function firstPendingStep(status) {
 
 function defaultGuideStatus() {
   return {
-    welcome: 'in_progress',
-    connect_account: 'pending'
+    connect_account: 'in_progress'
   };
 }
 
 function defaultGuideEvidence() {
   return {
-    appPassword: {
-      generatedAt: null,
+    oauth: {
+      connectedAt: null,
       source: null
     }
   };
@@ -281,20 +311,17 @@ function normalizeIsoField(value) {
 function normalizeGuideEvidence(input) {
   const evidence = defaultGuideEvidence();
   const src = input && typeof input === 'object' ? input : {};
-  const appPassword = src.appPassword && typeof src.appPassword === 'object' ? src.appPassword : {};
+  const oauth = src.oauth && typeof src.oauth === 'object' ? src.oauth : {};
 
-  evidence.appPassword.generatedAt = normalizeIsoField(appPassword.generatedAt);
-  evidence.appPassword.source = typeof appPassword.source === 'string' ? appPassword.source : null;
+  evidence.oauth.connectedAt = normalizeIsoField(oauth.connectedAt);
+  evidence.oauth.source = typeof oauth.source === 'string' ? oauth.source : null;
 
   return evidence;
 }
 
 function defaultSubstepForStep(step, status) {
-  if (step === 'welcome') return 'intro';
-
   if (step === 'connect_account') return 'connect_ready';
-
-  return 'intro';
+  return 'connect_ready';
 }
 
 function buildConnectedGuideState(evidence = defaultGuideEvidence()) {
@@ -302,7 +329,6 @@ function buildConnectedGuideState(evidence = defaultGuideEvidence()) {
     step: 'connect_account',
     substep: 'connected',
     status: {
-      welcome: 'done',
       connect_account: 'done'
     },
     evidence: normalizeGuideEvidence(evidence),
@@ -333,21 +359,11 @@ function normalizeGuideState(input, hasUserId = false) {
     || legacyStatus.enable_imap === 'done'
     || legacyStatus.generate_app_password === 'in_progress'
     || legacyStatus.generate_app_password === 'done'
-    || src.step === 'enable_imap'
-    || src.step === 'generate_app_password'
     || src.step === 'connect_account'
   );
 
-  if (legacyProgressed && status.welcome !== 'done') {
-    status.welcome = 'done';
-  }
-
   if (legacyProgressed && status.connect_account === 'pending') {
     status.connect_account = 'in_progress';
-  }
-
-  if (status.connect_account === 'done') {
-    status.welcome = 'done';
   }
 
   const evidence = normalizeGuideEvidence(src.evidence);
@@ -356,19 +372,8 @@ function normalizeGuideState(input, hasUserId = false) {
     return buildConnectedGuideState(evidence);
   }
 
-  let step = GUIDE_STEP_SET.has(src.step)
-    ? src.step
-    : (status.welcome === 'done' ? 'connect_account' : 'welcome');
-
-  if (step === 'welcome' && status.welcome === 'done') {
-    step = 'connect_account';
-  }
-
-  if (step === 'welcome' && status.welcome === 'pending') {
-    status.welcome = 'in_progress';
-  }
-
-  if (step === 'connect_account' && status.connect_account === 'pending' && status.welcome === 'done') {
+  let step = GUIDE_STEP_SET.has(src.step) ? src.step : 'connect_account';
+  if (step === 'connect_account' && status.connect_account === 'pending') {
     status.connect_account = 'in_progress';
   }
 
@@ -412,13 +417,13 @@ async function setGuideBadge(guideState) {
 }
 
 async function readGuideState() {
-  const stored = await chrome.storage.local.get(['onboardingGuideState', 'userId']);
-  return recalcGuideState(normalizeGuideState(stored.onboardingGuideState, Boolean(stored.userId)));
+  const stored = await chrome.storage.local.get(['onboardingGuideState', 'accountEmail', 'userId']);
+  return recalcGuideState(normalizeGuideState(stored.onboardingGuideState, Boolean(stored.accountEmail || stored.userId)));
 }
 
 async function persistGuideState(nextState) {
-  const storage = await chrome.storage.local.get(['userId']);
-  const normalized = recalcGuideState(normalizeGuideState(nextState, Boolean(storage.userId)));
+  const storage = await chrome.storage.local.get(['accountEmail', 'userId']);
+  const normalized = recalcGuideState(normalizeGuideState(nextState, Boolean(storage.accountEmail || storage.userId)));
   await chrome.storage.local.set({ onboardingGuideState: normalized });
   await setGuideBadge(normalized);
   return normalized;
@@ -428,7 +433,6 @@ function guideContextFromUrl(url) {
   const value = String(url || '').toLowerCase();
   if (!value) return 'unknown';
   if (value.includes('mail.google.com')) return 'gmail_inbox';
-  if (value.includes('myaccount.google.com')) return 'google_account';
   return 'other';
 }
 
@@ -453,29 +457,19 @@ function tabMatchesStep(tab, step) {
 
 function canAutoConfirmTransition(guideState, step, reason) {
   if (!GUIDE_STEP_SET.has(step)) return false;
-  if (step === guideState.step) return true;
-
-  if (step === 'welcome' && guideState.status.welcome !== 'done') {
-    return true;
-  }
-
-  if (step === 'connect_account' && guideState.status.welcome === 'done') {
-    return true;
-  }
-
-  return false;
+  return step === guideState.step || step === 'connect_account' || reason === 'oauth_connected';
 }
 
 function mergeEvidence(guideState, patchEvidence) {
   if (!patchEvidence || typeof patchEvidence !== 'object') return;
 
-  if (patchEvidence.appPassword && typeof patchEvidence.appPassword === 'object') {
-    const appPassword = patchEvidence.appPassword;
-    if (typeof appPassword.generatedAt === 'string') {
-      guideState.evidence.appPassword.generatedAt = appPassword.generatedAt;
+  if (patchEvidence.oauth && typeof patchEvidence.oauth === 'object') {
+    const oauth = patchEvidence.oauth;
+    if (typeof oauth.connectedAt === 'string') {
+      guideState.evidence.oauth.connectedAt = oauth.connectedAt;
     }
-    if (typeof appPassword.source === 'string') {
-      guideState.evidence.appPassword.source = appPassword.source;
+    if (typeof oauth.source === 'string') {
+      guideState.evidence.oauth.source = oauth.source;
     }
   }
 }
@@ -494,23 +488,15 @@ async function syncGuideContextFromTab(tab) {
     changed = true;
   }
 
-  if (
-    context === 'gmail_inbox' &&
-    guide.status.welcome === 'done' &&
-    guide.status.connect_account !== 'done'
-  ) {
-    if (guide.step !== 'connect_account') {
-      guide.step = 'connect_account';
-      changed = true;
-    }
+  if (context === 'gmail_inbox' && guide.status.connect_account !== 'done') {
+    guide.step = 'connect_account';
     if (guide.status.connect_account === 'pending') {
       guide.status.connect_account = 'in_progress';
-      changed = true;
     }
     if (guide.substep !== 'connect_ready') {
       guide.substep = 'connect_ready';
-      changed = true;
     }
+    changed = true;
   }
 
   if (changed) {
@@ -838,23 +824,333 @@ async function fetchHealth() {
 }
 
 async function getStoredUser() {
-  const { userId, userEmail, lastSyncTime, onboardingComplete, onboardingGuideState, setupDiagnostics } =
+  const {
+    userId,
+    userEmail,
+    accountEmail,
+    grantedScopes,
+    lastHistoryId,
+    mailSource,
+    lastSyncTime,
+    onboardingComplete,
+    onboardingGuideState,
+    setupDiagnostics
+  } =
     await chrome.storage.local.get([
       'userId',
       'userEmail',
+      'accountEmail',
+      'grantedScopes',
+      'lastHistoryId',
+      'mailSource',
       'lastSyncTime',
       'onboardingComplete',
       'onboardingGuideState',
       SETUP_DIAGNOSTICS_KEY
     ]);
+  const resolvedAccountEmail = String(accountEmail || userEmail || '').trim().toLowerCase();
+  const resolvedMailSource = String(mailSource || DEFAULT_MAIL_SOURCE);
+  const connected = Boolean(resolvedAccountEmail || userId);
   return {
-    userId,
-    userEmail,
+    connected,
+    mailSource: resolvedMailSource,
+    userId: userId || (resolvedAccountEmail ? `local:${resolvedAccountEmail}` : ''),
+    userEmail: resolvedAccountEmail,
+    accountEmail: resolvedAccountEmail,
+    grantedScopes: Array.isArray(grantedScopes) ? grantedScopes : [],
+    lastHistoryId: String(lastHistoryId || ''),
     lastSyncTime,
     onboardingComplete,
     onboardingGuideState,
     setupDiagnostics: normalizeSetupDiagnostics(setupDiagnostics)
   };
+}
+
+function usingLocalMailSource(storedUser, explicitAction = '') {
+  if (explicitAction === 'CONNECT_GOOGLE' || explicitAction === 'DISCONNECT_GOOGLE') return true;
+  const mode = String(storedUser?.mailSource || DEFAULT_MAIL_SOURCE);
+  return mode !== MAIL_SOURCE_IMAP_BACKEND;
+}
+
+function localTrace(level, stage, message, extra = {}) {
+  return buildDiagnosticEntry('EXT', level, stage, message, extra);
+}
+
+function mapLocalError(error, fallbackCode = 'GMAIL_API_FAILED') {
+  const message = String(error?.message || 'Local Gmail request failed.');
+  const code = String(error?.code || '');
+
+  if (code === 'OAUTH_NOT_CONFIGURED') {
+    return {
+      success: false,
+      code,
+      error: 'Google OAuth is not configured in the extension manifest yet.',
+      trace: [localTrace('error', 'oauth_not_configured', 'Google OAuth client ID is missing from manifest.json.', { code })]
+    };
+  }
+
+  if (
+    code === 'AUTH_FAILED'
+    || /authorize|consent|approval|grant/i.test(message)
+    || /not signed in/i.test(message)
+  ) {
+    return {
+      success: false,
+      code: 'AUTH_FAILED',
+      error: 'Google sign-in did not complete. Try connecting again.',
+      trace: [localTrace('error', 'oauth_failed', 'Google OAuth did not complete successfully.', {
+        code: 'AUTH_FAILED',
+        details: message
+      })]
+    };
+  }
+
+  return {
+    success: false,
+    code: fallbackCode,
+    error: message,
+    trace: [localTrace('error', 'gmail_api_failed', 'The Gmail API request failed in the extension.', {
+      code: fallbackCode,
+      details: message
+    })]
+  };
+}
+
+async function persistLocalSession(snapshot, options = {}) {
+  const accountEmail = String(snapshot?.accountEmail || '').trim().toLowerCase();
+  const userId = accountEmail ? `local:${accountEmail}` : '';
+  const updates = {
+    connected: Boolean(accountEmail),
+    mailSource: MAIL_SOURCE_GMAIL_API_LOCAL,
+    accountEmail,
+    userEmail: accountEmail,
+    userId,
+    grantedScopes: Array.isArray(snapshot?.grantedScopes) ? snapshot.grantedScopes : [],
+    lastHistoryId: String(snapshot?.lastHistoryId || ''),
+    lastSyncTime: typeof snapshot?.lastSyncTime === 'string' ? snapshot.lastSyncTime : '',
+    onboardingComplete: options.onboardingComplete == null ? true : Boolean(options.onboardingComplete)
+  };
+
+  await chrome.storage.local.set(updates);
+  return updates;
+}
+
+async function clearLocalSession() {
+  await chrome.storage.local.remove([
+    'connected',
+    'accountEmail',
+    'userEmail',
+    'userId',
+    'grantedScopes',
+    'lastHistoryId',
+    'lastSyncTime'
+  ]);
+  await chrome.storage.local.set({
+    mailSource: DEFAULT_MAIL_SOURCE,
+    onboardingComplete: false
+  });
+}
+
+async function runLocalSync(payload = {}) {
+  const result = await MailitaGmailLocal.refreshIncremental({
+    limit: Number(payload.limit || 50),
+    forceSync: Boolean(payload.forceSync)
+  });
+  const snapshot = await MailitaGmailLocal.snapshot();
+  await persistLocalSession({
+    ...snapshot,
+    lastSyncTime: result.lastSyncTime || snapshot.lastSyncTime || nowIso()
+  });
+  return {
+    success: true,
+    source: MAIL_SOURCE_GMAIL_API_LOCAL,
+    status: 'completed',
+    phase: result.fullResync ? 'full_resync' : (result.changed ? 'incremental' : 'idle'),
+    counts: {
+      synced: Array.isArray(result.messages) ? result.messages.length : 0,
+      changed: result.changed ? 1 : 0
+    },
+    trace: [
+      localTrace('success', result.fullResync ? 'local_sync_full_resync' : 'local_sync_complete', result.fullResync
+        ? 'Local Gmail sync completed with a full resync.'
+        : 'Local Gmail sync completed.', {
+        details: `changed=${Boolean(result.changed)}; fullResync=${Boolean(result.fullResync)}`
+      })
+    ]
+  };
+}
+
+async function handleLocalMailAction(action, payload = {}) {
+  const stored = await getStoredUser();
+
+  if (action === 'CONNECT_GOOGLE' || action === 'CONNECT') {
+    const connectedAt = nowIso();
+    const response = await MailitaGmailLocal.connect();
+    await persistLocalSession({
+      accountEmail: response.accountEmail,
+      grantedScopes: response.grantedScopes,
+      lastHistoryId: response.lastHistoryId,
+      lastSyncTime: ''
+    });
+    await persistGuideState(buildConnectedGuideState({
+      oauth: {
+        connectedAt,
+        source: 'chrome.identity'
+      }
+    }));
+    return {
+      success: true,
+      source: MAIL_SOURCE_GMAIL_API_LOCAL,
+      accountEmail: response.accountEmail,
+      email: response.accountEmail,
+      grantedScopes: response.grantedScopes,
+      lastHistoryId: response.lastHistoryId,
+      trace: [
+        localTrace('info', 'oauth_started', 'Starting Google OAuth connection.'),
+        localTrace('success', 'oauth_connected', 'Google OAuth connection completed in the extension.', {
+          details: response.accountEmail
+        })
+      ]
+    };
+  }
+
+  if (action === 'DISCONNECT_GOOGLE' || action === 'DISCONNECT') {
+    await MailitaGmailLocal.disconnect();
+    await clearLocalSession();
+    await chrome.storage.local.set({ onboardingGuideState: normalizeGuideState(null, false) });
+    await setGuideBadge(normalizeGuideState(null, false));
+    await clearSetupDiagnostics();
+    return {
+      success: true,
+      source: MAIL_SOURCE_GMAIL_API_LOCAL,
+      trace: [localTrace('success', 'oauth_disconnected', 'Local Gmail OAuth session disconnected.')]
+    };
+  }
+
+  if (!stored.connected) {
+    return {
+      success: false,
+      code: 'NOT_CONNECTED',
+      error: 'Not connected. Use Connect with Google first.',
+      trace: [localTrace('error', 'not_connected', 'Local Gmail action requires a connected Google account.', {
+        code: 'NOT_CONNECTED'
+      })]
+    };
+  }
+
+  if (action === 'FETCH_MESSAGE_SUMMARIES') {
+    const response = await MailitaGmailLocal.loadSummaries({
+      limit: Number(payload.limit || 50),
+      forceSync: Boolean(payload.forceSync)
+    });
+    const snapshot = await MailitaGmailLocal.snapshot();
+    await persistLocalSession({
+      ...snapshot,
+      lastSyncTime: response?.timings ? nowIso() : snapshot.lastSyncTime
+    });
+    return {
+      success: true,
+      summaries: response.summaries,
+      count: response.count,
+      source: response.source,
+      debug: response.debug,
+      timings: response.timings,
+      trace: [localTrace('success', 'local_summary_loaded', 'Loaded mailbox summaries from the Gmail API.', {
+        details: `count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'FETCH_CONTACT_MESSAGES') {
+    const response = await MailitaGmailLocal.loadContact({
+      contactEmail: payload.contactEmail,
+      limitPerFolder: Number(payload.limitPerFolder || 50),
+      forceSync: Boolean(payload.forceSync)
+    });
+    return {
+      success: true,
+      messages: response.messages,
+      count: response.count,
+      source: response.source,
+      debug: response.debug,
+      timings: response.timings,
+      trace: [localTrace('success', 'local_contact_loaded', 'Loaded contact messages from the Gmail API.', {
+        details: `contactEmail=${payload.contactEmail}; count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'DEBUG_REFETCH_CONTACT') {
+    const response = await MailitaGmailLocal.loadContact({
+      contactEmail: payload.contactEmail,
+      limitPerFolder: 50,
+      forceSync: true
+    });
+    return {
+      success: true,
+      messages: response.messages,
+      count: response.count,
+      source: 'gmail_api_local_debug',
+      backend: {
+        version: chrome.runtime.getManifest().version,
+        buildSha: MAIL_SOURCE_GMAIL_API_LOCAL,
+        deployedAt: null
+      },
+      trace: [localTrace('success', 'local_contact_refetch', 'Refetched contact messages directly from the Gmail API.', {
+        details: `contactEmail=${payload.contactEmail}; count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'SEARCH_MESSAGES') {
+    const response = await MailitaGmailLocal.search({
+      query: payload.query,
+      limit: Number(payload.limit || 20)
+    });
+    const snapshot = await MailitaGmailLocal.snapshot();
+    await persistLocalSession({
+      ...snapshot,
+      lastSyncTime: nowIso()
+    });
+    return {
+      success: true,
+      messages: response.messages,
+      count: response.count,
+      source: response.source,
+      timings: response.timings,
+      trace: [localTrace('success', 'local_search_complete', 'Searched the mailbox through the Gmail API.', {
+        details: `query=${String(payload.query || '').trim()}; count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'SYNC_MESSAGES') {
+    return runLocalSync(payload);
+  }
+
+  if (action === 'HEALTH_CHECK') {
+    const configured = MailitaGmailLocal.oauthClientConfigured();
+    return {
+      success: configured,
+      code: configured ? undefined : 'OAUTH_NOT_CONFIGURED',
+      status: configured ? 'ok' : 'oauth_not_configured',
+      source: MAIL_SOURCE_GMAIL_API_LOCAL,
+      accountEmail: stored.accountEmail,
+      trace: [localTrace(configured ? 'success' : 'error', configured ? 'local_health_ok' : 'oauth_not_configured', configured
+        ? 'Local Gmail mail source is ready.'
+        : 'Local Gmail mail source is missing an OAuth client ID.')]
+    };
+  }
+
+  if (action === 'GET_STORAGE') {
+    return {
+      success: true,
+      ...stored,
+      onboardingGuideState: normalizeGuideState(stored.onboardingGuideState, Boolean(stored.connected))
+    };
+  }
+
+  return null;
 }
 
 function stopSyncPoller(userId) {
@@ -952,8 +1248,8 @@ async function watchSyncJob(userId, jobId, options = {}) {
 }
 
 async function ensureSyncJobRunning(options = {}) {
-  const { userId } = await getStoredUser();
-  if (!userId) {
+  const stored = await getStoredUser();
+  if (!stored.connected) {
     return {
       success: false,
       code: 'NOT_CONNECTED',
@@ -961,6 +1257,11 @@ async function ensureSyncJobRunning(options = {}) {
     };
   }
 
+  if (usingLocalMailSource(stored)) {
+    return runLocalSync(options);
+  }
+
+  const { userId } = stored;
   const trackActivity = Boolean(options.trackActivity);
   const response = await fetchBackend('/api/messages/sync', {
     method: 'POST',
@@ -1042,17 +1343,6 @@ async function handleGuideAction(action, payload = {}) {
 
     mergeEvidence(guideState, payload.evidence);
 
-    if (step === 'welcome') {
-      guideState.status.welcome = 'done';
-      guideState.step = firstPendingStep(guideState.status);
-      if (guideState.status[guideState.step] === 'pending') {
-        guideState.status[guideState.step] = 'in_progress';
-      }
-      guideState.substep = defaultSubstepForStep(guideState.step, guideState.status);
-      guideState.updatedAt = nowIso();
-      return { success: true, guideState: await persistGuideState(guideState) };
-    }
-
     if (step === 'connect_account') {
       if (substep && !GUIDE_SUBSTEPS.connect_account.has(substep)) {
         return {
@@ -1060,9 +1350,6 @@ async function handleGuideAction(action, payload = {}) {
           code: 'BAD_REQUEST',
           error: 'Invalid connect substep.'
         };
-      }
-      if (guideState.status.welcome !== 'done') {
-        guideState.status.welcome = 'done';
       }
       guideState.status.connect_account = 'done';
       guideState.connected = true;
@@ -1093,20 +1380,12 @@ async function handleGuideAction(action, payload = {}) {
       };
     }
 
-    if (step !== 'welcome' && guideState.status.welcome !== 'done') {
-      guideState.status.welcome = 'done';
-    }
-
     guideState.step = step;
     if (guideState.status[step] === 'pending') {
       guideState.status[step] = 'in_progress';
     }
 
-    if (step === 'connect_account') {
-      guideState.substep = 'connect_ready';
-    } else {
-      guideState.substep = 'intro';
-    }
+    guideState.substep = 'connect_ready';
 
     const url = stepTargetUrl(step);
     if (!url) {
@@ -1169,6 +1448,25 @@ async function handleBackendAction(message) {
       : [payload.entry || payload];
     const setupDiagnostics = await appendSetupDiagnostics(entries, { reset: Boolean(payload.reset) });
     return { success: true, setupDiagnostics };
+  }
+
+  const storedUser = await getStoredUser();
+  if (usingLocalMailSource(storedUser, action)) {
+    try {
+      const localResult = await handleLocalMailAction(action, payload);
+      if (localResult) {
+        if (Array.isArray(localResult.trace) && localResult.trace.length) {
+          await appendSetupDiagnostics(localResult.trace);
+        }
+        return localResult;
+      }
+    } catch (error) {
+      const localError = mapLocalError(error);
+      if (Array.isArray(localError.trace) && localError.trace.length) {
+        await appendSetupDiagnostics(localError.trace);
+      }
+      return localError;
+    }
   }
 
   if (action === 'CONNECT') {
@@ -1789,7 +2087,7 @@ async function handleBackendAction(message) {
     return {
       success: true,
       ...stored,
-      onboardingGuideState: normalizeGuideState(stored.onboardingGuideState, Boolean(stored.userId))
+      onboardingGuideState: normalizeGuideState(stored.onboardingGuideState, Boolean(stored.connected))
     };
   }
 
@@ -1812,11 +2110,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const stored = await chrome.storage.local.get(['onboardingGuideState', 'userId']);
+  const stored = await chrome.storage.local.get(['onboardingGuideState', 'userId', 'accountEmail', 'mailSource']);
   if (!stored.onboardingGuideState) {
-    await chrome.storage.local.set({ onboardingGuideState: normalizeGuideState(null, Boolean(stored.userId)) });
+    await chrome.storage.local.set({
+      onboardingGuideState: normalizeGuideState(null, Boolean(stored.accountEmail || stored.userId)),
+      mailSource: stored.mailSource || DEFAULT_MAIL_SOURCE
+    });
   }
-  await setGuideBadge(normalizeGuideState(stored.onboardingGuideState, Boolean(stored.userId)));
+  await setGuideBadge(normalizeGuideState(stored.onboardingGuideState, Boolean(stored.accountEmail || stored.userId)));
   await ensureSyncAlarm();
 });
 

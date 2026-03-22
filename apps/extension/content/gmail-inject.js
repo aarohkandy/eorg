@@ -1,29 +1,25 @@
 const COLD_START_MESSAGE =
-  'Backend server is starting up, please wait 60 seconds and try again.';
-const APP_PASSWORDS_URL = 'https://myaccount.google.com/apppasswords';
-const TWO_STEP_VERIFICATION_URL = 'https://myaccount.google.com/signinoptions/two-step-verification';
+  'Mailita is refreshing Gmail in the background. Please wait a moment and try again.';
 const UI_SETTINGS_STORAGE_KEY = 'mailitaUiSettings';
 const SETTINGS_TABS = ['theme', 'privacy', 'account'];
 // Flip this off when we're ready to remove the onboarding activity panel.
 const SHOW_ACTIVITY_PANEL = true;
 
-const GUIDE_STEPS = ['welcome', 'connect_account'];
+const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
 const GUIDE_SUBSTEP_COPY = {
-  welcome: {
-    intro: {
-      title: 'Welcome to Mailita',
-      body: 'Use this step to turn on 2-Step Verification if needed, then create your Gmail App Password.'
-    }
-  },
   connect_account: {
     connect_ready: {
-      title: 'Step 2: Connect account',
-      body: 'Paste the Gmail address you want to sync and the 16-character App Password from Google.'
+      title: 'Connect account',
+      body: 'Connect Mailita with Google and grant read-only Gmail access for this beta.'
     },
     connect_submitted: {
       title: 'Connecting',
-      body: 'Finishing setup and loading your mailbox.'
+      body: 'Finishing Google sign-in and loading your mailbox.'
+    },
+    connected: {
+      title: 'Connected',
+      body: 'Mailita is connected and ready to load your Gmail conversations.'
     }
   }
 };
@@ -67,8 +63,9 @@ const state = {
   settingsPreviewTimer: null,
   activeSettingsTab: 'theme',
   accountSnapshot: {
-    userId: '',
-    userEmail: '',
+    connected: false,
+    accountEmail: '',
+    mailSource: 'gmail_api_local',
     lastSyncTime: '',
     onboardingComplete: false
   },
@@ -345,7 +342,7 @@ function resetSectionedMailboxCaches(options = {}) {
 }
 
 function accountEmailLower() {
-  return String(state.accountSnapshot?.userEmail || '').trim().toLowerCase();
+  return String(state.accountSnapshot?.accountEmail || '').trim().toLowerCase();
 }
 
 function usingLegacyMailboxFlow() {
@@ -556,20 +553,19 @@ async function appendUiActivity(entry, options = {}) {
 
 function defaultGuideState() {
   return {
-    step: 'welcome',
-    substep: 'intro',
+    step: 'connect_account',
+    substep: 'connect_ready',
     status: {
-      welcome: 'in_progress',
-      connect_account: 'pending'
+      connect_account: 'in_progress'
     },
     evidence: {
-      appPassword: {
-        generatedAt: null,
+      oauth: {
+        connectedAt: null,
         source: null
       }
     },
     progress: 0,
-    total: 2,
+    total: 1,
     currentContext: 'unknown',
     connected: false,
     updatedAt: new Date().toISOString()
@@ -593,31 +589,18 @@ function normalizeGuideState(input) {
   }
 
   if (src.evidence && typeof src.evidence === 'object') {
-    if (src.evidence.appPassword && typeof src.evidence.appPassword === 'object') {
-      const appPassword = src.evidence.appPassword;
-      if (typeof appPassword.generatedAt === 'string') evidence.appPassword.generatedAt = appPassword.generatedAt;
-      if (typeof appPassword.source === 'string') evidence.appPassword.source = appPassword.source;
+    if (src.evidence.oauth && typeof src.evidence.oauth === 'object') {
+      const oauth = src.evidence.oauth;
+      if (typeof oauth.connectedAt === 'string') evidence.oauth.connectedAt = oauth.connectedAt;
+      if (typeof oauth.source === 'string') evidence.oauth.source = oauth.source;
     }
   }
 
-  if (status.connect_account === 'done') {
-    status.welcome = 'done';
-  }
-
-  let step = GUIDE_STEP_SET.has(src.step)
-    ? src.step
-    : (status.welcome === 'done' ? 'connect_account' : 'welcome');
-  if (step === 'welcome' && status.welcome === 'done') {
-    step = 'connect_account';
-  }
+  let step = GUIDE_STEP_SET.has(src.step) ? src.step : 'connect_account';
 
   let substep = typeof src.substep === 'string' ? src.substep : fallback.substep;
   if (!GUIDE_SUBSTEP_COPY[step] || !GUIDE_SUBSTEP_COPY[step][substep]) {
-    if (step === 'connect_account') {
-      substep = status.connect_account === 'done' ? 'connect_submitted' : 'connect_ready';
-    } else {
-      substep = 'intro';
-    }
+    substep = status.connect_account === 'done' ? 'connected' : 'connect_ready';
   }
 
   const progress = GUIDE_STEPS.reduce((total, key) => total + (status[key] === 'done' ? 1 : 0), 0);
@@ -866,8 +849,8 @@ function mountRenderedEmailCard(host, html) {
 }
 
 function shellContextLabel() {
-  if (state.accountSnapshot?.userEmail) {
-    return state.accountSnapshot.userEmail;
+  if (state.accountSnapshot?.accountEmail) {
+    return state.accountSnapshot.accountEmail;
   }
 
   return state.connected ? 'Inbox' : 'Setup';
@@ -925,8 +908,8 @@ function renderSettingsUi() {
   }
 
   if (previewAccount) {
-    previewAccount.textContent = state.accountSnapshot.userEmail
-      ? `Account · ${state.accountSnapshot.userEmail}`
+    previewAccount.textContent = state.accountSnapshot.accountEmail
+      ? `Account · ${state.accountSnapshot.accountEmail}`
       : 'Account · not connected';
   }
 
@@ -951,7 +934,7 @@ function renderSettingsUi() {
   if (linksToggle) linksToggle.checked = settings.confirmExternalLinks;
   if (settingsDisconnect) settingsDisconnect.disabled = !state.connected;
 
-  if (accountEmail) accountEmail.textContent = state.accountSnapshot.userEmail || 'Not connected';
+  if (accountEmail) accountEmail.textContent = state.accountSnapshot.accountEmail || 'Not connected';
   if (accountSync) accountSync.textContent = formatSyncTimestamp(state.accountSnapshot.lastSyncTime);
   if (accountStatus) {
     accountStatus.textContent = state.connected ? 'Connected' : 'Setup required';
@@ -1441,7 +1424,7 @@ async function submitThreadReply(group) {
     date: new Date().toISOString(),
     from: {
       name: '',
-      email: state.accountSnapshot.userEmail || ''
+      email: state.accountSnapshot.accountEmail || ''
     },
     to: recipients,
     subject,
@@ -2573,6 +2556,11 @@ async function loadMessageSummaries(options = {}) {
       return response;
     }
 
+    if (response.code === 'OAUTH_NOT_CONFIGURED') {
+      setStateCard('auth-failed', 'OAuth is not configured in manifest.json yet. Add the Google client ID, then reconnect.');
+      return response;
+    }
+
     if (response.code === 'BACKEND_COLD_START') {
       startColdStartCountdown(() => loadMessages(options), {
         message: 'Mailbox summary load is waiting for the backend to wake up.'
@@ -2644,6 +2632,7 @@ async function loadMessages(options = {}) {
     options.allowLegacyFallback === false
     || summaryResponse?.code === 'NOT_CONNECTED'
     || summaryResponse?.code === 'AUTH_FAILED'
+    || summaryResponse?.code === 'OAUTH_NOT_CONFIGURED'
     || summaryResponse?.code === 'BACKEND_COLD_START'
   ) {
     return summaryResponse;
@@ -2714,19 +2703,20 @@ async function handleSearch(query) {
 function updateGuideProgressUI() {
   const guide = normalizeGuideState(state.guideState);
   const guideStepForUi = resolvedGuideStepForUi(guide);
-  const stepNumber = stepNumberFromKey(guideStepForUi);
   const progressText = document.getElementById('gmailUnifiedGuideProgressText');
   if (progressText) {
-    progressText.textContent = `Step ${stepNumber}/2 · ${guide.progress}/2 completed`;
+    progressText.textContent = guide.connected
+      ? 'Connected with Google'
+      : 'Connect Gmail with Google OAuth';
   }
 
   const progressBar = document.getElementById('gmailUnifiedGuideProgressBar');
-  const width = `${Math.max(0, Math.min(100, (guide.progress / 2) * 100))}%`;
+  const width = `${Math.max(0, Math.min(100, (guide.progress / Math.max(1, guide.total)) * 100))}%`;
   if (progressBar) progressBar.style.width = width;
 
   const guideCounter = document.getElementById('gmailUnifiedGuideCounterBadge');
   if (guideCounter) {
-    guideCounter.textContent = `${guide.progress}/2`;
+    guideCounter.textContent = guide.connected ? 'Ready' : 'Setup';
   }
 
   const stepNodes = document.querySelectorAll('.gmail-unified-guide-slide');
@@ -2735,17 +2725,11 @@ function updateGuideProgressUI() {
     node.classList.toggle('active', stepKey === guideStepForUi);
   });
 
-  const welcomeBody = document.getElementById('gmailUnifiedWelcomeBody');
-  if (welcomeBody) {
-    welcomeBody.textContent = GUIDE_SUBSTEP_COPY.welcome.intro.body;
-  }
-
   const connectBody = document.getElementById('gmailUnifiedConnectBody');
   if (connectBody) {
-    connectBody.textContent =
-      guide.substep === 'connect_submitted'
-        ? GUIDE_SUBSTEP_COPY.connect_account.connect_submitted.body
-        : GUIDE_SUBSTEP_COPY.connect_account.connect_ready.body;
+    const copy = GUIDE_SUBSTEP_COPY.connect_account[guide.substep]
+      || GUIDE_SUBSTEP_COPY.connect_account.connect_ready;
+    connectBody.textContent = copy.body;
   }
 
   const contextChip = document.getElementById('gmailUnifiedGuideContext');
@@ -2763,13 +2747,14 @@ async function refreshGuideAndAuthState() {
     readUiSettings()
   ]);
 
-  state.connected = Boolean(storage?.success && storage.userId);
+  state.connected = Boolean(storage?.success && storage.connected);
   state.guideState = normalizeGuideState(guide?.success ? guide.guideState : state.guideState);
   state.setupDiagnostics = normalizeSetupDiagnostics(storage?.setupDiagnostics);
   state.uiSettings = normalizeUiSettings(uiSettings);
   state.accountSnapshot = {
-    userId: storage?.userId || '',
-    userEmail: storage?.userEmail || '',
+    connected: Boolean(storage?.connected),
+    accountEmail: storage?.accountEmail || storage?.userEmail || '',
+    mailSource: storage?.mailSource || 'gmail_api_local',
     lastSyncTime: storage?.lastSyncTime || '',
     onboardingComplete: Boolean(storage?.onboardingComplete)
   };
@@ -2823,19 +2808,19 @@ function applyGmailLayoutMode() {
 }
 
 function mapConnectError(response) {
-  if (response?.code === 'AUTH_FAILED') {
-    return 'Wrong email or App Password. Double-check the code from Google and try again.';
+  if (response?.code === 'OAUTH_NOT_CONFIGURED') {
+    return 'Mailita OAuth is not configured yet. Add the Google client ID in the extension manifest first.';
   }
 
-  if (response?.code === 'CONNECTION_FAILED') {
-    return "Can't reach Gmail. Check your internet connection.";
+  if (response?.code === 'AUTH_FAILED') {
+    return 'Google sign-in did not complete. Try connecting again.';
   }
 
   if (response?.code === 'BACKEND_COLD_START') {
-    return 'The server is waking up (this takes ~60 seconds). Please wait and try again.';
+    return 'Mailita is refreshing Gmail in the background. Please wait a moment and try again.';
   }
 
-  return 'Something went wrong. Please try again.';
+  return response?.error || 'Google connection failed. Please try again.';
 }
 
 function setConnectUiState(status, error = false) {
@@ -2850,23 +2835,7 @@ function setConnectUiState(status, error = false) {
 async function connectFromGuide() {
   if (state.connectInFlight) return;
 
-  const emailInput = document.getElementById('gmailUnifiedConnectEmail');
-  const passInput = document.getElementById('gmailUnifiedConnectPassword');
   const connectBtn = document.getElementById('gmailUnifiedConnectBtn');
-
-  const email = String(emailInput?.value || '').trim();
-  const appPassword = String(passInput?.value || '').trim().replace(/\s+/g, '');
-
-  if (!email || !appPassword) {
-    await appendUiActivity({
-      source: 'UI',
-      level: 'warning',
-      stage: 'connect_input_missing',
-      message: 'Both Gmail address and App Password are required before connecting.'
-    });
-    setConnectUiState('Enter your Gmail address and app password to continue.', true);
-    return;
-  }
 
   state.connectInFlight = true;
   if (connectBtn) {
@@ -2882,23 +2851,19 @@ async function connectFromGuide() {
   }, { reset: true });
 
   try {
-    const response = await sendWorker('CONNECT', { email, appPassword });
+    const response = await sendWorker('CONNECT_GOOGLE');
     if (!response?.success) {
       setConnectUiState(mapConnectError(response), true);
       return;
     }
 
-    if (passInput) {
-      passInput.value = '';
-    }
-
     await guideConfirm('connect_account', {
       substep: 'connect_submitted',
-      reason: 'connect_submitted',
+      reason: 'oauth_connected',
       evidence: {
-        appPassword: {
-          generatedAt: new Date().toISOString(),
-          source: 'connect_submit'
+        oauth: {
+          connectedAt: new Date().toISOString(),
+          source: 'guide_connect'
         }
       }
     });
@@ -2922,13 +2887,10 @@ async function connectFromGuide() {
       startAutoRefresh();
     }, 600);
   } finally {
-    if (passInput) {
-      passInput.value = '';
-    }
     state.connectInFlight = false;
     if (connectBtn) {
       connectBtn.disabled = false;
-      connectBtn.textContent = 'Connect my account';
+      connectBtn.textContent = 'Connect with Google';
     }
   }
 }
@@ -2939,57 +2901,18 @@ function bindGuideEvents(sidebar) {
     applyGmailLayoutMode();
   });
 
-  sidebar.querySelector('#gmailUnifiedWelcomeStartBtn')?.addEventListener('click', async () => {
-    appendUiActivity({
-      source: 'UI',
-      level: 'info',
-      stage: 'open_app_passwords',
-      message: 'Opened Google App Passwords.'
-    }).catch(() => {});
-    openExternalPage(APP_PASSWORDS_URL);
-    await guideConfirm('welcome');
-    applyGmailLayoutMode();
-  });
-
-  sidebar.querySelector('#gmailUnifiedWelcomeTwoFactorBtn')?.addEventListener('click', () => {
-    appendUiActivity({
-      source: 'UI',
-      level: 'info',
-      stage: 'open_two_factor',
-      message: 'Opened Google 2-Step Verification.'
-    }).catch(() => {});
-    openExternalPage(TWO_STEP_VERIFICATION_URL);
-  });
-
   sidebar.querySelector('#gmailUnifiedConnectBtn')?.addEventListener('click', async () => {
     await connectFromGuide();
   });
 
-  sidebar.querySelector('#gmailUnifiedConnectOpenAppBtn')?.addEventListener('click', () => {
+  sidebar.querySelector('#gmailUnifiedOpenGmailBtn')?.addEventListener('click', () => {
     appendUiActivity({
       source: 'UI',
       level: 'info',
-      stage: 'open_app_passwords',
-      message: 'Opened Google App Passwords from Step 2.'
+      stage: 'open_gmail',
+      message: 'Opened Gmail inbox from the setup guide.'
     }).catch(() => {});
-    openExternalPage(APP_PASSWORDS_URL);
-  });
-
-  sidebar.querySelector('#gmailUnifiedConnectOpenTwoFactorBtn')?.addEventListener('click', () => {
-    appendUiActivity({
-      source: 'UI',
-      level: 'info',
-      stage: 'open_two_factor',
-      message: 'Opened Google 2-Step Verification from Step 2.'
-    }).catch(() => {});
-    openExternalPage(TWO_STEP_VERIFICATION_URL);
-  });
-
-  sidebar.querySelector('#gmailUnifiedConnectPassword')?.addEventListener('keydown', async (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      await connectFromGuide();
-    }
+    openExternalPage('https://mail.google.com/#inbox');
   });
 
   sidebar.querySelectorAll('.gmail-unified-filter-btn').forEach((button) => {
@@ -3142,7 +3065,7 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedSettingsDisconnectBtn')?.addEventListener('click', async () => {
-    const response = await sendWorker('DISCONNECT');
+    const response = await sendWorker('DISCONNECT_GOOGLE');
     if (!response?.success) return;
     state.messages = [];
     resetSectionedMailboxCaches();
@@ -3365,57 +3288,32 @@ function buildSidebar() {
       <div class="gmail-unified-modal">
         <header class="gmail-unified-modal-header">
           <div>
-            <div class="gmail-unified-modal-kicker">Guided setup</div>
+            <div class="gmail-unified-modal-kicker">Google OAuth setup</div>
             <h2>Connect Mailita</h2>
           </div>
           <div class="gmail-unified-modal-right">
-            <span id="gmailUnifiedGuideCounterBadge" class="gmail-unified-counter-badge">0/2</span>
+            <span id="gmailUnifiedGuideCounterBadge" class="gmail-unified-counter-badge">Setup</span>
             <button id="gmailUnifiedGuideCloseBtn" class="gmail-unified-guide-close-modal" hidden>Close</button>
           </div>
         </header>
         <div class="gmail-unified-progress-wrap">
-          <div id="gmailUnifiedGuideProgressText" class="gmail-unified-progress-text">Step 1/2 · 0/2 completed</div>
+          <div id="gmailUnifiedGuideProgressText" class="gmail-unified-progress-text">Connect Gmail with Google OAuth</div>
           <div class="gmail-unified-progress-track"><div id="gmailUnifiedGuideProgressBar" class="gmail-unified-progress-fill"></div></div>
           <div id="gmailUnifiedGuideContext" class="gmail-unified-guide-context">Current page: Gmail inbox</div>
         </div>
 
-        <article class="gmail-unified-guide-slide active" data-step="welcome">
-          <h3>Step 1: Before you connect</h3>
-          <p id="gmailUnifiedWelcomeBody">Use this step to turn on 2-Step Verification if needed, then create your Gmail App Password.</p>
+        <article class="gmail-unified-guide-slide active" data-step="connect_account">
+          <h3>Connect your Gmail account</h3>
+          <p id="gmailUnifiedConnectBody">Connect Mailita with Google and grant read-only Gmail access for this beta.</p>
           <ol>
-            <li>Open Google App Passwords.</li>
-            <li>If Google says App Passwords is unavailable, turn on <strong>2-Step Verification</strong> first.</li>
-            <li>Create a new password for <strong>Mailita</strong> and copy the 16-character code.</li>
-            <li>Come back here and connect with your Gmail address and that code.</li>
+            <li>Click <strong>Connect with Google</strong>.</li>
+            <li>Approve Gmail read access for Mailita.</li>
+            <li>Stay on Gmail and Mailita will load your conversations here.</li>
           </ol>
-          <div class="gmail-unified-guide-actions">
-            <button id="gmailUnifiedWelcomeStartBtn" class="gmail-unified-primary-btn">Open App Passwords</button>
-          </div>
-          <div class="gmail-unified-guide-helper">
-            <span>Need to turn on 2-Step Verification first?</span>
-            <button id="gmailUnifiedWelcomeTwoFactorBtn" class="gmail-unified-link-btn" type="button">
-              Open 2-Step Verification
-            </button>
-          </div>
-        </article>
-
-        <article class="gmail-unified-guide-slide" data-step="connect_account">
-          <h3>Step 2: Connect account</h3>
-          <p id="gmailUnifiedConnectBody">Paste the Gmail address you want to sync and the 16-character App Password from Google.</p>
-          <label for="gmailUnifiedConnectEmail" class="gmail-unified-field-label">Gmail address</label>
-          <input id="gmailUnifiedConnectEmail" class="gmail-unified-field" type="email" placeholder="you@gmail.com" />
-          <label for="gmailUnifiedConnectPassword" class="gmail-unified-field-label">App password</label>
-          <input id="gmailUnifiedConnectPassword" class="gmail-unified-field" type="password" placeholder="xxxx xxxx xxxx xxxx" />
           <div class="gmail-unified-guide-actions gmail-unified-connect-actions">
-            <button id="gmailUnifiedConnectBtn" class="gmail-unified-primary-btn">Connect my account</button>
-            <button id="gmailUnifiedConnectOpenAppBtn" class="gmail-unified-secondary-btn" type="button">
-              Open App Passwords
-            </button>
-          </div>
-          <div class="gmail-unified-guide-helper">
-            <span>Need 2-Step Verification first?</span>
-            <button id="gmailUnifiedConnectOpenTwoFactorBtn" class="gmail-unified-link-btn" type="button">
-              Open 2-Step Verification
+            <button id="gmailUnifiedConnectBtn" class="gmail-unified-primary-btn">Connect with Google</button>
+            <button id="gmailUnifiedOpenGmailBtn" class="gmail-unified-secondary-btn" type="button">
+              Open Gmail
             </button>
           </div>
           <div id="gmailUnifiedConnectStatus" class="gmail-unified-connect-status"></div>
@@ -3461,7 +3359,7 @@ async function bootGmailSurface() {
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
-    if (changes.onboardingGuideState || changes.userId || changes.onboardingComplete) {
+    if (changes.onboardingGuideState || changes.connected || changes.accountEmail || changes.onboardingComplete) {
       refreshGuideAndAuthState()
         .then(async () => {
           applyGmailLayoutMode();

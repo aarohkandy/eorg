@@ -1,18 +1,26 @@
 {
   "manifest_version": 3,
   "name": "Mailita",
-  "description": "Chat-style Gmail replacement powered by a Mailita backend.",
+  "description": "Chat-style Gmail replacement powered by direct Gmail OAuth.",
   "version": "1.5.0",
   "permissions": [
     "storage",
     "unlimitedStorage",
     "tabs",
-    "alarms"
+    "alarms",
+    "identity"
   ],
   "host_permissions": [
     "https://mail.google.com/*",
-    "https://email-bcknd.onrender.com/*"
+    "https://www.googleapis.com/*",
+    "http://localhost:7676/*"
   ],
+  "oauth2": {
+    "client_id": "REPLACE_WITH_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/gmail.readonly"
+    ]
+  },
   "background": {
     "service_worker": "apps/extension/background/service-worker.js"
   },
