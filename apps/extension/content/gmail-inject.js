@@ -2,13 +2,15 @@ const COLD_START_MESSAGE =
   'Mailita is refreshing Gmail in the background. Please wait a moment and try again.';
 const UI_SETTINGS_STORAGE_KEY = 'mailitaUiSettings';
 const SETTINGS_TABS = ['theme', 'privacy', 'account'];
-const THEME_MODES = ['dark', 'graphite', 'ocean', 'paper', 'sunrise', 'khaki', 'system'];
+const THEME_MODES = ['dark', 'graphite', 'ocean', 'water', 'aurora', 'paper', 'sunrise', 'khaki', 'system'];
 const THEME_LABELS = {
   dark: 'Midnight',
   graphite: 'Graphite',
   ocean: 'Sky',
+  water: 'Water',
+  aurora: 'Aurora',
   paper: 'Paper',
-  sunrise: 'Sunrise',
+  sunrise: 'Color',
   khaki: 'Sand',
   system: 'System'
 };
@@ -79,6 +81,8 @@ const state = {
     lastSyncTime: '',
     onboardingComplete: false
   },
+  detailLastThreadId: '',
+  detailSnapToLatestThreadId: '',
   composer: {
     draft: '',
     mode: 'reply',
@@ -196,7 +200,8 @@ function defaultUiSettings() {
     themeMode: 'dark',
     showDebugPanel: false,
     loadRemoteImages: true,
-    confirmExternalLinks: true
+    confirmExternalLinks: true,
+    pinnedThreadIds: []
   };
 }
 
@@ -204,6 +209,12 @@ function normalizeUiSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
   const defaults = defaultUiSettings();
   const themeMode = THEME_MODES.includes(src.themeMode) ? src.themeMode : defaults.themeMode;
+  const pinnedThreadIds = Array.isArray(src.pinnedThreadIds)
+    ? [...new Set(src.pinnedThreadIds
+      .map((value) => String(value || '').trim())
+      .filter(Boolean))]
+        .slice(0, 12)
+    : defaults.pinnedThreadIds;
 
   return {
     themeMode,
@@ -211,7 +222,8 @@ function normalizeUiSettings(input) {
     loadRemoteImages: src.loadRemoteImages == null
       ? (src.loadRemoteContent == null ? defaults.loadRemoteImages : Boolean(src.loadRemoteContent))
       : Boolean(src.loadRemoteImages),
-    confirmExternalLinks: src.confirmExternalLinks == null ? defaults.confirmExternalLinks : Boolean(src.confirmExternalLinks)
+    confirmExternalLinks: src.confirmExternalLinks == null ? defaults.confirmExternalLinks : Boolean(src.confirmExternalLinks),
+    pinnedThreadIds
   };
 }
 
@@ -342,6 +354,41 @@ async function persistUiSettings(nextSettings) {
   await chrome.storage.local.set({ [UI_SETTINGS_STORAGE_KEY]: normalized });
   state.uiSettings = normalized;
   return normalized;
+}
+
+function pinnedThreadIds(uiSettings = state.uiSettings) {
+  return normalizeUiSettings(uiSettings).pinnedThreadIds;
+}
+
+function pinnedThreadIdSet(uiSettings = state.uiSettings) {
+  return new Set(pinnedThreadIds(uiSettings));
+}
+
+function isPinnedThread(threadId, uiSettings = state.uiSettings) {
+  const key = String(threadId || '').trim();
+  if (!key) return false;
+  return pinnedThreadIdSet(uiSettings).has(key);
+}
+
+function requestDetailSnapToLatest(threadId = state.selectedThreadId) {
+  state.detailSnapToLatestThreadId = String(threadId || '').trim();
+}
+
+async function togglePinnedThread(threadId) {
+  const key = String(threadId || '').trim();
+  if (!key) return;
+
+  const current = pinnedThreadIds();
+  const nextPinned = current.includes(key)
+    ? current.filter((value) => value !== key)
+    : [key, ...current].slice(0, 12);
+
+  await persistUiSettings({
+    ...state.uiSettings,
+    pinnedThreadIds: nextPinned
+  });
+
+  renderThreads();
 }
 
 function resetSectionedMailboxCaches(options = {}) {
@@ -716,6 +763,7 @@ function initialsForLabel(value) {
 
 function cleanPreviewText(value, maxLength = 120) {
   const cleaned = String(value || '')
+    .replace(/\[(?:image|attachment)(?::[^\]]*)?\]\s*/gi, '')
     .replace(/https?:\/\/\S+/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -1608,6 +1656,7 @@ async function submitThreadReply(group) {
     mode: state.composer.mode,
     sendStatus: 'Sent'
   };
+  requestDetailSnapToLatest(activeGroup.threadId);
   renderThreads();
   const nextGroup = findSelectedGroup();
   if (nextGroup) {
@@ -1729,22 +1778,37 @@ function groupByThread(messages) {
     .sort((a, b) => byDateDesc(a.messages[0], b.messages[0]));
 }
 
+function sortThreadGroups(groups) {
+  const pinned = pinnedThreadIdSet();
+
+  return [...groups].sort((left, right) => {
+    const leftPinned = pinned.has(String(left?.threadId || '').trim());
+    const rightPinned = pinned.has(String(right?.threadId || '').trim());
+
+    if (leftPinned !== rightPinned) {
+      return leftPinned ? -1 : 1;
+    }
+
+    return new Date(groupLatestDate(right)).getTime() - new Date(groupLatestDate(left)).getTime();
+  });
+}
+
 function currentThreadGroups() {
   if (usingLegacyMailboxFlow()) {
-    return groupByThread(filteredMessages());
+    return sortThreadGroups(groupByThread(filteredMessages()));
   }
 
-  return state.contactSummaries
+  return sortThreadGroups(state.contactSummaries
     .filter((summary) => summaryVisibleInCurrentFilter(summary))
     .map((summary) => {
-    const allMessages = state.contactMessagesByKey[summary.contactKey] || [];
-    return {
-      threadId: summary.contactKey,
-      summary,
-      messages: filteredMessagesForCurrentFilter(allMessages),
-      allMessages
-    };
-    });
+      const allMessages = state.contactMessagesByKey[summary.contactKey] || [];
+      return {
+        threadId: summary.contactKey,
+        summary,
+        messages: filteredMessagesForCurrentFilter(allMessages),
+        allMessages
+      };
+    }));
 }
 
 function findSelectedGroup() {
@@ -1794,6 +1858,65 @@ function groupAvatarLabel(group) {
 function groupUnread(group) {
   if (group?.summary) return numericValue(group.summary.unreadCount, 0) > 0;
   return Array.isArray(group?.messages) ? group.messages.some(isUnread) : false;
+}
+
+function groupUnreadCount(group) {
+  if (group?.summary) return numericValue(group.summary.unreadCount, 0);
+  return Array.isArray(group?.messages) ? group.messages.filter(isUnread).length : 0;
+}
+
+function threadMetaParts(group) {
+  const parts = [];
+  const subject = groupLatestSubject(group);
+  const messageCount = groupMessageCount(group);
+  const threadCount = groupThreadCount(group);
+
+  parts.push(subject || '(no subject)');
+  if (messageCount > 1) parts.push(`${messageCount} messages`);
+  if (threadCount > 1) parts.push(`${threadCount} topics`);
+  return parts;
+}
+
+function renderPinnedRail(groups = currentThreadGroups()) {
+  const rail = document.getElementById('gmailUnifiedPinnedRail');
+  if (!rail) return;
+
+  const pinnedGroups = groups.filter((group) => isPinnedThread(group.threadId)).slice(0, 8);
+  rail.hidden = pinnedGroups.length === 0;
+
+  if (!pinnedGroups.length) {
+    rail.innerHTML = '';
+    return;
+  }
+
+  rail.innerHTML = `
+    <div class="gmail-unified-pinned-label">Pinned</div>
+    <div class="gmail-unified-pinned-strip">
+      ${pinnedGroups.map((group) => `
+        <button class="gmail-unified-pinned-card ${state.selectedThreadId === group.threadId ? 'is-selected' : ''}" type="button" data-pinned-thread="${escapeHtml(group.threadId)}">
+          <div class="gmail-unified-pinned-avatar" aria-hidden="true">${escapeHtml(groupAvatarLabel(group))}</div>
+          <div class="gmail-unified-pinned-name">${escapeHtml(groupDisplayName(group))}</div>
+          <div class="gmail-unified-pinned-time">${escapeHtml(formatDate(groupLatestDate(group)))}</div>
+        </button>
+      `).join('')}
+    </div>
+  `;
+
+  rail.querySelectorAll('[data-pinned-thread]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const threadId = String(button.getAttribute('data-pinned-thread') || '').trim();
+      if (!threadId) return;
+      if (state.selectedThreadId !== threadId) {
+        state.composer = defaultComposerState();
+      }
+      state.selectedThreadId = threadId;
+      requestDetailSnapToLatest(threadId);
+      renderThreads();
+      if (!usingLegacyMailboxFlow()) {
+        loadContactMessagesForThread(threadId).catch(() => {});
+      }
+    });
+  });
 }
 
 function isUnread(message) {
@@ -2179,6 +2302,7 @@ function renderThreads() {
   if (!list) return;
 
   const threadGroups = currentThreadGroups();
+  renderPinnedRail(threadGroups);
 
   if (!threadGroups.length) {
     setStateCard('empty', 'No messages found.');
@@ -2191,25 +2315,29 @@ function renderThreads() {
 
   threadGroups.forEach((group) => {
     const unread = groupUnread(group);
+    const unreadCount = groupUnreadCount(group);
     const selected = state.selectedThreadId === group.threadId;
+    const pinned = isPinnedThread(group.threadId);
 
-    const row = document.createElement('button');
+    const row = document.createElement('div');
     row.className = 'gmail-unified-thread-row';
-    row.type = 'button';
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
     row.dataset.threadId = group.threadId;
     row.classList.toggle('is-selected', selected);
 
     const who = groupDisplayName(group);
     const latestDate = groupLatestDate(group);
-    const latestSubject = groupLatestSubject(group);
     const latestPreview = groupLatestPreview(group);
-    const messageCount = groupMessageCount(group);
-    const threadCount = groupThreadCount(group);
     const avatar = groupAvatarLabel(group);
+    const metaParts = threadMetaParts(group);
 
     row.innerHTML = `
-      <div class="gmail-unified-thread-row-shell">
-        <div class="gmail-unified-thread-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
+      <div class="gmail-unified-thread-row-shell ${pinned ? 'is-pinned' : ''}">
+        <div class="gmail-unified-thread-avatar-wrap">
+          <div class="gmail-unified-thread-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
+          ${unread ? `<span class="gmail-unified-thread-unread-dot" aria-hidden="true"></span>` : ''}
+        </div>
         <div class="gmail-unified-thread-copy">
           <div class="gmail-unified-thread-top">
             <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
@@ -2217,21 +2345,31 @@ function renderThreads() {
           </div>
           <div class="gmail-unified-thread-preview ${unread ? 'unread' : ''}">${escapeHtml(latestPreview)}</div>
           <div class="gmail-unified-thread-meta">
-            <span class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(
-              latestSubject || '(no subject)'
-            )}</span>
-            <span class="gmail-unified-thread-count">${messageCount} msg${messageCount === 1 ? '' : 's'}</span>
-            ${threadCount > 1 ? `<span class="gmail-unified-thread-count">${threadCount} topics</span>` : ''}
+            ${metaParts.map((part, index) => `
+              ${index > 0 ? '<span class="gmail-unified-thread-meta-separator" aria-hidden="true"></span>' : ''}
+              <span class="gmail-unified-thread-subject ${index === 0 && unread ? 'unread' : ''}">${escapeHtml(part)}</span>
+            `).join('')}
+            ${unreadCount > 0 ? `<span class="gmail-unified-thread-unread-copy">${unreadCount} unread</span>` : ''}
           </div>
         </div>
+        <button class="gmail-unified-thread-pin-btn ${pinned ? 'is-active' : ''}" type="button" data-pin-thread="${escapeHtml(group.threadId)}" aria-label="${pinned ? 'Unpin conversation' : 'Pin conversation'}">
+          ${pinned ? 'Pinned' : 'Pin'}
+        </button>
       </div>
     `;
 
-    row.addEventListener('click', () => {
+    row.querySelector('[data-pin-thread]')?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await togglePinnedThread(group.threadId);
+    });
+
+    const openThread = () => {
       if (state.selectedThreadId !== group.threadId) {
         state.composer = defaultComposerState();
       }
       state.selectedThreadId = group.threadId;
+      requestDetailSnapToLatest(group.threadId);
       if (usingLegacyMailboxFlow()) {
         state.composer.targetMessageId = selectedComposerMessage(group)?.id || '';
       }
@@ -2239,6 +2377,13 @@ function renderThreads() {
       if (!usingLegacyMailboxFlow()) {
         loadContactMessagesForThread(group.threadId).catch(() => {});
       }
+    };
+
+    row.addEventListener('click', openThread);
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openThread();
     });
 
     list.appendChild(row);
@@ -2247,6 +2392,8 @@ function renderThreads() {
   const selectedGroup = findSelectedGroup();
   if (state.selectedThreadId && !selectedGroup) {
     state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
     document.getElementById('gmailUnifiedDetail').style.display = 'none';
   }
@@ -2364,6 +2511,10 @@ function renderThreadDetail(group) {
   const detailPreview = groupLatestPreview(group);
   const detailMessageCount = groupMessageCount(group);
   const detailThreadCount = groupThreadCount(group);
+  const detailPinned = isPinnedThread(group.threadId);
+  const shouldSnapToLatest = state.detailSnapToLatestThreadId === group.threadId
+    || state.detailLastThreadId !== group.threadId
+    || (body.scrollHeight > 0 && (body.scrollTop + body.clientHeight >= body.scrollHeight - 56));
 
   detail.style.display = 'block';
   header.innerHTML = `
@@ -2378,10 +2529,17 @@ function renderThreadDetail(group) {
         </div>
       </div>
     </div>
+    <div class="gmail-unified-detail-head-actions">
+      <button id="gmailUnifiedDetailPinBtn" class="gmail-unified-secondary-btn gmail-unified-pin-btn ${detailPinned ? 'is-active' : ''}" type="button">
+        ${detailPinned ? 'Pinned' : 'Pin'}
+      </button>
+    </div>
   `;
   subheader.innerHTML = `
-    <span class="gmail-unified-detail-pill">${escapeHtml(detailSubject || '(no subject)')}</span>
-    <span class="gmail-unified-detail-preview">${escapeHtml(detailPreview)}</span>
+    <div class="gmail-unified-detail-topic-line">
+      <span class="gmail-unified-detail-pill">${escapeHtml(detailSubject || '(no subject)')}</span>
+      <span class="gmail-unified-detail-preview">${escapeHtml(detailPreview)}</span>
+    </div>
   `;
 
   body.innerHTML = '';
@@ -2501,10 +2659,24 @@ function renderThreadDetail(group) {
   composerStatus.textContent = state.composer.sendError || state.composer.sendStatus || '';
   composerStatus.dataset.state = state.composer.sendError ? 'error' : (state.composer.sendStatus ? 'success' : 'idle');
 
+  header.querySelector('#gmailUnifiedDetailPinBtn')?.addEventListener('click', async () => {
+    await togglePinnedThread(group.threadId);
+  });
+
   renderSettingsUi();
   renderThreadDebug(group);
   updateMainPanelVisibility();
   maybeDebugRefetchContact(group).catch(() => {});
+
+  window.requestAnimationFrame(() => {
+    if (shouldSnapToLatest) {
+      body.scrollTop = body.scrollHeight;
+      if (state.detailSnapToLatestThreadId === group.threadId) {
+        state.detailSnapToLatestThreadId = '';
+      }
+    }
+    state.detailLastThreadId = group.threadId;
+  });
 }
 
 function clearRetryTimer() {
@@ -2830,6 +3002,8 @@ async function loadMessageSummaries(options = {}) {
 
   if (state.selectedThreadId && !findSummaryByThreadId(state.selectedThreadId)) {
     state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
   }
 
@@ -2997,6 +3171,8 @@ async function refreshGuideAndAuthState() {
 
   if (!state.connected) {
     state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
     state.settingsOpen = false;
     state.settingsPreviewOpen = false;
     state.composer = defaultComposerState();
@@ -3170,6 +3346,8 @@ function bindGuideEvents(sidebar) {
 
   sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
     state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
     document.getElementById('gmailUnifiedDetail').style.display = 'none';
     renderThreadDebug(null);
@@ -3306,6 +3484,8 @@ function bindGuideEvents(sidebar) {
     state.messages = [];
     resetSectionedMailboxCaches();
     state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
     state.useLegacyMailboxFallback = false;
     state.mailboxMode = 'summary';
@@ -3385,8 +3565,9 @@ function buildSidebar() {
             <div id="gmailUnifiedRailContext" class="gmail-unified-rail-context">Inbox</div>
           </div>
           <div class="gmail-unified-search">
-            <input id="gmailUnifiedSearchInput" type="text" placeholder="Search messages..." />
+            <input id="gmailUnifiedSearchInput" type="text" placeholder="Search people or messages..." />
           </div>
+          <div id="gmailUnifiedPinnedRail" class="gmail-unified-pinned-rail" hidden></div>
           <div class="gmail-unified-filters">
             <button class="gmail-unified-filter-btn active" data-filter="all">All</button>
             <button class="gmail-unified-filter-btn" data-filter="inbox">Inbox</button>
@@ -3431,13 +3612,11 @@ function buildSidebar() {
             </div>
             <div id="gmailUnifiedDetailBody" class="gmail-unified-detail-body"></div>
             <div id="gmailUnifiedComposer" class="gmail-unified-composer">
-              <div class="gmail-unified-composer-toolbar">
+              <div class="gmail-unified-composer-row">
                 <div class="gmail-unified-composer-modes">
                   <button id="gmailUnifiedComposerReply" class="gmail-unified-composer-mode is-active" type="button">Reply</button>
                   <button id="gmailUnifiedComposerReplyAll" class="gmail-unified-composer-mode" type="button">All</button>
                 </div>
-              </div>
-              <div class="gmail-unified-composer-row">
                 <div class="gmail-unified-composer-field-wrap">
                   <textarea id="gmailUnifiedComposerInput" class="gmail-unified-composer-input" placeholder="Message" spellcheck="true"></textarea>
                 </div>
@@ -3468,8 +3647,10 @@ function buildSidebar() {
                 <button class="gmail-unified-theme-option is-active" data-theme-mode="dark" type="button">Midnight</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="graphite" type="button">Graphite</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="ocean" type="button">Sky</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="water" type="button">Water</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="aurora" type="button">Aurora</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="paper" type="button">Paper</button>
-                <button class="gmail-unified-theme-option" data-theme-mode="sunrise" type="button">Sunrise</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="sunrise" type="button">Color</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="khaki" type="button">Sand</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="system" type="button">System</button>
               </div>
