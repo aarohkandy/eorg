@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mailita</title>
+    <meta
+      name="description"
+      content="Mailita turns email into a calm, chat-first experience inside Gmail."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%231d1915'/%3E%3Ccircle cx='32' cy='32' r='12' fill='%23efe7db'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/landing.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <div class="page-background" aria-hidden="true"></div>
+      <div class="page-atmosphere" aria-hidden="true"></div>
+
+      <header class="site-header">
+        <a class="brand-mark" href="/" aria-label="Mailita home">
+          <span class="brand-dot"></span>
+          <span class="brand-copy">Mailita</span>
+        </a>
+      </header>
+
+      <main class="hero-stage">
+        <section class="cta-panel" id="ctaPanel" aria-labelledby="ctaHeading">
+          <p class="panel-eyebrow">To get started</p>
+          <h1 class="panel-title" id="ctaHeading">Install the extension. Then open Gmail.</h1>
+          <p class="panel-body">
+            Mailita lives inside Gmail and replaces the inbox with a calm, chat-first view.
+          </p>
+
+          <div class="panel-actions">
+            <button
+              class="primary-action"
+              id="getStartedButton"
+              type="button"
+              aria-expanded="false"
+              aria-controls="installChecklist"
+            >
+              Get Started
+            </button>
+            <a
+              class="secondary-action"
+              href="https://mail.google.com"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open Gmail
+            </a>
+          </div>
+
+          <div class="install-checklist" id="installChecklist" hidden>
+            <div class="checklist-step">
+              <span class="step-index">1</span>
+              <div>
+                <p class="step-title">Install the Chrome extension</p>
+                <p class="step-copy">Load Mailita first so Gmail has the new interface ready.</p>
+              </div>
+            </div>
+            <div class="checklist-step">
+              <span class="step-index">2</span>
+              <div>
+                <p class="step-title">Open Gmail</p>
+                <p class="step-copy">Mailita takes over the inbox inside your normal Gmail tab.</p>
+              </div>
+            </div>
+            <div class="checklist-step">
+              <span class="step-index">3</span>
+              <div>
+                <p class="step-title">Connect with Google</p>
+                <p class="step-copy">
+                  Approve access once, then every sender gets their own chat lane.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="conversation-stage" aria-label="Mailita conversation preview">
+          <div class="typing-pulse" id="typingPulse" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+
+          <div class="conversation-column" id="conversationColumn">
+            <article class="message message-incoming" data-step="0">
+              <p>Hi, I&apos;m Mailita.</p>
+            </article>
+            <article class="message message-outgoing" data-step="1">
+              <p>What do you actually do?</p>
+            </article>
+            <article class="message message-incoming" data-step="2">
+              <p>I turn email into something that feels like iMessage.</p>
+            </article>
+            <article class="message message-outgoing" data-step="3">
+              <p>Email as chat?</p>
+            </article>
+            <article class="message message-incoming message-wide" data-step="4">
+              <p>
+                Closer to a clean Discord server. Stripe gets a lane, Notion gets a lane, every
+                sender gets their own channel.
+              </p>
+            </article>
+            <article class="message message-outgoing" data-step="5">
+              <p>So I just install it and open Gmail?</p>
+            </article>
+            <article class="message message-incoming message-wide" data-step="6">
+              <p>
+                Exactly. Install the extension, open Gmail, connect Google, and Mailita makes the
+                inbox feel human.
+              </p>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/landing.js" defer></script>
+  </body>
+</html>
