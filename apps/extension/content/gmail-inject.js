@@ -2,7 +2,16 @@ const COLD_START_MESSAGE =
   'Mailita is refreshing Gmail in the background. Please wait a moment and try again.';
 const UI_SETTINGS_STORAGE_KEY = 'mailitaUiSettings';
 const SETTINGS_TABS = ['theme', 'privacy', 'account'];
-const THEME_MODES = ['dark', 'ocean', 'paper', 'khaki', 'system'];
+const THEME_MODES = ['dark', 'graphite', 'ocean', 'paper', 'sunrise', 'khaki', 'system'];
+const THEME_LABELS = {
+  dark: 'Midnight',
+  graphite: 'Graphite',
+  ocean: 'Sky',
+  paper: 'Paper',
+  sunrise: 'Sunrise',
+  khaki: 'Sand',
+  system: 'System'
+};
 // Flip this off when we're ready to remove the onboarding activity panel.
 const SHOW_ACTIVITY_PANEL = true;
 
@@ -719,6 +728,37 @@ function messagePreviewText(message, maxLength = 120) {
   return source || '(no preview)';
 }
 
+function senderIdentityKey(message) {
+  if (message?.isOutgoing) return 'outgoing:self';
+  const replyTo = String(message?.replyTo?.email || '').trim().toLowerCase();
+  if (replyTo) return `incoming:${replyTo}`;
+  const fromEmail = String(message?.from?.email || '').trim().toLowerCase();
+  if (fromEmail) return `incoming:${fromEmail}`;
+  const fromName = String(message?.from?.name || '').trim().toLowerCase();
+  return `incoming-name:${fromName}`;
+}
+
+function normalizedSubjectKey(subject) {
+  return String(subject || '')
+    .replace(/^(?:re|fwd|fw):\s*/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function shouldClusterWithPrevious(previousMessage, nextMessage) {
+  if (!previousMessage || !nextMessage) return false;
+  if (calendarDayLabel(previousMessage.date) !== calendarDayLabel(nextMessage.date)) return false;
+  if (senderIdentityKey(previousMessage) !== senderIdentityKey(nextMessage)) return false;
+  if (normalizedSubjectKey(previousMessage.subject) !== normalizedSubjectKey(nextMessage.subject)) return false;
+
+  const previousTs = new Date(previousMessage.date).getTime();
+  const nextTs = new Date(nextMessage.date).getTime();
+  if (!Number.isFinite(previousTs) || !Number.isFinite(nextTs)) return false;
+
+  return Math.abs(nextTs - previousTs) <= 20 * 60 * 1000;
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -940,8 +980,8 @@ function renderSettingsUi() {
 
   if (previewTheme) {
     const label = settings.themeMode === 'system'
-      ? `System (${resolvedThemeMode(settings)})`
-      : `${settings.themeMode.charAt(0).toUpperCase()}${settings.themeMode.slice(1)}`;
+      ? `System (${THEME_LABELS[resolvedThemeMode(settings)] || resolvedThemeMode(settings)})`
+      : (THEME_LABELS[settings.themeMode] || settings.themeMode);
     previewTheme.textContent = `Theme · ${label}`;
   }
 
@@ -2390,6 +2430,7 @@ function renderThreadDetail(group) {
   }
 
   let previousDayLabel = '';
+  let previousMessage = null;
   [...group.messages]
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
     .forEach((message) => {
@@ -2402,24 +2443,32 @@ function renderThreadDetail(group) {
         body.appendChild(separator);
       }
 
+      const groupedWithPrevious = shouldClusterWithPrevious(previousMessage, message);
+      const subjectChanged = !previousMessage
+        || normalizedSubjectKey(previousMessage.subject) !== normalizedSubjectKey(message.subject);
       const item = document.createElement('div');
       const renderedBody = messageDisplayMarkup(message);
-      item.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''}`;
+      item.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''} ${groupedWithPrevious ? 'gmail-unified-message-grouped' : ''}`;
       item.dataset.messageId = message.id || '';
       const canReplyAll = replyAllAvailable(message);
       const senderLabel = message.isOutgoing
         ? 'You'
         : (message?.from?.name || message?.from?.email || detailName);
+      const topicMarkup = subjectChanged
+        ? `<div class="gmail-unified-topic-chip">${escapeHtml(message.subject || '(no subject)')}</div>`
+        : '';
       const bodyMarkup = renderedBody.kind === 'html'
         ? '<div class="gmail-unified-message-html-host"></div>'
         : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
 
       item.innerHTML = `
+        ${topicMarkup}
+        ${groupedWithPrevious ? '' : `
         <div class="gmail-unified-message-meta">
           <span class="gmail-unified-message-author">${escapeHtml(senderLabel)}</span>
-          <span class="gmail-unified-message-subject">${escapeHtml(message.subject || '(no subject)')}</span>
           <span class="gmail-unified-message-time">${formatDate(message.date)}</span>
         </div>
+        `}
         <div class="gmail-unified-message-bubble-shell">
           <div class="gmail-unified-message-bubble ${renderedBody.kind === 'html' ? 'gmail-unified-message-bubble-html' : ''}">
             ${bodyMarkup}
@@ -2437,15 +2486,18 @@ function renderThreadDetail(group) {
         const host = item.querySelector('.gmail-unified-message-html-host');
         mountRenderedEmailCard(host, renderedBody.content);
       }
+
+      previousMessage = message;
     });
 
   composerReply.classList.toggle('is-active', state.composer.mode === 'reply');
   composerReplyAll.hidden = !replyAllAvailable(selectedMessage);
   composerReplyAll.classList.toggle('is-active', state.composer.mode === 'reply_all');
   composerInput.value = state.composer.draft;
-  composerInput.placeholder = `iMessage-style reply to ${detailName}...`;
+  composerInput.placeholder = 'Message';
   composerSend.disabled = state.composer.sendInFlight;
-  composerSend.textContent = state.composer.sendInFlight ? 'Sending…' : 'Send';
+  composerSend.textContent = state.composer.sendInFlight ? '…' : '↑';
+  composerSend.setAttribute('aria-label', state.composer.sendInFlight ? 'Sending' : 'Send');
   composerStatus.textContent = state.composer.sendError || state.composer.sendStatus || '';
   composerStatus.dataset.state = state.composer.sendError ? 'error' : (state.composer.sendStatus ? 'success' : 'idle');
 
@@ -3379,17 +3431,19 @@ function buildSidebar() {
             </div>
             <div id="gmailUnifiedDetailBody" class="gmail-unified-detail-body"></div>
             <div id="gmailUnifiedComposer" class="gmail-unified-composer">
-              <div class="gmail-unified-composer-top">
+              <div class="gmail-unified-composer-toolbar">
                 <div class="gmail-unified-composer-modes">
                   <button id="gmailUnifiedComposerReply" class="gmail-unified-composer-mode is-active" type="button">Reply</button>
-                  <button id="gmailUnifiedComposerReplyAll" class="gmail-unified-composer-mode" type="button">Reply all</button>
+                  <button id="gmailUnifiedComposerReplyAll" class="gmail-unified-composer-mode" type="button">All</button>
                 </div>
-                <div id="gmailUnifiedComposerStatus" class="gmail-unified-composer-status" data-state="idle"></div>
               </div>
               <div class="gmail-unified-composer-row">
-                <textarea id="gmailUnifiedComposerInput" class="gmail-unified-composer-input" placeholder="Write your reply..." spellcheck="true"></textarea>
-                <button id="gmailUnifiedComposerSend" class="gmail-unified-primary-btn gmail-unified-composer-send" type="button">Send</button>
+                <div class="gmail-unified-composer-field-wrap">
+                  <textarea id="gmailUnifiedComposerInput" class="gmail-unified-composer-input" placeholder="Message" spellcheck="true"></textarea>
+                </div>
+                <button id="gmailUnifiedComposerSend" class="gmail-unified-primary-btn gmail-unified-composer-send" type="button" aria-label="Send">↑</button>
               </div>
+              <div id="gmailUnifiedComposerStatus" class="gmail-unified-composer-status" data-state="idle"></div>
             </div>
           </section>
         </section>
@@ -3411,10 +3465,12 @@ function buildSidebar() {
               <h4>Theme</h4>
               <p>Choose the Mailita material direction that should drive the whole shell.</p>
               <div class="gmail-unified-theme-options">
-                <button class="gmail-unified-theme-option is-active" data-theme-mode="dark" type="button">Dark</button>
-                <button class="gmail-unified-theme-option" data-theme-mode="ocean" type="button">Ocean</button>
+                <button class="gmail-unified-theme-option is-active" data-theme-mode="dark" type="button">Midnight</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="graphite" type="button">Graphite</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="ocean" type="button">Sky</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="paper" type="button">Paper</button>
-                <button class="gmail-unified-theme-option" data-theme-mode="khaki" type="button">Khaki</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="sunrise" type="button">Sunrise</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="khaki" type="button">Sand</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="system" type="button">System</button>
               </div>
             </section>
