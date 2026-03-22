@@ -16,7 +16,7 @@
     "http://localhost:7676/*"
   ],
   "oauth2": {
-    "client_id": "REPLACE_WITH_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "client_id": "164613854790-smorr6t61h9k1cgvo6msjjtpk8b82p3h.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/gmail.readonly"
     ]
