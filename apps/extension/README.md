@@ -31,5 +31,5 @@ This is the active Chrome Manifest V3 extension package for Mailita.
 
 - The active runtime is still raw manifest-loaded JS/CSS, not a bundled frontend app.
 - The Privacy settings tab controls the temporary debug log and remote-image behavior.
-- Reply send still goes through native Gmail compose automation.
+- Reply send now prefers the Gmail API and falls back to native Gmail compose automation only if direct send fails.
 - The IMAP backend remains in the repo as a fallback path, but it is not the default beta setup.

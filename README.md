@@ -33,6 +33,7 @@ The backend still exists as an IMAP fallback path, but it is no longer the defau
 4. Open `https://mail.google.com`.
 5. Click `Connect with Google` in the extension popup or the in-page setup overlay.
 6. Approve Gmail read access and verify Mailita takes over the page.
+7. Add `gmail.send` in Google Cloud Data Access before testing replies so Mailita can send directly through the Gmail API.
 
 ## Important URLs
 
@@ -52,5 +53,5 @@ The backend still exists as an IMAP fallback path, but it is no longer the defau
 ## Notes
 
 - The beta default is `gmail_api_local`; backend IMAP remains available only as a fallback path.
-- Reply send still goes through native Gmail compose automation.
+- Reply send now prefers the Gmail API and only falls back to native Gmail compose automation if the direct send path fails.
 - If you keep the backend path enabled, the old Supabase and Render requirements still apply there.

@@ -2,6 +2,7 @@ const COLD_START_MESSAGE =
   'Mailita is refreshing Gmail in the background. Please wait a moment and try again.';
 const UI_SETTINGS_STORAGE_KEY = 'mailitaUiSettings';
 const SETTINGS_TABS = ['theme', 'privacy', 'account'];
+const THEME_MODES = ['dark', 'ocean', 'paper', 'khaki', 'system'];
 // Flip this off when we're ready to remove the onboarding activity panel.
 const SHOW_ACTIVITY_PANEL = true;
 
@@ -193,7 +194,7 @@ function defaultUiSettings() {
 function normalizeUiSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
   const defaults = defaultUiSettings();
-  const themeMode = ['dark', 'khaki', 'system'].includes(src.themeMode) ? src.themeMode : defaults.themeMode;
+  const themeMode = THEME_MODES.includes(src.themeMode) ? src.themeMode : defaults.themeMode;
 
   return {
     themeMode,
@@ -289,14 +290,18 @@ function normalizeContactSummary(input) {
       || String(src.contactEmail || '').trim().toLowerCase()
       || 'Unknown contact',
     latestSubject: String(src.latestSubject || '(no subject)').trim() || '(no subject)',
+    latestPreview: String(src.latestPreview || '').trim(),
     latestDate: String(src.latestDate || new Date(0).toISOString()).trim() || new Date(0).toISOString(),
     latestDirection: src.latestDirection === 'outgoing' ? 'outgoing' : 'incoming',
     latestMessageId: String(src.latestMessageId || '').trim(),
     messageCount: numericValue(src.messageCount, 0),
+    threadCount: numericValue(src.threadCount, 0),
     unreadCount: numericValue(src.unreadCount, 0),
     hasMissingContent: Boolean(src.hasMissingContent),
     inboxCount: numericValue(src.inboxCount, 0),
-    sentCount: numericValue(src.sentCount, 0)
+    sentCount: numericValue(src.sentCount, 0),
+    contactKind: src.contactKind === 'organization' ? 'organization' : 'person',
+    contactDomain: String(src.contactDomain || '').trim().toLowerCase()
   };
 }
 
@@ -675,6 +680,45 @@ function formatDate(value) {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+function calendarDayLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+
+  return date.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+function initialsForLabel(value) {
+  const tokens = String(value || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return '?';
+  if (tokens.length === 1) return tokens[0].slice(0, 2).toUpperCase();
+  return `${tokens[0][0] || ''}${tokens[1][0] || ''}`.toUpperCase();
+}
+
+function cleanPreviewText(value, maxLength = 120) {
+  const cleaned = String(value || '')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength - 1).trimEnd()}…` : cleaned;
+}
+
+function messagePreviewText(message, maxLength = 120) {
+  const source = cleanPreviewText(message?.bodyText || message?.snippet || message?.subject || '', maxLength);
+  return source || '(no preview)';
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -1008,6 +1052,24 @@ function uniqueRecipientEntries(entries) {
   return [...map.values()];
 }
 
+function replyEntryForMessage(message) {
+  if (message?.replyTo?.email) {
+    return {
+      email: String(message.replyTo.email).trim(),
+      name: String(message.replyTo.name || '').trim()
+    };
+  }
+
+  if (message?.from?.email) {
+    return {
+      email: String(message.from.email).trim(),
+      name: String(message.from.name || '').trim()
+    };
+  }
+
+  return null;
+}
+
 function composeRecipients(group, targetMessage, mode) {
   const fallbackEmail = getGroupContactEmail(group);
   if (!targetMessage) {
@@ -1016,23 +1078,40 @@ function composeRecipients(group, targetMessage, mode) {
 
   if (mode !== 'reply_all') {
     if (targetMessage.isOutgoing) {
-      const to = uniqueRecipientEntries(targetMessage.to);
+      const to = uniqueRecipientEntries([...(targetMessage.to || []), ...(targetMessage.cc || [])]);
       if (to.length) return [to[0]];
-    } else if (targetMessage.from?.email) {
-      return uniqueRecipientEntries([targetMessage.from]);
+    } else {
+      const replyEntry = replyEntryForMessage(targetMessage);
+      if (replyEntry?.email) return uniqueRecipientEntries([replyEntry]);
     }
 
     return fallbackEmail ? [{ email: fallbackEmail, name: '' }] : [];
   }
 
   const entries = [];
-  if (!targetMessage.isOutgoing && targetMessage.from?.email) {
-    entries.push(targetMessage.from);
+  const replyEntry = replyEntryForMessage(targetMessage);
+  if (!targetMessage.isOutgoing && replyEntry?.email) {
+    entries.push(replyEntry);
   }
   entries.push(...(Array.isArray(targetMessage.to) ? targetMessage.to : []));
+  entries.push(...(Array.isArray(targetMessage.cc) ? targetMessage.cc : []));
   const deduped = uniqueRecipientEntries(entries);
   if (deduped.length) return deduped;
   return fallbackEmail ? [{ email: fallbackEmail, name: '' }] : [];
+}
+
+function buildReplyHeaders(targetMessage) {
+  const inReplyTo = String(targetMessage?.rfcMessageId || targetMessage?.inReplyTo || '').trim();
+  const references = [String(targetMessage?.references || '').trim(), inReplyTo]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+  return {
+    threadId: String(targetMessage?.threadId || '').trim(),
+    inReplyTo,
+    references
+  };
 }
 
 const COMPOSE_BUTTON_SELECTORS = [
@@ -1108,25 +1187,25 @@ function dispatchMouseSequence(element) {
 
 async function withNativeGmailSurface(task) {
   const sidebar = document.getElementById('gmailUnifiedSidebar');
-  const previousDisplay = sidebar?.style.display || '';
+  const previousHidden = sidebar?.hidden || false;
   const hadFullscreen = document.body.classList.contains('gmail-unified-fullscreen');
 
   if (sidebar) {
-    sidebar.style.display = 'none';
+    sidebar.hidden = true;
   }
   if (hadFullscreen) {
     document.body.classList.remove('gmail-unified-fullscreen');
   }
 
   try {
-    await sleep(90);
+    await sleep(120);
     return await task();
   } finally {
     if (hadFullscreen) {
       document.body.classList.add('gmail-unified-fullscreen');
     }
     if (sidebar) {
-      sidebar.style.display = previousDisplay;
+      sidebar.hidden = previousHidden;
     }
   }
 }
@@ -1219,9 +1298,18 @@ function commitRecipientField(field) {
 }
 
 async function openComposeDialog() {
+  const existing = findComposeDialog();
+  if (existing) return existing;
   const composeButton = selectFirst(document, COMPOSE_BUTTON_SELECTORS);
-  if (!composeButton) return null;
-  dispatchMouseSequence(composeButton);
+  if (composeButton) {
+    composeButton.click();
+    dispatchMouseSequence(composeButton);
+    const dialogFromButton = await waitForComposeDialog(3500);
+    if (dialogFromButton) return dialogFromButton;
+  }
+
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', bubbles: true }));
+  document.dispatchEvent(new KeyboardEvent('keyup', { key: 'c', code: 'KeyC', bubbles: true }));
   return waitForComposeDialog();
 }
 
@@ -1397,16 +1485,37 @@ async function submitThreadReply(group) {
   const recipients = composeRecipients(activeGroup, targetMessage, state.composer.mode);
   const body = String(state.composer.draft || '').trim();
   const subject = normalizedReplySubject(targetMessage?.subject || activeGroup.messages?.[0]?.subject || '');
+  const replyHeaders = buildReplyHeaders(targetMessage);
 
   state.composer.sendError = '';
   state.composer.sendStatus = '';
   state.composer.sendInFlight = true;
   renderThreadDetail(activeGroup);
 
-  const result = await replyToThread(body, {
-    recipients,
-    subject
+  let result = null;
+  const sendResponse = await sendWorker('SEND_MESSAGE', {
+    to: recipients,
+    subject,
+    bodyText: body,
+    threadId: replyHeaders.threadId,
+    inReplyTo: replyHeaders.inReplyTo,
+    references: replyHeaders.references
   });
+
+  if (sendResponse?.success) {
+    result = { ok: true, stage: 'sent', reason: 'gmail-api-send' };
+  } else if (sendResponse?.code === 'AUTH_SCOPE_REQUIRED') {
+    result = {
+      ok: false,
+      stage: 'send-scope-required',
+      reason: 'Mailita needs Gmail send permission. Add gmail.send in Google Cloud Data Access, reload the extension, and try again.'
+    };
+  } else {
+    result = await replyToThread(body, {
+      recipients,
+      subject
+    });
+  }
 
   state.composer.sendInFlight = false;
 
@@ -1438,8 +1547,15 @@ async function submitThreadReply(group) {
     contactKey: activeGroup.threadId,
     contactEmail: getGroupContactEmail(activeGroup),
     contactName: groupDisplayName(activeGroup),
+    contactKind: activeGroup.summary?.contactKind || 'person',
+    contactDomain: activeGroup.summary?.contactDomain || '',
     flags: ['\\Seen'],
-    messageId: ''
+    messageId: '',
+    rfcMessageId: '',
+    references: replyHeaders.references,
+    inReplyTo: replyHeaders.inReplyTo,
+    cc: [],
+    replyTo: null
   };
 
   state.messages = [optimisticMessage, ...state.messages];
@@ -1609,9 +1725,30 @@ function groupLatestSubject(group) {
   return group?.messages?.[0]?.subject || '(no subject)';
 }
 
+function groupLatestPreview(group) {
+  if (group?.summary?.latestPreview) return group.summary.latestPreview;
+  if (group?.messages?.length) return messagePreviewText(group.messages[0]);
+  return '(no preview)';
+}
+
 function groupLatestDate(group) {
   if (group?.summary) return group.summary.latestDate || new Date(0).toISOString();
   return group?.messages?.[0]?.date || new Date(0).toISOString();
+}
+
+function groupThreadCount(group) {
+  if (group?.summary) return Math.max(1, numericValue(group.summary.threadCount, 0));
+  const threadIds = new Set((group?.messages || []).map((message) => String(message?.threadId || '').trim()).filter(Boolean));
+  return Math.max(1, threadIds.size || (Array.isArray(group?.messages) && group.messages.length ? 1 : 0));
+}
+
+function groupMessageCount(group) {
+  if (group?.summary) return numericValue(group.summary.messageCount, 0);
+  return Array.isArray(group?.messages) ? group.messages.length : 0;
+}
+
+function groupAvatarLabel(group) {
+  return initialsForLabel(groupDisplayName(group));
 }
 
 function groupUnread(group) {
@@ -2025,16 +2162,28 @@ function renderThreads() {
     const who = groupDisplayName(group);
     const latestDate = groupLatestDate(group);
     const latestSubject = groupLatestSubject(group);
+    const latestPreview = groupLatestPreview(group);
+    const messageCount = groupMessageCount(group);
+    const threadCount = groupThreadCount(group);
+    const avatar = groupAvatarLabel(group);
 
     row.innerHTML = `
       <div class="gmail-unified-thread-row-shell">
-        <div class="gmail-unified-thread-top">
-          <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
-          <span class="gmail-unified-date">${formatDate(latestDate)}</span>
+        <div class="gmail-unified-thread-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
+        <div class="gmail-unified-thread-copy">
+          <div class="gmail-unified-thread-top">
+            <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
+            <span class="gmail-unified-date">${formatDate(latestDate)}</span>
+          </div>
+          <div class="gmail-unified-thread-preview ${unread ? 'unread' : ''}">${escapeHtml(latestPreview)}</div>
+          <div class="gmail-unified-thread-meta">
+            <span class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(
+              latestSubject || '(no subject)'
+            )}</span>
+            <span class="gmail-unified-thread-count">${messageCount} msg${messageCount === 1 ? '' : 's'}</span>
+            ${threadCount > 1 ? `<span class="gmail-unified-thread-count">${threadCount} topics</span>` : ''}
+          </div>
         </div>
-        <div class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(
-          latestSubject || '(no subject)'
-        )}</div>
       </div>
     `;
 
@@ -2104,6 +2253,7 @@ async function maybeDebugRefetchContact(group) {
 
   const response = await sendWorker('DEBUG_REFETCH_CONTACT', {
     contactEmail,
+    contactKey: group.threadId,
     selectedMessageIds: buildSelectedMessageRefs(group)
   });
 
@@ -2170,10 +2320,29 @@ function renderThreadDetail(group) {
   const detailName = groupDisplayName(group);
   const detailEmail = getGroupContactEmail(group) || 'Conversation';
   const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
+  const detailSubject = groupLatestSubject(group);
+  const detailPreview = groupLatestPreview(group);
+  const detailMessageCount = groupMessageCount(group);
+  const detailThreadCount = groupThreadCount(group);
 
   detail.style.display = 'block';
-  header.textContent = detailName;
-  subheader.textContent = detailEmail;
+  header.innerHTML = `
+    <div class="gmail-unified-detail-identity">
+      <div class="gmail-unified-detail-avatar" aria-hidden="true">${escapeHtml(groupAvatarLabel(group))}</div>
+      <div class="gmail-unified-detail-identity-copy">
+        <div class="gmail-unified-detail-title">${escapeHtml(detailName)}</div>
+        <div class="gmail-unified-detail-subheader-row">
+          <span>${escapeHtml(detailEmail)}</span>
+          <span>${detailMessageCount} messages</span>
+          ${detailThreadCount > 1 ? `<span>${detailThreadCount} topics</span>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+  subheader.innerHTML = `
+    <span class="gmail-unified-detail-pill">${escapeHtml(detailSubject || '(no subject)')}</span>
+    <span class="gmail-unified-detail-preview">${escapeHtml(detailPreview)}</span>
+  `;
 
   body.innerHTML = '';
   if (group?.summary && !group.messages.length) {
@@ -2220,20 +2389,34 @@ function renderThreadDetail(group) {
     state.composer.mode = 'reply';
   }
 
+  let previousDayLabel = '';
   [...group.messages]
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
     .forEach((message) => {
+      const dayLabel = calendarDayLabel(message.date);
+      if (dayLabel && dayLabel !== previousDayLabel) {
+        previousDayLabel = dayLabel;
+        const separator = document.createElement('div');
+        separator.className = 'gmail-unified-day-separator';
+        separator.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
+        body.appendChild(separator);
+      }
+
       const item = document.createElement('div');
       const renderedBody = messageDisplayMarkup(message);
       item.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''}`;
       item.dataset.messageId = message.id || '';
       const canReplyAll = replyAllAvailable(message);
+      const senderLabel = message.isOutgoing
+        ? 'You'
+        : (message?.from?.name || message?.from?.email || detailName);
       const bodyMarkup = renderedBody.kind === 'html'
         ? '<div class="gmail-unified-message-html-host"></div>'
         : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
 
       item.innerHTML = `
         <div class="gmail-unified-message-meta">
+          <span class="gmail-unified-message-author">${escapeHtml(senderLabel)}</span>
           <span class="gmail-unified-message-subject">${escapeHtml(message.subject || '(no subject)')}</span>
           <span class="gmail-unified-message-time">${formatDate(message.date)}</span>
         </div>
@@ -2260,7 +2443,7 @@ function renderThreadDetail(group) {
   composerReplyAll.hidden = !replyAllAvailable(selectedMessage);
   composerReplyAll.classList.toggle('is-active', state.composer.mode === 'reply_all');
   composerInput.value = state.composer.draft;
-  composerInput.placeholder = `Write back to ${threadCounterparty(group.messages[0])}...`;
+  composerInput.placeholder = `iMessage-style reply to ${detailName}...`;
   composerSend.disabled = state.composer.sendInFlight;
   composerSend.textContent = state.composer.sendInFlight ? 'Sending…' : 'Send';
   composerStatus.textContent = state.composer.sendError || state.composer.sendStatus || '';
@@ -2474,6 +2657,7 @@ async function loadContactMessagesForThread(threadId, options = {}) {
 
   const response = await sendWorker('FETCH_CONTACT_MESSAGES', {
     contactEmail,
+    contactKey: threadId,
     limitPerFolder: options.limitPerFolder || 50,
     forceSync: Boolean(options.forceSync),
     trackActivity: Boolean(options.trackActivity)
@@ -3228,6 +3412,8 @@ function buildSidebar() {
               <p>Choose the Mailita material direction that should drive the whole shell.</p>
               <div class="gmail-unified-theme-options">
                 <button class="gmail-unified-theme-option is-active" data-theme-mode="dark" type="button">Dark</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="ocean" type="button">Ocean</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="paper" type="button">Paper</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="khaki" type="button">Khaki</button>
                 <button class="gmail-unified-theme-option" data-theme-mode="system" type="button">System</button>
               </div>

@@ -12,6 +12,9 @@ const MailitaGmailLocal = globalThis.MailitaGmailLocal || {
   disconnect: async () => {},
   loadSummaries: async () => ({ summaries: [], count: 0, source: 'gmail_api_local' }),
   loadContact: async () => ({ messages: [], count: 0, source: 'gmail_api_local_contact' }),
+  sendMessage: async () => {
+    throw new Error('Mailita Gmail local send adapter is unavailable.');
+  },
   search: async () => ({ messages: [], count: 0, source: 'gmail_api_local_search' }),
   refreshIncremental: async () => ({
     changed: false,
@@ -73,6 +76,7 @@ const GUIDE_ACTIONS = new Set([
   'DISCONNECT',
   'FETCH_MESSAGE_SUMMARIES',
   'FETCH_CONTACT_MESSAGES',
+  'SEND_MESSAGE',
   'FETCH_MESSAGES',
   'DEBUG_REFETCH_CONTACT',
   'SEARCH_MESSAGES',
@@ -905,6 +909,21 @@ function mapLocalError(error, fallbackCode = 'GMAIL_API_FAILED') {
     };
   }
 
+  if (
+    code === 'AUTH_SCOPE_REQUIRED'
+    || /insufficient permission|insufficient authentication scopes|scope/i.test(message)
+  ) {
+    return {
+      success: false,
+      code: 'AUTH_SCOPE_REQUIRED',
+      error: 'Mailita needs Gmail send permission before it can send replies.',
+      trace: [localTrace('error', 'oauth_scope_required', 'Gmail send permission is required for this action.', {
+        code: 'AUTH_SCOPE_REQUIRED',
+        details: message
+      })]
+    };
+  }
+
   return {
     success: false,
     code: fallbackCode,
@@ -1064,6 +1083,7 @@ async function handleLocalMailAction(action, payload = {}) {
   if (action === 'FETCH_CONTACT_MESSAGES') {
     const response = await MailitaGmailLocal.loadContact({
       contactEmail: payload.contactEmail,
+      contactKey: payload.contactKey,
       limitPerFolder: Number(payload.limitPerFolder || 50),
       forceSync: Boolean(payload.forceSync)
     });
@@ -1083,6 +1103,7 @@ async function handleLocalMailAction(action, payload = {}) {
   if (action === 'DEBUG_REFETCH_CONTACT') {
     const response = await MailitaGmailLocal.loadContact({
       contactEmail: payload.contactEmail,
+      contactKey: payload.contactKey,
       limitPerFolder: 50,
       forceSync: true
     });
@@ -1120,6 +1141,32 @@ async function handleLocalMailAction(action, payload = {}) {
       timings: response.timings,
       trace: [localTrace('success', 'local_search_complete', 'Searched the mailbox through the Gmail API.', {
         details: `query=${String(payload.query || '').trim()}; count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'SEND_MESSAGE') {
+    const sent = await MailitaGmailLocal.sendMessage({
+      to: payload.to,
+      cc: payload.cc,
+      bcc: payload.bcc,
+      subject: payload.subject,
+      bodyText: payload.bodyText,
+      threadId: payload.threadId,
+      inReplyTo: payload.inReplyTo,
+      references: payload.references
+    });
+    const snapshot = await MailitaGmailLocal.snapshot();
+    await persistLocalSession({
+      ...snapshot,
+      lastSyncTime: nowIso()
+    });
+    return {
+      success: true,
+      source: MAIL_SOURCE_GMAIL_API_LOCAL,
+      sent,
+      trace: [localTrace('success', 'local_send_complete', 'Sent a message directly through the Gmail API.', {
+        details: `threadId=${sent.threadId || payload.threadId || ''}; id=${sent.id || ''}`
       })]
     };
   }
