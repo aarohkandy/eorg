@@ -1532,7 +1532,9 @@ async function submitThreadReply(group) {
   state.messages = [optimisticMessage, ...state.messages];
   if (activeGroup?.threadId) {
     const existing = state.contactMessagesByKey[activeGroup.threadId] || [];
-    storeContactMessages(activeGroup.threadId, [optimisticMessage, ...existing]);
+    const mergedMessages = [optimisticMessage, ...existing];
+    storeContactMessages(activeGroup.threadId, mergedMessages);
+    upsertContactSummary(buildContactSummaryFromMessages(activeGroup.threadId, mergedMessages));
   }
   state.composer = {
     ...defaultComposerState(),
@@ -1740,6 +1742,17 @@ function currentThreadGroups() {
 function findSelectedGroup() {
   if (!state.selectedThreadId) return null;
   return currentThreadGroups().find((group) => group.threadId === state.selectedThreadId) || null;
+}
+
+function upsertContactSummary(summary) {
+  if (!summary?.contactKey) return;
+  const next = normalizeContactSummary(summary);
+  const existingIndex = state.contactSummaries.findIndex((item) => item.contactKey === next.contactKey);
+  if (existingIndex >= 0) {
+    state.contactSummaries[existingIndex] = next;
+  } else {
+    state.contactSummaries = [next, ...state.contactSummaries];
+  }
 }
 
 function groupDisplayName(group) {
@@ -2796,6 +2809,7 @@ async function loadContactMessagesForThread(threadId, options = {}) {
 
   if (response?.success) {
     storeContactMessages(threadId, response.messages);
+    upsertContactSummary(buildContactSummaryFromMessages(threadId, response.messages));
   }
 
   state.contactLoadStateByKey[threadId] = nextState;
