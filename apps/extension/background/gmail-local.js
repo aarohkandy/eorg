@@ -1122,10 +1122,6 @@
     const refreshed = await fetchMessagesForQuery(query, Math.max(Number(options.limit || 20), 20));
     const messages = refreshed.messages.sort(byDateDesc).slice(0, Number(options.limit || 20));
 
-    if (messages.length) {
-      await mergeMessages(messages);
-    }
-
     return {
       messages,
       count: messages.length,
