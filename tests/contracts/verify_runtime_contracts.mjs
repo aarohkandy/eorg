@@ -32,8 +32,8 @@ function verifyActiveManifest() {
 
   assert.deepEqual(
     permissions,
-    ['storage', 'unlimitedStorage', 'tabs', 'alarms', 'identity'],
-    'Active manifest permissions must include identity for Google OAuth.'
+    ['storage', 'unlimitedStorage', 'tabs', 'alarms', 'identity', 'scripting'],
+    'Active manifest permissions must include Gmail reinjection support and identity for Google OAuth.'
   );
   assert.equal(manifest.name, 'Mailita', 'Active manifest name must be Mailita.');
   assert.match(
@@ -128,10 +128,20 @@ function verifyWorkerContracts() {
     'inboxsdk__injectPageWorld',
     'Service worker must not keep legacy InboxSDK page-world injection active.'
   );
-  assertNotIncludes(
+  assertIncludes(
     worker,
     'chrome.scripting.executeScript',
-    'Service worker must not execute legacy page-world script injection.'
+    'Service worker must use Chrome scripting APIs to reinject the Mailita runtime into active Gmail tabs.'
+  );
+  assertIncludes(
+    worker,
+    "files: ['content/gmail-inject.js']",
+    'Service worker must reinject the Mailita Gmail content script when Gmail tabs reopen or swap documents.'
+  );
+  assertIncludes(
+    worker,
+    "files: ['content/styles.css']",
+    'Service worker must reinject the Mailita Gmail stylesheet alongside the content script.'
   );
 }
 

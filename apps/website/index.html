@@ -1,0 +1,1402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#eef4ff">
+  <title>Mailita</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap"
+    rel="stylesheet"
+  >
+  <style>
+    :root {
+      --page-top: #fbfdff;
+      --page-mid: #f2f7ff;
+      --page-bottom: #e9f1ff;
+      --ink: #162131;
+      --muted: rgba(22, 33, 49, 0.58);
+      --glass: rgba(255, 255, 255, 0.18);
+      --shell-shadow: 0 48px 140px rgba(55, 85, 130, 0.18);
+      --message-shadow: 0 20px 42px rgba(61, 88, 127, 0.11);
+      --mailita-top: rgba(255, 255, 255, 0.86);
+      --mailita-bottom: rgba(255, 255, 255, 0.62);
+      --you-top: #44c0ff;
+      --you-bottom: #007aff;
+      --button-top: #54cbff;
+      --button-bottom: #007aff;
+      --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-bubble: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: linear-gradient(180deg, var(--page-top), var(--page-mid) 48%, var(--page-bottom));
+      color: var(--ink);
+      font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas,
+        "Liberation Mono", monospace;
+    }
+
+    body {
+      position: relative;
+    }
+
+    .scene {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+    }
+
+    .scene::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 18% 24%, rgba(124, 228, 255, 0.58), transparent 27%),
+        radial-gradient(circle at 80% 18%, rgba(144, 158, 255, 0.36), transparent 28%),
+        radial-gradient(circle at 72% 78%, rgba(190, 164, 255, 0.24), transparent 24%),
+        radial-gradient(circle at 28% 74%, rgba(255, 255, 255, 0.48), transparent 26%);
+      filter: blur(18px);
+      opacity: 0.9;
+      animation: meshShift 22s ease-in-out infinite;
+    }
+
+    .scene::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+      background-size: 72px 72px;
+      opacity: 0.18;
+      mask-image: linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.88) 22%, rgba(0, 0, 0, 0.88) 86%, transparent 100%);
+      animation: gridFloat 22s linear infinite;
+    }
+
+    .beam,
+    .beam-secondary,
+    .orbital,
+    .floor,
+    .noise {
+      position: absolute;
+      pointer-events: none;
+    }
+
+    .beam {
+      left: 50%;
+      top: -26vh;
+      width: min(124vw, 1100px);
+      height: 78vh;
+      transform: translateX(-50%);
+      background:
+        radial-gradient(
+          ellipse at top,
+          rgba(255, 255, 255, 0.98) 0,
+          rgba(161, 235, 255, 0.56) 22%,
+          rgba(131, 157, 255, 0.22) 42%,
+          rgba(255, 255, 255, 0) 74%
+        );
+      filter: blur(14px);
+      opacity: 0.94;
+      animation: beamShift 18s ease-in-out infinite;
+    }
+
+    .beam-secondary {
+      right: -16vw;
+      top: 8vh;
+      width: min(54vw, 520px);
+      height: min(58vw, 560px);
+      background: radial-gradient(circle, rgba(146, 191, 255, 0.3), rgba(255, 255, 255, 0));
+      filter: blur(24px);
+      opacity: 0.7;
+      animation: beamSecondary 20s ease-in-out infinite;
+    }
+
+    .orbital {
+      inset: 50% auto auto 50%;
+      width: min(78vw, 940px);
+      aspect-ratio: 1;
+      transform: translate(-50%, -46%);
+      border-radius: 999px;
+      background:
+        conic-gradient(
+          from 20deg,
+          rgba(255, 255, 255, 0) 0deg,
+          rgba(83, 202, 255, 0.14) 62deg,
+          rgba(255, 255, 255, 0) 118deg,
+          rgba(139, 161, 255, 0.14) 198deg,
+          rgba(255, 255, 255, 0) 286deg,
+          rgba(83, 202, 255, 0.14) 360deg
+        );
+      filter: blur(18px);
+      opacity: 0.52;
+      animation: orbitalSpin 30s linear infinite;
+    }
+
+    .floor {
+      left: 50%;
+      bottom: -14vh;
+      width: min(140vw, 1260px);
+      height: 46vh;
+      transform: translateX(-50%);
+      background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0));
+      filter: blur(24px);
+      opacity: 0.82;
+      animation: floorPulse 18s ease-in-out infinite;
+    }
+
+    .noise {
+      inset: -10%;
+      background-image: radial-gradient(rgba(255, 255, 255, 0.18) 0.8px, transparent 0.8px);
+      background-size: 14px 14px;
+      opacity: 0.05;
+      mix-blend-mode: soft-light;
+      animation: noiseDrift 12s linear infinite;
+    }
+
+    .viewport {
+      position: relative;
+      z-index: 1;
+      min-height: 100%;
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: pageLift 900ms var(--ease-smooth);
+    }
+
+    .landing {
+      position: relative;
+      width: min(1280px, calc(100vw - 40px));
+      height: min(900px, calc(100vh - 40px));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .site-panel,
+    .site-mark,
+    .site-dock {
+      position: absolute;
+      opacity: 0;
+      filter: blur(14px);
+      pointer-events: none;
+      transition:
+        opacity 1000ms var(--ease-smooth),
+        transform 1100ms var(--ease-smooth),
+        filter 1000ms var(--ease-smooth);
+      transition-delay: var(--delay, 0ms);
+    }
+
+    .site-panel,
+    .site-dock {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.46), rgba(255, 255, 255, 0.2)),
+        rgba(255, 255, 255, 0.18);
+      box-shadow:
+        0 26px 72px rgba(56, 84, 128, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+      backdrop-filter: blur(30px) saturate(180%);
+      -webkit-backdrop-filter: blur(30px) saturate(180%);
+    }
+
+    .site-mark {
+      top: 30px;
+      left: 36px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transform: translate3d(0, -18px, 0);
+      --delay: 140ms;
+    }
+
+    .site-logo {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: #ffffff;
+      font-weight: 700;
+      font-size: 0.94rem;
+      background: linear-gradient(180deg, #8a95ff, #5f6bff 58%, #2c8fff);
+      box-shadow:
+        0 18px 34px rgba(72, 102, 255, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.34);
+    }
+
+    .site-mark-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .site-mark-title {
+      font-size: 0.88rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .site-mark-subtitle {
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+
+    .hero-copy {
+      top: 110px;
+      left: 36px;
+      width: min(360px, 30vw);
+      padding: 22px 22px 20px;
+      border-radius: 28px;
+      transform: translate3d(-28px, 18px, 0);
+      --delay: 260ms;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.46);
+      color: rgba(22, 33, 49, 0.72);
+      font-size: 0.66rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #43c0ff, #007aff);
+      box-shadow: 0 0 0 6px rgba(67, 192, 255, 0.12);
+    }
+
+    .hero-title {
+      margin: 0;
+      font-size: clamp(1.6rem, 2.2vw, 2.3rem);
+      line-height: 1.04;
+      letter-spacing: -0.04em;
+    }
+
+    .hero-body {
+      margin: 16px 0 0;
+      max-width: 28ch;
+      font-size: 0.83rem;
+      line-height: 1.66;
+      color: var(--muted);
+    }
+
+    .feature-card {
+      top: 146px;
+      right: 36px;
+      width: min(300px, 26vw);
+      padding: 18px;
+      border-radius: 28px;
+      transform: translate3d(30px, 14px, 0);
+      --delay: 380ms;
+    }
+
+    .feature-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .feature-row {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 12px 14px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.34);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44);
+    }
+
+    .feature-index {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      color: #007aff;
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+
+    .feature-row strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 0.8rem;
+    }
+
+    .feature-row span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.71rem;
+      line-height: 1.5;
+    }
+
+    .signal-card {
+      right: 60px;
+      bottom: 130px;
+      width: min(260px, 24vw);
+      padding: 18px 18px 16px;
+      border-radius: 24px;
+      transform: translate3d(22px, 22px, 0);
+      --delay: 520ms;
+    }
+
+    .signal-title {
+      margin: 0 0 12px;
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .signal-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .signal-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.74rem;
+    }
+
+    .signal-bar {
+      position: relative;
+      flex: 1;
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    .signal-bar::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      width: var(--fill, 50%);
+      border-radius: inherit;
+      background: linear-gradient(90deg, rgba(87, 197, 255, 0.72), rgba(0, 122, 255, 0.96));
+      animation: signalFlow 3.2s ease-in-out infinite;
+    }
+
+    .site-dock {
+      left: 36px;
+      right: 36px;
+      bottom: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px;
+      border-radius: 24px;
+      transform: translate3d(0, 26px, 0);
+      --delay: 640ms;
+    }
+
+    .dock-pill {
+      flex: 1;
+      min-width: 0;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.34);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42);
+    }
+
+    .dock-pill strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 0.74rem;
+    }
+
+    .dock-pill span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.68rem;
+      line-height: 1.45;
+    }
+    .chat-wrap {
+      position: relative;
+      z-index: 2;
+      width: min(100%, 560px);
+      transition:
+        transform 1200ms var(--ease-smooth),
+        filter 1200ms var(--ease-smooth),
+        box-shadow 1200ms var(--ease-smooth);
+    }
+
+    .chat-shadow {
+      position: absolute;
+      inset: auto 9% -34px;
+      height: 120px;
+      border-radius: 999px;
+      background: radial-gradient(ellipse at center, rgba(63, 92, 136, 0.22), transparent 72%);
+      filter: blur(18px);
+      opacity: 0.72;
+      transition: opacity 1200ms var(--ease-smooth), transform 1200ms var(--ease-smooth);
+    }
+
+    .chat-shell {
+      position: relative;
+      width: 100%;
+      height: min(84vh, 760px);
+      border-radius: 38px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.44), rgba(255, 255, 255, 0.18)),
+        rgba(255, 255, 255, 0.18);
+      box-shadow:
+        var(--shell-shadow),
+        inset 0 1px 0 rgba(255, 255, 255, 0.64);
+      backdrop-filter: blur(34px) saturate(180%);
+      -webkit-backdrop-filter: blur(34px) saturate(180%);
+      overflow: hidden;
+      isolation: isolate;
+      transition:
+        transform 1200ms var(--ease-smooth),
+        box-shadow 1200ms var(--ease-smooth),
+        background 1200ms var(--ease-smooth);
+    }
+
+    .chat-shell::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.32), transparent 36%),
+        radial-gradient(circle at top right, rgba(255, 255, 255, 0.18), transparent 26%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .chat-shell::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.54),
+          rgba(255, 255, 255, 0.18) 12%,
+          transparent 24%,
+          transparent 82%,
+          rgba(255, 255, 255, 0.12)
+        );
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .chat-shell-inner {
+      position: absolute;
+      inset: 12px;
+      border-radius: 28px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 20%, transparent 86%, rgba(255, 255, 255, 0.08));
+      pointer-events: none;
+      opacity: 0.6;
+      z-index: 0;
+    }
+
+    .chat-scroll {
+      position: relative;
+      z-index: 1;
+      height: 100%;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+
+    .chat-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .messages {
+      min-height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: clamp(110px, 18vh, 156px) 18px 28px;
+    }
+
+    .message-row {
+      display: flex;
+      opacity: 0;
+      filter: blur(10px);
+      will-change: transform, opacity, filter;
+    }
+
+    .message-row.mailita {
+      justify-content: flex-start;
+      transform: translate3d(-30px, 24px, 0) scale(0.935);
+      transform-origin: left bottom;
+    }
+
+    .message-row.you {
+      justify-content: flex-end;
+      transform: translate3d(30px, 24px, 0) scale(0.935);
+      transform-origin: right bottom;
+    }
+
+    .message-row.clustered {
+      margin-top: -2px;
+    }
+
+    .message-row.visible.mailita {
+      animation: bubbleInLeft 820ms var(--ease-bubble) forwards;
+    }
+
+    .message-row.visible.you {
+      animation: bubbleInRight 820ms var(--ease-bubble) forwards;
+    }
+
+    .bubble {
+      position: relative;
+      max-width: min(76%, 430px);
+      padding: 12px 18px;
+      line-height: 1.54;
+      font-size: clamp(0.95rem, 0.74rem + 0.42vw, 1rem);
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      box-shadow: var(--message-shadow);
+      backdrop-filter: blur(18px) saturate(180%);
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
+    }
+
+    .bubble.mailita {
+      color: var(--ink);
+      background:
+        linear-gradient(180deg, var(--mailita-top), var(--mailita-bottom)),
+        rgba(255, 255, 255, 0.7);
+      box-shadow:
+        0 18px 36px rgba(66, 91, 128, 0.1),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56);
+    }
+
+    .bubble.mailita::after {
+      content: "";
+      position: absolute;
+      inset: 1px;
+      border-radius: inherit;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent 44%);
+      pointer-events: none;
+    }
+
+    .bubble.you {
+      color: #ffffff;
+      background: linear-gradient(180deg, var(--you-top), var(--you-bottom));
+      box-shadow:
+        0 18px 36px rgba(0, 122, 255, 0.26),
+        inset 0 1px 0 rgba(255, 255, 255, 0.28);
+    }
+
+    .bubble.single.mailita {
+      border-radius: 26px 26px 26px 8px;
+    }
+
+    .bubble.start.mailita {
+      border-radius: 26px 26px 26px 14px;
+    }
+
+    .bubble.middle.mailita {
+      border-radius: 14px 26px 26px 14px;
+    }
+
+    .bubble.end.mailita {
+      border-radius: 14px 26px 26px 8px;
+    }
+
+    .bubble.single.you {
+      border-radius: 26px 26px 8px 26px;
+    }
+
+    .bubble.start.you {
+      border-radius: 26px 26px 14px 26px;
+    }
+
+    .bubble.middle.you {
+      border-radius: 26px 14px 14px 26px;
+    }
+
+    .bubble.end.you {
+      border-radius: 26px 14px 8px 26px;
+    }
+
+    .bubble-tail {
+      position: absolute;
+      bottom: 2px;
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .bubble.mailita .bubble-tail {
+      left: -4px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.6));
+      border-bottom-left-radius: 14px;
+      box-shadow: 0 14px 24px rgba(66, 91, 128, 0.08);
+      transform: rotate(26deg);
+      transform-origin: right bottom;
+    }
+
+    .bubble.you .bubble-tail {
+      right: -4px;
+      background: linear-gradient(180deg, var(--you-top), var(--you-bottom));
+      border-bottom-right-radius: 14px;
+      box-shadow: 0 14px 24px rgba(0, 122, 255, 0.18);
+      transform: rotate(-26deg);
+      transform-origin: left bottom;
+    }
+
+    .bubble.typing {
+      min-width: 78px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .typing-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(27, 42, 66, 0.34);
+      animation: typingBounce 1.06s infinite ease-in-out;
+    }
+
+    .typing-dot:nth-child(2) {
+      animation-delay: 0.16s;
+    }
+
+    .typing-dot:nth-child(3) {
+      animation-delay: 0.32s;
+    }
+
+    .bubble.cta {
+      max-width: min(82%, 460px);
+      padding: 16px;
+    }
+
+    .cta-button {
+      display: block;
+      width: 100%;
+      border: 0;
+      border-radius: 18px;
+      padding: 16px 18px;
+      background: linear-gradient(180deg, var(--button-top), var(--button-bottom));
+      color: #ffffff;
+      text-decoration: none;
+      text-align: center;
+      font-size: 0.96rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      box-shadow:
+        0 20px 40px rgba(0, 122, 255, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.28);
+      transition:
+        transform 260ms ease,
+        filter 260ms ease,
+        box-shadow 260ms ease;
+      animation: ctaPulse 3.2s ease-in-out infinite;
+    }
+
+    .cta-button:hover,
+    .cta-button:focus-visible {
+      transform: translateY(-1px) scale(1.02);
+      filter: saturate(1.08);
+      box-shadow:
+        0 24px 46px rgba(0, 122, 255, 0.34),
+        inset 0 1px 0 rgba(255, 255, 255, 0.32);
+      outline: none;
+    }
+    body.site-live .site-panel,
+    body.site-live .site-mark,
+    body.site-live .site-dock {
+      opacity: 1;
+      filter: blur(0);
+      pointer-events: auto;
+      transform: none;
+    }
+
+    body.site-live .chat-wrap {
+      transform: scale(0.94) translateY(10px);
+      filter: saturate(1.04);
+    }
+
+    body.site-live .chat-shadow {
+      opacity: 0.62;
+      transform: scale(1.08);
+    }
+
+    body.site-live .chat-shell {
+      box-shadow:
+        0 54px 150px rgba(52, 81, 126, 0.18),
+        inset 0 1px 0 rgba(255, 255, 255, 0.68);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.48), rgba(255, 255, 255, 0.18)),
+        rgba(255, 255, 255, 0.2);
+    }
+
+    body.site-live .beam {
+      animation-duration: 13s;
+      opacity: 1;
+    }
+
+    body.site-live .beam-secondary {
+      opacity: 0.9;
+    }
+
+    body.site-live .orbital {
+      opacity: 0.72;
+      animation-duration: 24s;
+    }
+
+    body.site-live .floor {
+      opacity: 0.94;
+    }
+
+    @keyframes pageLift {
+      0% {
+        opacity: 0;
+        transform: translateY(18px) scale(0.986);
+      }
+
+      100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @keyframes bubbleInLeft {
+      0% {
+        opacity: 0;
+        transform: translate3d(-30px, 24px, 0) scale(0.935);
+        filter: blur(10px);
+      }
+
+      62% {
+        opacity: 1;
+        transform: translate3d(6px, -1px, 0) scale(1.02);
+        filter: blur(0);
+      }
+
+      100% {
+        opacity: 1;
+        transform: translate3d(0, 0, 0) scale(1);
+        filter: blur(0);
+      }
+    }
+
+    @keyframes bubbleInRight {
+      0% {
+        opacity: 0;
+        transform: translate3d(30px, 24px, 0) scale(0.935);
+        filter: blur(10px);
+      }
+
+      62% {
+        opacity: 1;
+        transform: translate3d(-6px, -1px, 0) scale(1.02);
+        filter: blur(0);
+      }
+
+      100% {
+        opacity: 1;
+        transform: translate3d(0, 0, 0) scale(1);
+        filter: blur(0);
+      }
+    }
+
+    @keyframes typingBounce {
+      0%,
+      80%,
+      100% {
+        transform: translateY(0);
+        opacity: 0.34;
+      }
+
+      40% {
+        transform: translateY(-4px);
+        opacity: 1;
+      }
+    }
+
+    @keyframes meshShift {
+      0%,
+      100% {
+        transform: scale(1) translate3d(0, 0, 0);
+      }
+
+      50% {
+        transform: scale(1.04) translate3d(10px, -14px, 0);
+      }
+    }
+
+    @keyframes beamShift {
+      0%,
+      100% {
+        transform: translateX(-50%) translateY(0) scale(1);
+      }
+
+      50% {
+        transform: translateX(-50%) translateY(14px) scale(1.05);
+      }
+    }
+
+    @keyframes beamSecondary {
+      0%,
+      100% {
+        transform: translate3d(0, 0, 0) scale(1);
+      }
+
+      50% {
+        transform: translate3d(-22px, 18px, 0) scale(1.08);
+      }
+    }
+
+    @keyframes orbitalSpin {
+      0% {
+        transform: translate(-50%, -46%) rotate(0deg);
+      }
+
+      100% {
+        transform: translate(-50%, -46%) rotate(360deg);
+      }
+    }
+
+    @keyframes floorPulse {
+      0%,
+      100% {
+        transform: translateX(-50%) scale(1);
+        opacity: 0.82;
+      }
+
+      50% {
+        transform: translateX(-50%) scale(1.05);
+        opacity: 0.94;
+      }
+    }
+
+    @keyframes gridFloat {
+      0% {
+        transform: translate3d(0, 0, 0);
+      }
+
+      100% {
+        transform: translate3d(-36px, -36px, 0);
+      }
+    }
+
+    @keyframes noiseDrift {
+      0% {
+        transform: translate3d(0, 0, 0);
+      }
+
+      50% {
+        transform: translate3d(-10px, 8px, 0);
+      }
+
+      100% {
+        transform: translate3d(0, 0, 0);
+      }
+    }
+
+    @keyframes signalFlow {
+      0%,
+      100% {
+        filter: saturate(1);
+      }
+
+      50% {
+        filter: saturate(1.18) brightness(1.03);
+      }
+    }
+
+    @keyframes ctaPulse {
+      0%,
+      100% {
+        transform: scale(1);
+      }
+
+      50% {
+        transform: scale(1.015);
+      }
+    }
+    @media (max-width: 1024px) {
+      .landing {
+        width: min(960px, calc(100vw - 24px));
+      }
+
+      .hero-copy {
+        width: min(300px, 30vw);
+      }
+
+      .feature-card,
+      .signal-card {
+        width: min(260px, 27vw);
+      }
+
+      body.site-live .chat-wrap {
+        transform: scale(0.965) translateY(6px);
+      }
+    }
+
+    @media (max-width: 840px) {
+      .viewport {
+        padding: 0;
+      }
+
+      .landing {
+        width: 100vw;
+        height: 100vh;
+      }
+
+      .site-mark {
+        top: 22px;
+        left: 20px;
+      }
+
+      .hero-copy,
+      .feature-card,
+      .signal-card {
+        display: none;
+      }
+
+      .site-dock {
+        left: 14px;
+        right: 14px;
+        bottom: 12px;
+        padding: 8px;
+        gap: 8px;
+      }
+
+      .dock-pill {
+        padding: 10px 10px 9px;
+      }
+
+      .dock-pill strong {
+        font-size: 0.62rem;
+        margin-bottom: 0;
+      }
+
+      .dock-pill span {
+        display: none;
+      }
+
+      .chat-wrap {
+        width: 100vw;
+      }
+
+      .chat-shell {
+        height: 100vh;
+        border-radius: 0;
+      }
+
+      .chat-shadow {
+        display: none;
+      }
+
+      .messages {
+        padding: clamp(100px, 15vh, 126px) 18px 110px;
+      }
+
+      .bubble {
+        max-width: 74%;
+      }
+
+      .bubble.cta {
+        max-width: 80%;
+      }
+
+      .message-row.you {
+        padding-left: 54px;
+        padding-right: 8px;
+      }
+
+      body.site-live .chat-wrap {
+        transform: none;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .messages {
+        padding: 100px 16px 108px;
+      }
+
+      .bubble {
+        max-width: 72%;
+      }
+
+      .bubble.cta {
+        max-width: 78%;
+      }
+
+      .message-row.you {
+        padding-left: 64px;
+        padding-right: 10px;
+      }
+
+      .site-mark-title {
+        font-size: 0.82rem;
+      }
+
+      .site-mark-subtitle {
+        font-size: 0.64rem;
+      }
+
+      .site-dock {
+        gap: 6px;
+      }
+
+      .dock-pill {
+        padding: 10px 8px 9px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .scene::before,
+      .scene::after,
+      .beam,
+      .beam-secondary,
+      .orbital,
+      .floor,
+      .noise,
+      .message-row.visible.mailita,
+      .message-row.visible.you,
+      .typing-dot,
+      .cta-button,
+      .signal-bar::before {
+        animation: none;
+      }
+
+      .site-panel,
+      .site-mark,
+      .site-dock,
+      .chat-wrap,
+      .chat-shadow,
+      .chat-shell {
+        transition: none;
+      }
+
+      .message-row {
+        opacity: 1;
+        transform: none;
+        filter: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="scene" aria-hidden="true">
+    <div class="beam"></div>
+    <div class="beam-secondary"></div>
+    <div class="orbital"></div>
+    <div class="floor"></div>
+    <div class="noise"></div>
+  </div>
+
+  <main class="viewport">
+    <section class="landing" id="landing">
+      <div class="site-mark">
+        <div class="site-logo">M</div>
+        <div class="site-mark-copy">
+          <div class="site-mark-title">Mailita</div>
+          <div class="site-mark-subtitle">email, translated into channels</div>
+        </div>
+      </div>
+
+      <article class="site-panel hero-copy">
+        <div class="eyebrow">
+          <span class="eyebrow-dot"></span>
+          inbox, unlearned
+        </div>
+        <h1 class="hero-title">your inbox becomes a room you actually want to be in.</h1>
+        <p class="hero-body">
+          Mailita turns every sender into a channel, keeps the ambient stuff quiet, and makes
+          triage feel like second nature instead of punishment.
+        </p>
+      </article>
+
+      <aside class="site-panel feature-card">
+        <div class="feature-grid">
+          <div class="feature-row">
+            <div class="feature-index">1</div>
+            <div>
+              <strong>every sender gets a lane</strong>
+              <span>stripe, notion, your boss. no more one giant pile.</span>
+            </div>
+          </div>
+          <div class="feature-row">
+            <div class="feature-index">2</div>
+            <div>
+              <strong>react instead of dread</strong>
+              <span>eyes, checks, fire. light-weight responses before full replies.</span>
+            </div>
+          </div>
+          <div class="feature-row">
+            <div class="feature-index">3</div>
+            <div>
+              <strong>mute the noise</strong>
+              <span>important threads stay loud. everything else fades into the background.</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <aside class="site-panel signal-card">
+        <p class="signal-title">ambient state</p>
+        <div class="signal-list">
+          <div class="signal-item">
+            <span>channels split</span>
+            <div class="signal-bar" style="--fill: 82%;"></div>
+          </div>
+          <div class="signal-item">
+            <span>triage speed</span>
+            <div class="signal-bar" style="--fill: 68%;"></div>
+          </div>
+          <div class="signal-item">
+            <span>inbox dread</span>
+            <div class="signal-bar" style="--fill: 26%;"></div>
+          </div>
+        </div>
+      </aside>
+
+      <div class="chat-wrap">
+        <div class="chat-shadow"></div>
+        <section class="chat-shell" aria-label="Mailita landing conversation">
+          <div class="chat-shell-inner"></div>
+          <div class="chat-scroll" id="chat-scroll">
+            <div class="messages" id="messages"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="site-dock">
+        <div class="dock-pill">
+          <strong>channels, not threads</strong>
+          <span>email finally maps to how your brain already works.</span>
+        </div>
+        <div class="dock-pill">
+          <strong>discord-native triage</strong>
+          <span>react, mute, glance, reply when it actually matters.</span>
+        </div>
+        <div class="dock-pill">
+          <strong>chrome extension</strong>
+          <span>drop it into the workflow you already live inside.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const conversation = [
+      { speaker: "mailita", text: "hey 👋" },
+      { speaker: "mailita", text: "i'm mailita" },
+      { speaker: "mailita", text: "your email, but make it a discord server" },
+      { speaker: "you", text: "wait what" },
+      {
+        speaker: "mailita",
+        text: "every sender gets a channel. stripe, notion, your boss — all separate."
+      },
+      { speaker: "mailita", text: "you react to emails. 👀 ✅ 🔥" },
+      { speaker: "mailita", text: "you mute the ones that don't matter" },
+      { speaker: "you", text: "so like... discord but for email" },
+      { speaker: "mailita", text: "exactly." },
+      { speaker: "mailita", text: "no more inbox. just servers." },
+      {
+        speaker: "mailita",
+        text: "built for people who live in discord and dread email"
+      },
+      { speaker: "you", text: "ok i need this" },
+      { speaker: "mailita", text: "yeah you do 😈" },
+      {
+        speaker: "mailita",
+        cta: true,
+        buttonText: "Add Mailita to Chrome",
+        href: "#"
+      }
+    ];
+
+    const timings = {
+      initialPause: 1000,
+      typing: 800,
+      mailitaGap: 600,
+      youGap: 400,
+      finalePause: 760
+    };
+
+    const messagesEl = document.getElementById("messages");
+    const scrollEl = document.getElementById("chat-scroll");
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let finaleTriggered = false;
+
+    const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    function getGroupPosition(index) {
+      const current = conversation[index];
+      const previous = conversation[index - 1];
+      const next = conversation[index + 1];
+      const samePrevious = previous && previous.speaker === current.speaker;
+      const sameNext = next && next.speaker === current.speaker;
+
+      if (!samePrevious && !sameNext) {
+        return "single";
+      }
+
+      if (!samePrevious && sameNext) {
+        return "start";
+      }
+
+      if (samePrevious && sameNext) {
+        return "middle";
+      }
+
+      return "end";
+    }
+
+    function scrollToLatest(immediate = false) {
+      requestAnimationFrame(() => {
+        scrollEl.scrollTo({
+          top: scrollEl.scrollHeight,
+          behavior: immediate || reduceMotion ? "auto" : "smooth"
+        });
+      });
+    }
+
+    function reveal(row) {
+      void row.offsetWidth;
+      row.classList.add("visible");
+    }
+
+    function addTailIfNeeded(bubble, groupPosition) {
+      if (groupPosition !== "single" && groupPosition !== "end") {
+        return;
+      }
+
+      const tail = document.createElement("span");
+      tail.className = "bubble-tail";
+      tail.setAttribute("aria-hidden", "true");
+      bubble.appendChild(tail);
+    }
+
+    function createBubble(item, groupPosition) {
+      const bubble = document.createElement("div");
+      bubble.className = `bubble ${item.speaker} ${groupPosition}`;
+
+      if (item.cta) {
+        bubble.classList.add("cta");
+        const button = document.createElement("a");
+        button.className = "cta-button";
+        button.href = item.href;
+        button.textContent = item.buttonText;
+        bubble.appendChild(button);
+      } else {
+        bubble.textContent = item.text;
+      }
+
+      addTailIfNeeded(bubble, groupPosition);
+      return bubble;
+    }
+
+    function createMessageRow(item, groupPosition, clustered) {
+      const row = document.createElement("div");
+      row.className = `message-row ${item.speaker}${clustered ? " clustered" : ""}`;
+      row.appendChild(createBubble(item, groupPosition));
+      return row;
+    }
+
+    function createTypingRow(groupPosition, clustered) {
+      const row = document.createElement("div");
+      row.className = `message-row mailita${clustered ? " clustered" : ""}`;
+
+      const bubble = document.createElement("div");
+      bubble.className = `bubble mailita typing ${groupPosition}`;
+
+      for (let index = 0; index < 3; index += 1) {
+        const dot = document.createElement("span");
+        dot.className = "typing-dot";
+        dot.setAttribute("aria-hidden", "true");
+        bubble.appendChild(dot);
+      }
+
+      addTailIfNeeded(bubble, groupPosition);
+      row.appendChild(bubble);
+      return row;
+    }
+
+    async function triggerFinale() {
+      if (finaleTriggered) {
+        return;
+      }
+
+      finaleTriggered = true;
+      await wait(reduceMotion ? 0 : timings.finalePause);
+      document.body.classList.add("site-live");
+      scrollToLatest(true);
+    }
+
+    async function playConversation() {
+      await wait(timings.initialPause);
+
+      for (let index = 0; index < conversation.length; index += 1) {
+        const item = conversation[index];
+        const previous = conversation[index - 1];
+        const clustered = Boolean(previous && previous.speaker === item.speaker);
+        const groupPosition = getGroupPosition(index);
+
+        if (item.speaker === "mailita") {
+          if (index > 0) {
+            await wait(timings.mailitaGap);
+          }
+
+          const typingRow = createTypingRow(groupPosition, clustered);
+          messagesEl.appendChild(typingRow);
+          reveal(typingRow);
+          scrollToLatest(index === 0);
+
+          await wait(timings.typing);
+
+          typingRow.remove();
+
+          const messageRow = createMessageRow(item, groupPosition, clustered);
+          messagesEl.appendChild(messageRow);
+          reveal(messageRow);
+          scrollToLatest();
+          continue;
+        }
+
+        await wait(timings.youGap);
+
+        const messageRow = createMessageRow(item, groupPosition, clustered);
+        messagesEl.appendChild(messageRow);
+        reveal(messageRow);
+        scrollToLatest();
+      }
+
+      await triggerFinale();
+    }
+
+    window.addEventListener("load", () => {
+      playConversation();
+    }, { once: true });
+  </script>
+</body>
+</html>

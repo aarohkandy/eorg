@@ -1,21 +1,14 @@
 const COLD_START_MESSAGE =
   'Mailita is refreshing Gmail in the background. Please wait a moment and try again.';
 const UI_SETTINGS_STORAGE_KEY = 'mailitaUiSettings';
-const SETTINGS_TABS = ['theme', 'privacy', 'account'];
-const THEME_MODES = ['dark', 'graphite', 'ocean', 'water', 'aurora', 'paper', 'sunrise', 'khaki', 'system'];
+const SETTINGS_TABS = ['theme'];
+const THEME_MODES = ['messages_glass_blue', 'messages_scenic_blue', 'messages_glass_beige'];
 const THEME_LABELS = {
-  dark: 'Midnight',
-  graphite: 'Graphite',
-  ocean: 'Sky',
-  water: 'Water',
-  aurora: 'Aurora',
-  paper: 'Paper',
-  sunrise: 'Color',
-  khaki: 'Sand',
-  system: 'System'
+  messages_glass_blue: 'Messages Glass',
+  messages_scenic_blue: 'Messages Scenic',
+  messages_glass_beige: 'Monochrome Beige'
 };
-// Flip this off when we're ready to remove the onboarding activity panel.
-const SHOW_ACTIVITY_PANEL = true;
+const SHOW_ACTIVITY_PANEL = false;
 
 const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -43,6 +36,7 @@ const state = {
   contactLoadStateByKey: {},
   summaryRequestGeneration: 0,
   contactRequestGenerationByKey: {},
+  searchRequestGeneration: 0,
   filter: 'all',
   selectedThreadId: '',
   searchQuery: '',
@@ -197,7 +191,7 @@ function numericValue(value, fallback = 0) {
 
 function defaultUiSettings() {
   return {
-    themeMode: 'dark',
+    themeMode: 'messages_glass_blue',
     showDebugPanel: false,
     loadRemoteImages: true,
     confirmExternalLinks: true,
@@ -205,10 +199,25 @@ function defaultUiSettings() {
   };
 }
 
+function normalizeThemeMode(value) {
+  const raw = String(value || '').trim();
+  if (THEME_MODES.includes(raw)) return raw;
+
+  if (raw === 'khaki') return 'messages_glass_beige';
+  if (raw === 'sunrise') return 'messages_scenic_blue';
+  if (raw === 'system') return 'messages_glass_blue';
+
+  if (raw) {
+    return 'messages_glass_blue';
+  }
+
+  return defaultUiSettings().themeMode;
+}
+
 function normalizeUiSettings(input) {
   const src = input && typeof input === 'object' ? input : {};
   const defaults = defaultUiSettings();
-  const themeMode = THEME_MODES.includes(src.themeMode) ? src.themeMode : defaults.themeMode;
+  const themeMode = normalizeThemeMode(src.themeMode);
   const pinnedThreadIds = Array.isArray(src.pinnedThreadIds)
     ? [...new Set(src.pinnedThreadIds
       .map((value) => String(value || '').trim())
@@ -229,9 +238,6 @@ function normalizeUiSettings(input) {
 
 function resolvedThemeMode(uiSettings = state.uiSettings) {
   const settings = normalizeUiSettings(uiSettings);
-  if (settings.themeMode === 'system') {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'khaki';
-  }
   return settings.themeMode;
 }
 
@@ -339,6 +345,8 @@ function defaultContactLoadState() {
     backend: normalizeBuildInfo(null),
     schemaFallbackUsed: false,
     richContentSource: 'cache',
+    nextCursor: '',
+    hasMore: false,
     requestedAt: null,
     completedAt: null
   };
@@ -407,7 +415,7 @@ function accountEmailLower() {
 }
 
 function usingLegacyMailboxFlow() {
-  return state.mailboxMode === 'legacy' || state.mailboxMode === 'search' || state.useLegacyMailboxFallback;
+  return state.mailboxMode === 'legacy' || state.useLegacyMailboxFallback;
 }
 
 function activeMailboxSourceLabel() {
@@ -995,9 +1003,10 @@ function applyThemeSettings() {
   const themeMode = resolvedThemeMode(state.uiSettings);
   sidebar.dataset.themeMode = themeMode;
   sidebar.dataset.settingsOpen = state.settingsOpen ? 'true' : 'false';
+  sidebar.style.setProperty('--mailita-scenic-image', `url("${chrome.runtime.getURL('content/hero-landscape-color.png')}")`);
 }
 
-function renderSettingsUi() {
+function renderSettingsUiLegacy() {
   const settings = normalizeUiSettings(state.uiSettings);
   const context = document.getElementById('gmailUnifiedRailContext');
   const preview = document.getElementById('gmailUnifiedSettingsPreview');
@@ -1064,6 +1073,37 @@ function renderSettingsUi() {
   if (debugToggle) debugToggle.checked = settings.showDebugPanel;
   if (remoteToggle) remoteToggle.checked = settings.loadRemoteImages;
   if (linksToggle) linksToggle.checked = settings.confirmExternalLinks;
+  if (settingsDisconnect) settingsDisconnect.disabled = !state.connected;
+
+  if (accountEmail) accountEmail.textContent = state.accountSnapshot.accountEmail || 'Not connected';
+  if (accountSync) accountSync.textContent = formatSyncTimestamp(state.accountSnapshot.lastSyncTime);
+  if (accountStatus) {
+    accountStatus.textContent = state.connected ? 'Connected' : 'Setup required';
+    accountStatus.dataset.connected = state.connected ? 'true' : 'false';
+  }
+}
+
+function renderSettingsUi() {
+  const settings = normalizeUiSettings(state.uiSettings);
+  const context = document.getElementById('gmailUnifiedRailContext');
+  const panel = document.getElementById('gmailUnifiedSettingsPanel');
+  const accountEmail = document.getElementById('gmailUnifiedSettingsEmail');
+  const accountSync = document.getElementById('gmailUnifiedSettingsSyncTime');
+  const accountStatus = document.getElementById('gmailUnifiedAccountStatus');
+
+  if (context) {
+    context.textContent = shellContextLabel();
+  }
+
+  if (panel) {
+    panel.hidden = !state.settingsOpen || !state.connected;
+  }
+
+  document.querySelectorAll('.gmail-unified-theme-option[data-theme-mode]').forEach((button) => {
+    button.classList.toggle('is-active', button.dataset.themeMode === settings.themeMode);
+  });
+
+  const settingsDisconnect = document.getElementById('gmailUnifiedSettingsDisconnectBtn');
   if (settingsDisconnect) settingsDisconnect.disabled = !state.connected;
 
   if (accountEmail) accountEmail.textContent = state.accountSnapshot.accountEmail || 'Not connected';
@@ -1778,6 +1818,41 @@ function groupByThread(messages) {
     .sort((a, b) => byDateDesc(a.messages[0], b.messages[0]));
 }
 
+function buildContactSummaryFromMessages(threadId, messages) {
+  const entries = [...(Array.isArray(messages) ? messages : [])].sort(byDateDesc);
+  const latest = entries[0] || null;
+  const threadIds = new Set(entries.map((message) => String(message?.threadId || '').trim()).filter(Boolean));
+  const latestContactEmail = String(
+    latest?.contactEmail
+    || (latest?.isOutgoing ? latest?.to?.[0]?.email : latest?.from?.email)
+    || threadIdToContactEmail(threadId)
+    || ''
+  ).trim().toLowerCase();
+
+  return normalizeContactSummary({
+    contactKey: String(threadId || '').trim(),
+    contactEmail: latestContactEmail,
+    displayName: latest?.contactName || threadCounterparty(latest) || latestContactEmail || 'Unknown contact',
+    latestSubject: latest?.subject || '(no subject)',
+    latestPreview: latest ? previewTextFromMessage(latest) : '(no preview)',
+    latestDate: latest?.date || new Date(0).toISOString(),
+    latestDirection: latest?.isOutgoing ? 'outgoing' : 'incoming',
+    latestMessageId: latest?.messageId || latest?.id || '',
+    messageCount: entries.length,
+    threadCount: threadIds.size || (entries.length ? 1 : 0),
+    unreadCount: entries.filter(isUnread).length,
+    hasMissingContent: entries.some((message) => {
+      const text = String(message?.bodyText || message?.snippet || '').trim();
+      const html = String(message?.bodyHtml || '').trim();
+      return !text && !html;
+    }),
+    inboxCount: entries.filter((message) => !message?.isOutgoing).length,
+    sentCount: entries.filter((message) => Boolean(message?.isOutgoing)).length,
+    contactKind: latest?.contactKind || 'person',
+    contactDomain: latest?.contactDomain || ''
+  });
+}
+
 function sortThreadGroups(groups) {
   const pinned = pinnedThreadIdSet();
 
@@ -1796,6 +1871,24 @@ function sortThreadGroups(groups) {
 function currentThreadGroups() {
   if (usingLegacyMailboxFlow()) {
     return sortThreadGroups(groupByThread(filteredMessages()));
+  }
+
+  if (state.mailboxMode === 'search') {
+    return sortThreadGroups(groupByThread(filteredMessages())
+      .map((group) => {
+        const hydratedMessages = state.contactMessagesByKey[group.threadId];
+        const allMessages = Array.isArray(hydratedMessages) && hydratedMessages.length
+          ? hydratedMessages
+          : group.messages;
+        const summary = findSummaryByThreadId(group.threadId) || buildContactSummaryFromMessages(group.threadId, group.messages);
+        return {
+          threadId: group.threadId,
+          summary,
+          messages: filteredMessagesForCurrentFilter(allMessages),
+          allMessages
+        };
+      })
+      .filter((group) => summaryVisibleInCurrentFilter(group.summary)));
   }
 
   return sortThreadGroups(state.contactSummaries
@@ -2302,10 +2395,11 @@ function renderThreads() {
   if (!list) return;
 
   const threadGroups = currentThreadGroups();
-  renderPinnedRail(threadGroups);
+  const previousScrollTop = list.scrollTop;
 
   if (!threadGroups.length) {
     setStateCard('empty', 'No messages found.');
+    list.innerHTML = '';
     return;
   }
 
@@ -2317,7 +2411,6 @@ function renderThreads() {
     const unread = groupUnread(group);
     const unreadCount = groupUnreadCount(group);
     const selected = state.selectedThreadId === group.threadId;
-    const pinned = isPinnedThread(group.threadId);
 
     const row = document.createElement('div');
     row.className = 'gmail-unified-thread-row';
@@ -2333,7 +2426,7 @@ function renderThreads() {
     const metaParts = threadMetaParts(group);
 
     row.innerHTML = `
-      <div class="gmail-unified-thread-row-shell ${pinned ? 'is-pinned' : ''}">
+      <div class="gmail-unified-thread-row-shell">
         <div class="gmail-unified-thread-avatar-wrap">
           <div class="gmail-unified-thread-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
           ${unread ? `<span class="gmail-unified-thread-unread-dot" aria-hidden="true"></span>` : ''}
@@ -2345,24 +2438,12 @@ function renderThreads() {
           </div>
           <div class="gmail-unified-thread-preview ${unread ? 'unread' : ''}">${escapeHtml(latestPreview)}</div>
           <div class="gmail-unified-thread-meta">
-            ${metaParts.map((part, index) => `
-              ${index > 0 ? '<span class="gmail-unified-thread-meta-separator" aria-hidden="true"></span>' : ''}
-              <span class="gmail-unified-thread-subject ${index === 0 && unread ? 'unread' : ''}">${escapeHtml(part)}</span>
-            `).join('')}
+            <span class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(metaParts[0] || '')}</span>
             ${unreadCount > 0 ? `<span class="gmail-unified-thread-unread-copy">${unreadCount} unread</span>` : ''}
           </div>
         </div>
-        <button class="gmail-unified-thread-pin-btn ${pinned ? 'is-active' : ''}" type="button" data-pin-thread="${escapeHtml(group.threadId)}" aria-label="${pinned ? 'Unpin conversation' : 'Pin conversation'}">
-          ${pinned ? 'Pinned' : 'Pin'}
-        </button>
       </div>
     `;
-
-    row.querySelector('[data-pin-thread]')?.addEventListener('click', async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      await togglePinnedThread(group.threadId);
-    });
 
     const openThread = () => {
       if (state.selectedThreadId !== group.threadId) {
@@ -2370,12 +2451,13 @@ function renderThreads() {
       }
       state.selectedThreadId = group.threadId;
       requestDetailSnapToLatest(group.threadId);
-      if (usingLegacyMailboxFlow()) {
-        state.composer.targetMessageId = selectedComposerMessage(group)?.id || '';
-      }
       renderThreads();
       if (!usingLegacyMailboxFlow()) {
-        loadContactMessagesForThread(group.threadId).catch(() => {});
+        const loadState = getContactLoadState(group.threadId);
+        loadContactMessagesForThread(group.threadId, {
+          forceSync: !loadState.loaded,
+          pageSize: 40
+        }).catch(() => {});
       }
     };
 
@@ -2388,6 +2470,8 @@ function renderThreads() {
 
     list.appendChild(row);
   });
+
+  list.scrollTop = previousScrollTop;
 
   const selectedGroup = findSelectedGroup();
   if (state.selectedThreadId && !selectedGroup) {
@@ -2491,7 +2575,7 @@ async function maybeDebugRefetchContact(group) {
   }
 }
 
-function renderThreadDetail(group) {
+function renderThreadDetailLegacy(group) {
   const detail = document.getElementById('gmailUnifiedDetail');
   const header = document.getElementById('gmailUnifiedDetailHeader');
   const body = document.getElementById('gmailUnifiedDetailBody');
@@ -2679,6 +2763,167 @@ function renderThreadDetail(group) {
   });
 }
 
+function renderThreadDetail(group) {
+  const detail = document.getElementById('gmailUnifiedDetail');
+  const header = document.getElementById('gmailUnifiedDetailHeader');
+  const body = document.getElementById('gmailUnifiedDetailBody');
+  const subheader = document.getElementById('gmailUnifiedDetailSubheader');
+  const composer = document.getElementById('gmailUnifiedComposer');
+  const composerInput = document.getElementById('gmailUnifiedComposerInput');
+  const composerReply = document.getElementById('gmailUnifiedComposerReply');
+  const composerReplyAll = document.getElementById('gmailUnifiedComposerReplyAll');
+  const composerStatus = document.getElementById('gmailUnifiedComposerStatus');
+  const composerSend = document.getElementById('gmailUnifiedComposerSend');
+  if (!detail || !header || !body || !composer || !composerInput || !composerReply || !composerStatus || !composerSend) return;
+
+  const detailName = groupDisplayName(group);
+  const detailEmail = getGroupContactEmail(group) || 'Conversation';
+  const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
+  const allMessages = Array.isArray(group?.allMessages) && group.allMessages.length
+    ? group.allMessages
+    : (state.contactMessagesByKey[group.threadId] || group?.messages || []);
+  const displayMessages = filteredMessagesForCurrentFilter(allMessages);
+  const detailMessageCount = displayMessages.length;
+  const shouldSnapToLatest = state.detailSnapToLatestThreadId === group.threadId
+    || state.detailLastThreadId !== group.threadId
+    || (body.scrollHeight > 0 && (body.scrollTop + body.clientHeight >= body.scrollHeight - 56));
+
+  detail.style.display = 'flex';
+  header.innerHTML = `
+    <div class="gmail-unified-detail-identity">
+      <div class="gmail-unified-detail-avatar" aria-hidden="true">${escapeHtml(groupAvatarLabel(group))}</div>
+      <div class="gmail-unified-detail-identity-copy">
+        <div class="gmail-unified-detail-title">${escapeHtml(detailName)}</div>
+        <div class="gmail-unified-detail-subheader-row">
+          <span>${escapeHtml(detailEmail)}</span>
+          ${detailMessageCount ? `<span>${detailMessageCount} message${detailMessageCount === 1 ? '' : 's'}</span>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+  subheader.innerHTML = '';
+
+  body.innerHTML = '';
+  if (contactLoadState.hasMore || contactLoadState.inFlight) {
+    const historyStatus = document.createElement('div');
+    historyStatus.className = 'gmail-unified-history-status';
+    historyStatus.textContent = contactLoadState.inFlight
+      ? 'Loading older messages...'
+      : 'Scroll up for earlier messages';
+    body.appendChild(historyStatus);
+  }
+
+  if (!displayMessages.length) {
+    const placeholderText = contactLoadState.inFlight
+      ? 'Loading this conversation...'
+      : (
+        allMessages.length && state.filter !== 'all'
+          ? `No ${state.filter} messages with ${detailName} yet.`
+          : contactLoadState.error
+          ? contactLoadState.error
+          : (
+            contactLoadState.loaded
+              ? 'No messages were returned for this conversation yet.'
+              : 'Open this conversation to load its history.'
+          )
+      );
+
+    const placeholder = document.createElement('div');
+    placeholder.className = 'gmail-unified-message incoming gmail-unified-message-placeholder gmail-unified-message-single';
+    placeholder.innerHTML = `
+      <div class="gmail-unified-message-bubble-shell">
+        <div class="gmail-unified-message-bubble">
+          <div class="gmail-unified-message-snippet">${escapeHtml(placeholderText)}</div>
+        </div>
+      </div>
+    `;
+    body.appendChild(placeholder);
+    composer.hidden = true;
+    renderSettingsUi();
+    renderThreadDebug(group);
+    updateMainPanelVisibility();
+    return;
+  }
+
+  composer.hidden = false;
+  const selectedMessage = selectedComposerMessage({ ...group, messages: allMessages }) || displayMessages[displayMessages.length - 1];
+  if (!state.composer.targetMessageId && selectedMessage?.id) {
+    state.composer.targetMessageId = selectedMessage.id;
+  }
+  if (state.composer.mode === 'reply_all' && !replyAllAvailable(selectedMessage)) {
+    state.composer.mode = 'reply';
+  }
+
+  let previousDayLabel = '';
+  const messagesAsc = [...displayMessages].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  messagesAsc.forEach((message, index) => {
+    const previousMessage = messagesAsc[index - 1] || null;
+    const nextMessage = messagesAsc[index + 1] || null;
+    const dayLabel = calendarDayLabel(message.date);
+    if (dayLabel && dayLabel !== previousDayLabel) {
+      previousDayLabel = dayLabel;
+      const separator = document.createElement('div');
+      separator.className = 'gmail-unified-day-separator';
+      separator.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
+      body.appendChild(separator);
+    }
+
+    const groupedWithPrevious = shouldClusterWithPrevious(previousMessage, message);
+    const groupedWithNext = shouldClusterWithPrevious(message, nextMessage);
+    const clusterShape = groupedWithPrevious
+      ? (groupedWithNext ? 'middle' : 'end')
+      : (groupedWithNext ? 'start' : 'single');
+    const item = document.createElement('div');
+    const renderedBody = messageDisplayMarkup(message);
+    const bodyMarkup = renderedBody.kind === 'html'
+      ? '<div class="gmail-unified-message-html-host"></div>'
+      : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
+
+    item.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} gmail-unified-message-${clusterShape} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''}`;
+    item.dataset.messageId = message.id || '';
+    item.innerHTML = `
+      <div class="gmail-unified-message-bubble-shell">
+        <div class="gmail-unified-message-bubble ${renderedBody.kind === 'html' ? 'gmail-unified-message-bubble-html' : ''}">
+          ${bodyMarkup}
+        </div>
+      </div>
+      ${groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.date))}</div>`}
+    `;
+
+    body.appendChild(item);
+
+    if (renderedBody.kind === 'html') {
+      const host = item.querySelector('.gmail-unified-message-html-host');
+      mountRenderedEmailCard(host, renderedBody.content);
+    }
+  });
+
+  composerReply.classList.toggle('is-active', state.composer.mode === 'reply');
+  composerReplyAll.hidden = !replyAllAvailable(selectedMessage);
+  composerReplyAll.classList.toggle('is-active', state.composer.mode === 'reply_all');
+  composerInput.value = state.composer.draft;
+  composerInput.placeholder = 'Message';
+  composerSend.disabled = state.composer.sendInFlight;
+  composerSend.innerHTML = state.composer.sendInFlight ? '...' : '&#8593;';
+  composerSend.setAttribute('aria-label', state.composer.sendInFlight ? 'Sending' : 'Send');
+  composerStatus.textContent = state.composer.sendError || state.composer.sendStatus || '';
+  composerStatus.dataset.state = state.composer.sendError ? 'error' : (state.composer.sendStatus ? 'success' : 'idle');
+
+  renderSettingsUi();
+  renderThreadDebug(group);
+  updateMainPanelVisibility();
+
+  window.requestAnimationFrame(() => {
+    if (shouldSnapToLatest) {
+      body.scrollTop = body.scrollHeight;
+      if (state.detailSnapToLatestThreadId === group.threadId) {
+        state.detailSnapToLatestThreadId = '';
+      }
+    }
+    state.detailLastThreadId = group.threadId;
+  });
+}
+
 function clearRetryTimer() {
   if (state.retryTimer) {
     clearInterval(state.retryTimer);
@@ -2832,7 +3077,7 @@ async function loadLegacyMessages(options = {}) {
   }
 }
 
-async function loadContactMessagesForThread(threadId, options = {}) {
+async function loadContactMessagesForThreadLegacy(threadId, options = {}) {
   if (!threadId || state.searchQuery || usingLegacyMailboxFlow()) return null;
 
   const summary = findSummaryByThreadId(threadId);
@@ -2918,6 +3163,143 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   const selectedGroup = findSelectedGroup();
   if (selectedGroup) {
     renderThreadDetail(selectedGroup);
+  }
+
+  return response;
+}
+
+function seedMessagesForThread(threadId) {
+  const key = String(threadId || '').trim();
+  if (!key) return [];
+  return state.messages.filter((message) => threadCounterpartyKey(message) === key);
+}
+
+function resolveThreadContactContext(threadId) {
+  const summary = findSummaryByThreadId(threadId);
+  if (summary) {
+    return {
+      summary,
+      contactEmail: summary.contactEmail || threadIdToContactEmail(threadId)
+    };
+  }
+
+  const seededMessages = seedMessagesForThread(threadId);
+  const seededContactEmail = String(
+    seededMessages.find((message) => String(message?.contactEmail || '').trim())?.contactEmail
+    || seededMessages.find((message) => !message?.isOutgoing && String(message?.from?.email || '').trim())?.from?.email
+    || seededMessages.find((message) => message?.isOutgoing && String(message?.to?.[0]?.email || '').trim())?.to?.[0]?.email
+    || threadIdToContactEmail(threadId)
+    || ''
+  ).trim().toLowerCase();
+
+  return {
+    summary: seededMessages.length ? buildContactSummaryFromMessages(threadId, seededMessages) : null,
+    contactEmail: seededContactEmail
+  };
+}
+
+async function loadContactMessagesForThread(threadId, options = {}) {
+  if (!threadId || usingLegacyMailboxFlow()) return null;
+
+  const { summary, contactEmail } = resolveThreadContactContext(threadId);
+  const existing = getContactLoadState(threadId);
+  const existingMessages = state.contactMessagesByKey[threadId] || [];
+  const cursor = String(options.cursor || '').trim();
+  const preserveScroll = Boolean(options.preserveScroll);
+  const body = document.getElementById('gmailUnifiedDetailBody');
+  const previousScrollTop = preserveScroll && body ? body.scrollTop : 0;
+  const previousScrollHeight = preserveScroll && body ? body.scrollHeight : 0;
+
+  if (!contactEmail && !summary) {
+    state.contactLoadStateByKey[threadId] = {
+      ...existing,
+      attempted: true,
+      loaded: false,
+      inFlight: false,
+      error: 'This conversation does not have a contact email yet.',
+      source: 'contact-error',
+      completedAt: new Date().toISOString()
+    };
+    if (state.selectedThreadId === threadId) {
+      const selectedGroup = findSelectedGroup();
+      if (selectedGroup) renderThreadDetail(selectedGroup);
+    }
+    return null;
+  }
+
+  if (existing.inFlight) return null;
+  if (!cursor && existing.loaded && !options.forceSync) return existingMessages;
+
+  const requestGeneration = numericValue(state.contactRequestGenerationByKey[threadId], 0) + 1;
+  state.contactRequestGenerationByKey[threadId] = requestGeneration;
+
+  const requestedAt = new Date().toISOString();
+  state.contactLoadStateByKey[threadId] = {
+    ...existing,
+    attempted: true,
+    inFlight: true,
+    error: '',
+    source: 'contact',
+    requestedAt
+  };
+
+  if (state.selectedThreadId === threadId) {
+    const selectedGroup = findSelectedGroup();
+    if (selectedGroup) renderThreadDetail(selectedGroup);
+  }
+
+  const response = await sendWorker('FETCH_CONTACT_MESSAGES', {
+    contactEmail,
+    contactKey: threadId,
+    scope: 'all',
+    cursor,
+    pageSize: options.pageSize || options.limitPerFolder || 40,
+    limitPerFolder: options.limitPerFolder || options.pageSize || 40,
+    forceSync: Boolean(options.forceSync || !existing.loaded),
+    trackActivity: Boolean(options.trackActivity)
+  });
+
+  if (state.contactRequestGenerationByKey[threadId] !== requestGeneration) {
+    return response;
+  }
+
+  const nextState = {
+    ...defaultContactLoadState(),
+    attempted: true,
+    loaded: Boolean(response?.success),
+    inFlight: false,
+    error: response?.success ? '' : failureMessageForResponse(response, 'Unable to load this conversation.'),
+    source: response?.success ? (response?.source || 'contact') : 'contact-error',
+    count: numericValue(response?.count, 0),
+    trace: normalizeTraceEntries(response?.trace),
+    timings: normalizeTimings(response?.timings),
+    backend: normalizeBuildInfo(response?.debug?.backend),
+    schemaFallbackUsed: Boolean(response?.debug?.schemaFallbackUsed),
+    richContentSource: String(response?.debug?.richContentSource || (response?.success ? response?.source || 'cache' : 'cache')).trim() || 'cache',
+    nextCursor: String(response?.nextCursor || ''),
+    hasMore: Boolean(response?.hasMore),
+    requestedAt,
+    completedAt: new Date().toISOString()
+  };
+
+  if (response?.success) {
+    storeContactMessages(threadId, response.messages);
+  }
+
+  state.contactLoadStateByKey[threadId] = nextState;
+
+  renderThreads();
+  const selectedGroup = findSelectedGroup();
+  if (selectedGroup) {
+    renderThreadDetail(selectedGroup);
+    if (preserveScroll) {
+      window.requestAnimationFrame(() => {
+        const currentBody = document.getElementById('gmailUnifiedDetailBody');
+        if (!currentBody) return;
+        const delta = currentBody.scrollHeight - previousScrollHeight;
+        currentBody.scrollTop = Math.max(0, previousScrollTop + delta);
+      });
+    }
   }
 
   return response;
@@ -3065,11 +3447,22 @@ function setFilter(filter) {
   });
 
   renderThreads();
+  if (state.selectedThreadId && !usingLegacyMailboxFlow()) {
+    const loadState = getContactLoadState(state.selectedThreadId);
+    if (!loadState.loaded) {
+      loadContactMessagesForThread(state.selectedThreadId, {
+        forceSync: true,
+        pageSize: 40
+      }).catch(() => {});
+    }
+  }
 }
 
 let searchDebounce = null;
 async function handleSearch(query) {
   const trimmed = String(query || '').trim();
+  const requestGeneration = numericValue(state.searchRequestGeneration, 0) + 1;
+  state.searchRequestGeneration = requestGeneration;
   state.searchQuery = trimmed;
 
   if (!trimmed) {
@@ -3084,6 +3477,10 @@ async function handleSearch(query) {
     limit: 20,
     trackActivity: !state.connected || state.guideReviewOpen
   });
+
+  if (state.searchRequestGeneration !== requestGeneration || state.searchQuery !== trimmed) {
+    return response;
+  }
 
   if (!response?.success) {
     state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
@@ -3244,6 +3641,256 @@ function setConnectUiState(status, error = false) {
   statusNode.classList.toggle('is-success', !error && Boolean(status));
 }
 
+function bindGuideEvents(sidebar) {
+  sidebar.querySelector('#gmailUnifiedGuideCloseBtn')?.addEventListener('click', () => {
+    state.guideReviewOpen = false;
+    applyGmailLayoutMode();
+  });
+
+  sidebar.querySelector('#gmailUnifiedConnectBtn')?.addEventListener('click', async () => {
+    await connectFromGuide();
+  });
+
+  sidebar.querySelectorAll('.gmail-unified-filter-btn').forEach((button) => {
+    button.addEventListener('click', () => setFilter(button.dataset.filter));
+  });
+
+  const searchInput = sidebar.querySelector('#gmailUnifiedSearchInput');
+  searchInput?.addEventListener('input', (event) => {
+    clearTimeout(searchDebounce);
+    const value = event.target.value;
+    searchDebounce = setTimeout(() => {
+      handleSearch(value);
+    }, 220);
+  });
+
+  sidebar.querySelector('#gmailUnifiedRetryBtn')?.addEventListener('click', () => {
+    loadMessages({ forceSync: false, trackActivity: true });
+  });
+
+  sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
+    state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
+    state.composer = defaultComposerState();
+    document.getElementById('gmailUnifiedDetail').style.display = 'none';
+    renderThreadDebug(null);
+    renderThreads();
+    updateMainPanelVisibility();
+  });
+
+  const settingsButton = sidebar.querySelector('#gmailUnifiedSettingsBtn');
+  const settingsPanel = sidebar.querySelector('#gmailUnifiedSettingsPanel');
+
+  settingsButton?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.settingsOpen = !state.settingsOpen;
+    applyGmailLayoutMode();
+  });
+
+  sidebar.querySelector('#gmailUnifiedSettingsCloseBtn')?.addEventListener('click', () => {
+    state.settingsOpen = false;
+    applyGmailLayoutMode();
+  });
+
+  sidebar.querySelectorAll('.gmail-unified-theme-option[data-theme-mode]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await persistUiSettings({
+        ...state.uiSettings,
+        themeMode: button.dataset.themeMode
+      });
+      applyGmailLayoutMode();
+    });
+  });
+
+  sidebar.querySelector('#gmailUnifiedSettingsDisconnectBtn')?.addEventListener('click', async () => {
+    const response = await sendWorker('DISCONNECT_GOOGLE');
+    if (!response?.success) return;
+    state.messages = [];
+    resetSectionedMailboxCaches();
+    state.selectedThreadId = '';
+    state.detailLastThreadId = '';
+    state.detailSnapToLatestThreadId = '';
+    state.composer = defaultComposerState();
+    state.useLegacyMailboxFallback = false;
+    state.mailboxMode = 'summary';
+    state.settingsOpen = false;
+    await refreshGuideAndAuthState();
+    applyGmailLayoutMode();
+    renderThreads();
+    renderThreadDebug(null);
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposerReply')?.addEventListener('click', () => {
+    setComposerMode('reply');
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposerReplyAll')?.addEventListener('click', () => {
+    setComposerMode('reply_all');
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposerInput')?.addEventListener('input', (event) => {
+    state.composer.draft = event.target.value;
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposerInput')?.addEventListener('keydown', async (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      await submitThreadReply(findSelectedGroup());
+    }
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposerSend')?.addEventListener('click', async () => {
+    await submitThreadReply(findSelectedGroup());
+  });
+
+  sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('click', (event) => {
+    const anchor = event.target.closest('a[data-mailita-link]');
+    if (!anchor) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const href = String(anchor.getAttribute('href') || '').trim();
+    if (href) {
+      openExternalPage(href);
+    }
+  });
+
+  sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('scroll', () => {
+    if (!state.selectedThreadId || usingLegacyMailboxFlow()) return;
+    const currentBody = document.getElementById('gmailUnifiedDetailBody');
+    if (!currentBody || currentBody.scrollTop > 120) return;
+    const loadState = getContactLoadState(state.selectedThreadId);
+    if (!loadState.hasMore || loadState.inFlight || !loadState.nextCursor) return;
+    loadContactMessagesForThread(state.selectedThreadId, {
+      cursor: loadState.nextCursor,
+      preserveScroll: true,
+      pageSize: 40
+    }).catch(() => {});
+  });
+
+  if (!window.__mailitaPointerCloseBound) {
+    document.addEventListener('pointerdown', (event) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const liveSettingsButton = document.getElementById('gmailUnifiedSettingsBtn');
+      const liveSettingsPanel = document.getElementById('gmailUnifiedSettingsPanel');
+      const insideSettings = liveSettingsButton?.contains(target) || liveSettingsPanel?.contains(target);
+      if (!insideSettings && state.settingsOpen) {
+        state.settingsOpen = false;
+        applyGmailLayoutMode();
+      }
+    });
+    window.__mailitaPointerCloseBound = true;
+  }
+}
+
+function buildSidebar() {
+  if (document.getElementById('gmailUnifiedSidebar')) return;
+
+  const sidebar = document.createElement('aside');
+  sidebar.id = 'gmailUnifiedSidebar';
+  sidebar.innerHTML = `
+    <div id="gmailUnifiedShell" class="gmail-unified-shell">
+      <div class="gmail-unified-body">
+        <section class="gmail-unified-left">
+          <div class="gmail-unified-left-head">
+            <div class="gmail-unified-wordmark">Mailita</div>
+            <div id="gmailUnifiedRailContext" class="gmail-unified-rail-context">Messages</div>
+          </div>
+          <div class="gmail-unified-search">
+            <input id="gmailUnifiedSearchInput" type="text" placeholder="Search" />
+          </div>
+          <div class="gmail-unified-filters">
+            <button class="gmail-unified-filter-btn active" data-filter="all">All</button>
+            <button class="gmail-unified-filter-btn" data-filter="inbox">Inbox</button>
+            <button class="gmail-unified-filter-btn" data-filter="sent">Sent</button>
+          </div>
+          <div id="gmailUnifiedStateCard" class="gmail-unified-state-card" data-state="loading">
+            <div id="gmailUnifiedStateText">Connecting to Gmail...</div>
+            <button id="gmailUnifiedRetryBtn" class="gmail-unified-retry" type="button">Retry</button>
+            <div id="gmailUnifiedCountdown" class="gmail-unified-countdown"></div>
+          </div>
+          <div id="gmailUnifiedList" class="gmail-unified-list"></div>
+          <div class="gmail-unified-left-footer">
+            <button id="gmailUnifiedSettingsBtn" class="gmail-unified-secondary-btn gmail-unified-settings-launch" type="button" aria-label="Settings">
+              Settings
+            </button>
+          </div>
+          <aside id="gmailUnifiedSettingsPanel" class="gmail-unified-settings-panel" hidden>
+            <div class="gmail-unified-settings-panel-head">
+              <div>
+                <div class="gmail-unified-settings-kicker">Appearance</div>
+                <h3>Messages style</h3>
+              </div>
+              <button id="gmailUnifiedSettingsCloseBtn" class="gmail-unified-icon-btn" type="button" aria-label="Close settings">x</button>
+            </div>
+            <div class="gmail-unified-settings-content">
+              <div class="gmail-unified-theme-options">
+                <button class="gmail-unified-theme-option" data-theme-mode="messages_glass_blue" type="button">Messages Glass</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="messages_scenic_blue" type="button">Messages Scenic</button>
+                <button class="gmail-unified-theme-option" data-theme-mode="messages_glass_beige" type="button">Monochrome Beige</button>
+              </div>
+              <div class="gmail-unified-account-card">
+                <div id="gmailUnifiedAccountStatus" class="gmail-unified-account-status" data-connected="false">Setup required</div>
+                <div id="gmailUnifiedSettingsEmail" class="gmail-unified-account-email">Not connected</div>
+                <div class="gmail-unified-account-meta">Last sync · <span id="gmailUnifiedSettingsSyncTime">No sync yet</span></div>
+              </div>
+              <button id="gmailUnifiedSettingsDisconnectBtn" class="gmail-unified-secondary-btn gmail-unified-danger-btn" type="button">Disconnect</button>
+            </div>
+          </aside>
+        </section>
+        <section class="gmail-unified-main">
+          <div id="gmailUnifiedMainEmpty" class="gmail-unified-main-empty">
+            <div class="gmail-unified-main-empty-copy">
+              <div class="gmail-unified-main-empty-kicker">Mailita</div>
+              <h2>Select a person to open your conversation.</h2>
+            </div>
+          </div>
+          <section id="gmailUnifiedDetail" class="gmail-unified-detail" style="display:none;">
+            <div class="gmail-unified-detail-head">
+              <button id="gmailUnifiedBackBtn" class="gmail-unified-back">&#8592; Back</button>
+              <div class="gmail-unified-detail-head-copy">
+                <div id="gmailUnifiedDetailHeader"></div>
+                <div id="gmailUnifiedDetailSubheader" class="gmail-unified-detail-subheader"></div>
+              </div>
+            </div>
+            <div id="gmailUnifiedDetailBody" class="gmail-unified-detail-body"></div>
+            <div id="gmailUnifiedComposer" class="gmail-unified-composer">
+              <div class="gmail-unified-composer-row">
+                <div class="gmail-unified-composer-modes">
+                  <button id="gmailUnifiedComposerReply" class="gmail-unified-composer-mode is-active" type="button">Reply</button>
+                  <button id="gmailUnifiedComposerReplyAll" class="gmail-unified-composer-mode" type="button">All</button>
+                </div>
+                <div class="gmail-unified-composer-field-wrap">
+                  <textarea id="gmailUnifiedComposerInput" class="gmail-unified-composer-input" placeholder="Message" spellcheck="true"></textarea>
+                </div>
+                <button id="gmailUnifiedComposerSend" class="gmail-unified-primary-btn gmail-unified-composer-send" type="button" aria-label="Send">&#8593;</button>
+              </div>
+              <div id="gmailUnifiedComposerStatus" class="gmail-unified-composer-status" data-state="idle"></div>
+            </div>
+          </section>
+        </section>
+      </div>
+    </div>
+
+    <section id="gmailUnifiedOnboardingOverlay" class="gmail-unified-onboarding-overlay" hidden>
+      <div class="gmail-unified-install-card">
+        <div class="gmail-unified-install-kicker">Mailita</div>
+        <h2>Email, like Messages.</h2>
+        <p>Connect your Google account to open every person as a real conversation.</p>
+        <button id="gmailUnifiedConnectBtn" class="gmail-unified-primary-btn" type="button">Connect with Google</button>
+        <div id="gmailUnifiedConnectStatus" class="gmail-unified-connect-status"></div>
+        <button id="gmailUnifiedGuideCloseBtn" class="gmail-unified-guide-close-modal" hidden type="button">Close</button>
+      </div>
+    </section>
+  `;
+
+  document.body.appendChild(sidebar);
+  bindGuideEvents(sidebar);
+  updateMainPanelVisibility();
+}
+
 async function connectFromGuide() {
   if (state.connectInFlight) return;
 
@@ -3307,7 +3954,7 @@ async function connectFromGuide() {
   }
 }
 
-function bindGuideEvents(sidebar) {
+function bindGuideEventsLegacy(sidebar) {
   sidebar.querySelector('#gmailUnifiedGuideCloseBtn')?.addEventListener('click', () => {
     state.guideReviewOpen = false;
     applyGmailLayoutMode();
@@ -3551,7 +4198,7 @@ function bindGuideEvents(sidebar) {
   });
 }
 
-function buildSidebar() {
+function buildSidebarLegacy() {
   if (document.getElementById('gmailUnifiedSidebar')) return;
 
   const sidebar = document.createElement('aside');

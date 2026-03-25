@@ -1084,18 +1084,23 @@ async function handleLocalMailAction(action, payload = {}) {
     const response = await MailitaGmailLocal.loadContact({
       contactEmail: payload.contactEmail,
       contactKey: payload.contactKey,
-      limitPerFolder: Number(payload.limitPerFolder || 50),
+      scope: payload.scope,
+      cursor: payload.cursor,
+      pageSize: Number(payload.pageSize || payload.limitPerFolder || 50),
+      limitPerFolder: Number(payload.limitPerFolder || payload.pageSize || 50),
       forceSync: Boolean(payload.forceSync)
     });
     return {
       success: true,
       messages: response.messages,
       count: response.count,
+      nextCursor: response.nextCursor,
+      hasMore: Boolean(response.hasMore),
       source: response.source,
       debug: response.debug,
       timings: response.timings,
       trace: [localTrace('success', 'local_contact_loaded', 'Loaded contact messages from the Gmail API.', {
-        details: `contactEmail=${payload.contactEmail}; count=${response.count}`
+        details: `contactEmail=${payload.contactEmail}; scope=${payload.scope || 'all'}; count=${response.count}`
       })]
     };
   }
@@ -2141,11 +2146,67 @@ async function handleBackendAction(message) {
   return null;
 }
 
+function isGmailTabUrl(url) {
+  return typeof url === 'string' && url.startsWith('https://mail.google.com/');
+}
+
+async function shouldInjectMailita(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(
+        document.getElementById('gmailUnifiedSidebar')
+        || window.__mailitaBooting
+        || window.__mailitaContentReady
+      )
+    });
+    return !Boolean(result);
+  } catch {
+    return true;
+  }
+}
+
+async function ensureMailitaInjected(tabId, url = '') {
+  if (!Number.isInteger(tabId) || !isGmailTabUrl(url)) return;
+  const needsInjection = await shouldInjectMailita(tabId);
+  if (!needsInjection) return;
+
+  try {
+    await chrome.scripting.insertCSS({
+      target: { tabId },
+      files: ['content/styles.css']
+    });
+  } catch {
+    // Ignore duplicate CSS injection failures while Gmail is navigating.
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content/gmail-inject.js']
+    });
+  } catch {
+    // Ignore injection failures while Gmail is still swapping documents.
+  }
+}
+
+async function reinjectOpenGmailTabs() {
+  const tabs = await chrome.tabs.query({ url: ['https://mail.google.com/*'] });
+  await Promise.all(
+    tabs
+      .filter((tab) => Number.isInteger(tab.id) && isGmailTabUrl(tab.url))
+      .map((tab) => ensureMailitaInjected(tab.id, tab.url))
+  );
+}
+
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   if (!Number.isInteger(tabId)) return;
   chrome.tabs
     .get(tabId)
-    .then((tab) => syncGuideContextFromTab(tab))
+    .then((tab) => Promise.allSettled([
+      syncGuideContextFromTab(tab),
+      ensureMailitaInjected(tab.id, tab.url)
+    ]))
     .catch(() => {});
 });
 
@@ -2153,6 +2214,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!Number.isInteger(tabId)) return;
   if (typeof changeInfo.url === 'string' || changeInfo.status === 'complete') {
     syncGuideContextFromTab(tab).catch(() => {});
+  }
+  if (changeInfo.status === 'complete' && isGmailTabUrl(tab?.url)) {
+    ensureMailitaInjected(tabId, tab.url).catch(() => {});
   }
 });
 
@@ -2166,12 +2230,14 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
   await setGuideBadge(normalizeGuideState(stored.onboardingGuideState, Boolean(stored.accountEmail || stored.userId)));
   await ensureSyncAlarm();
+  await reinjectOpenGmailTabs();
 });
 
 chrome.runtime.onStartup?.addListener(async () => {
   const guideState = await readGuideState();
   await setGuideBadge(guideState);
   await ensureSyncAlarm();
+  await reinjectOpenGmailTabs();
 });
 
 chrome.alarms?.onAlarm.addListener((alarm) => {

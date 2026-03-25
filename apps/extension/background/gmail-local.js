@@ -458,6 +458,26 @@
     return '';
   }
 
+  function scopeQuery(scope) {
+    if (scope === 'sent') return 'in:sent';
+    if (scope === 'inbox') return '-in:sent';
+    return '';
+  }
+
+  function mergeQueries(...parts) {
+    return parts
+      .map((part) => String(part || '').trim())
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  function filterMessagesByScope(messages, scope) {
+    const list = Array.isArray(messages) ? messages : [];
+    if (scope === 'sent') return list.filter((message) => Boolean(message?.isOutgoing));
+    if (scope === 'inbox') return list.filter((message) => !message?.isOutgoing);
+    return list;
+  }
+
   function dedupeRecipients(entries) {
     const map = new Map();
     (Array.isArray(entries) ? entries : []).forEach((entry) => {
@@ -804,11 +824,12 @@
     };
   }
 
-  async function fetchThreads(query, limit) {
+  async function fetchThreadsPage(query, limit, pageToken = '') {
     const params = new URLSearchParams({
       maxResults: String(limit)
     });
     if (query) params.set('q', query);
+    if (pageToken) params.set('pageToken', pageToken);
 
     const response = await fetchJson(`/threads?${params.toString()}`, { interactive: true });
     if (!response.ok) {
@@ -817,7 +838,15 @@
       throw error;
     }
 
-    return Array.isArray(response.data?.threads) ? response.data.threads : [];
+    return {
+      threads: Array.isArray(response.data?.threads) ? response.data.threads : [],
+      nextPageToken: String(response.data?.nextPageToken || '')
+    };
+  }
+
+  async function fetchThreads(query, limit) {
+    const page = await fetchThreadsPage(query, limit);
+    return page.threads;
   }
 
   async function mapWithConcurrency(items, limit, task) {
@@ -869,6 +898,30 @@
       throw error;
     }
     return response.data || {};
+  }
+
+  async function fetchMessagesForQuery(query, limit) {
+    const startedAt = Date.now();
+    const threadLimit = Math.max(Number(limit || 20) * 2, 20);
+    const profile = await fetchProfile();
+    const accountEmail = normalizeEmail(profile?.emailAddress);
+    const threads = await fetchThreads(String(query || ''), threadLimit);
+    const threadDetails = await fetchThreadDetails(threads.map((thread) => thread.id).filter(Boolean));
+    const messages = threadDetails
+      .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
+      .map((message) => normalizeMessage(message, accountEmail))
+      .sort(byDateDesc);
+
+    return {
+      accountEmail,
+      messages,
+      timings: timingEnvelope(startedAt, { imap_fetch_ms: Date.now() - startedAt }),
+      debug: debugEnvelope('live', {
+        ...contentCoverage(messages),
+        newestCachedAt: nowIso(),
+        limitPerFolder: threadLimit
+      })
+    };
   }
 
   async function fullRefresh(options = {}) {
@@ -1006,23 +1059,49 @@
   async function loadContact(options = {}) {
     const targetKey = String(options.contactKey || '').trim();
     const targetEmail = normalizeEmail(options.contactEmail);
+    const scope = ['all', 'inbox', 'sent'].includes(options.scope) ? options.scope : 'all';
+    const cursor = String(options.cursor || '').trim();
+    const pageSize = Math.max(Number(options.pageSize || options.limitPerFolder || 25), 20);
     let cached = await readCachedMailbox();
-    let matches = cached.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey));
+    let matches = filterMessagesByScope(
+      cached.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey)),
+      scope
+    );
 
-    if ((!matches.length || options.forceSync) && (targetEmail || targetKey)) {
-      const query = gmailQueryForContact(targetEmail, targetKey);
-      const refreshed = await fullRefresh({
-        query,
-        limit: Math.max(Number(options.limitPerFolder || 25), 20),
-        forceSync: true
-      });
-      cached = refreshed;
-      matches = refreshed.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey));
+    let nextCursor = '';
+    let hasMore = false;
+
+    if ((cursor || !matches.length || options.forceSync) && (targetEmail || targetKey)) {
+      const query = mergeQueries(
+        gmailQueryForContact(targetEmail, targetKey),
+        scopeQuery(scope)
+      );
+      const page = await fetchThreadsPage(query, pageSize * 2, cursor);
+      const threadDetails = await fetchThreadDetails(page.threads.map((thread) => thread.id).filter(Boolean));
+      const accountEmail = cached.accountEmail || normalizeEmail((await fetchProfile())?.emailAddress);
+      const remoteMessages = threadDetails
+        .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
+        .map((message) => normalizeMessage(message, accountEmail))
+        .sort(byDateDesc);
+
+      if (remoteMessages.length) {
+        await mergeMessages(remoteMessages);
+      }
+
+      cached = await readCachedMailbox();
+      matches = filterMessagesByScope(
+        cached.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey)),
+        scope
+      );
+      nextCursor = String(page.nextPageToken || '');
+      hasMore = Boolean(nextCursor);
     }
 
     return {
       messages: matches.sort(byDateDesc),
       count: matches.length,
+      nextCursor,
+      hasMore,
       source: 'gmail_api_local_contact',
       timings: cached.timings || timingEnvelope(Date.now()),
       debug: cached.debug || debugEnvelope('cache', contentCoverage(matches))
@@ -1040,13 +1119,12 @@
       };
     }
 
-    const refreshed = await fullRefresh({
-      query,
-      limit: Math.max(Number(options.limit || 20), 20),
-      forceSync: true
-    });
+    const refreshed = await fetchMessagesForQuery(query, Math.max(Number(options.limit || 20), 20));
     const messages = refreshed.messages.sort(byDateDesc).slice(0, Number(options.limit || 20));
-    await mergeMessages(messages);
+
+    if (messages.length) {
+      await mergeMessages(messages);
+    }
 
     return {
       messages,
