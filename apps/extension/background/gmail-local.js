@@ -1022,6 +1022,11 @@
 
     const profile = await fetchProfile();
     const accountEmail = normalizeEmail(profile?.emailAddress);
+    if (!accountEmail) {
+      const error = new Error('Google did not return the Gmail account address.');
+      error.code = 'AUTH_FAILED';
+      throw error;
+    }
 
     await metaSetMany([
       [META_KEYS.accountEmail, accountEmail],

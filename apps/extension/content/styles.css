@@ -2,7 +2,7 @@ body.gmail-unified-fullscreen {
   margin: 0 !important;
   padding: 0 !important;
   overflow: hidden !important;
-  background: #d4aba0 !important;
+  background: #c7beb2 !important;
 }
 
 body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(style):not(link) {
@@ -14,20 +14,21 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   --mailita-text: #1c1c1e;
   --mailita-muted: #6e6e73;
   --mailita-subtle: rgba(28, 28, 30, 0.44);
-  --mailita-glass: rgba(248, 239, 233, 0.54);
-  --mailita-glass-strong: rgba(247, 239, 234, 0.72);
-  --mailita-panel: rgba(255, 255, 255, 0.26);
-  --mailita-panel-strong: rgba(255, 255, 255, 0.38);
-  --mailita-panel-border: rgba(255, 255, 255, 0.34);
-  --mailita-shadow: 0 24px 64px rgba(71, 42, 34, 0.14);
-  --mailita-shadow-soft: 0 8px 24px rgba(84, 51, 39, 0.08);
+  --mailita-glass: rgba(244, 237, 227, 0.48);
+  --mailita-glass-strong: rgba(243, 236, 227, 0.72);
+  --mailita-panel: rgba(243, 237, 229, 0.28);
+  --mailita-panel-strong: rgba(248, 244, 238, 0.42);
+  --mailita-panel-border: rgba(255, 255, 255, 0.36);
+  --mailita-shadow: 0 24px 64px rgba(42, 34, 28, 0.16);
+  --mailita-shadow-soft: 0 8px 24px rgba(56, 44, 35, 0.09);
+  --mailita-scenic-image: none;
   --mailita-bubble-in: rgba(255, 255, 255, 0.92);
   --mailita-bubble-out: linear-gradient(180deg, #52a8ff 0%, #007aff 100%);
   --mailita-bubble-out-flat: #007aff;
   --mailita-bubble-out-text: #ffffff;
   --mailita-bubble-in-text: #1c1c1e;
-  --mailita-rail-bg: rgba(248, 239, 233, 0.28);
-  --mailita-main-bg: rgba(255, 255, 255, 0.14);
+  --mailita-rail-bg: rgba(243, 237, 229, 0.32);
+  --mailita-main-bg: rgba(255, 255, 255, 0.12);
   --mailita-accent: #007aff;
   --mailita-danger: #b84747;
   position: fixed;
@@ -37,10 +38,12 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   color: var(--mailita-text);
   font-family: "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
   background:
-    radial-gradient(circle at 20% 15%, rgba(255, 247, 243, 0.62), transparent 28%),
-    radial-gradient(circle at 78% 10%, rgba(210, 161, 159, 0.34), transparent 30%),
-    radial-gradient(circle at 50% 110%, rgba(182, 128, 123, 0.24), transparent 36%),
-    linear-gradient(155deg, #c59486 0%, #d7b0a4 42%, #ecd8d1 100%);
+    linear-gradient(90deg, rgba(18, 16, 14, 0.14), rgba(18, 16, 14, 0) 34%, rgba(18, 16, 14, 0) 72%, rgba(18, 16, 14, 0.18)),
+    linear-gradient(180deg, rgba(255, 244, 227, 0.28), rgba(235, 228, 216, 0.14) 30%, rgba(58, 51, 45, 0.12) 100%),
+    var(--mailita-scenic-image),
+    linear-gradient(155deg, #c5beb3 0%, #d1c7bb 44%, #ebe2d5 100%);
+  background-size: cover;
+  background-position: center;
 }
 
 #gmailUnifiedSidebar::before,
@@ -61,7 +64,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   min-height: 380px;
   top: -14vw;
   left: -10vw;
-  background: rgba(255, 247, 242, 0.5);
+  background: rgba(248, 243, 236, 0.4);
 }
 
 #gmailUnifiedSidebar::after {
@@ -71,10 +74,17 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   min-height: 320px;
   right: -8vw;
   bottom: -16vw;
-  background: rgba(194, 135, 131, 0.3);
+  background: rgba(121, 102, 85, 0.24);
 }
 
 #gmailUnifiedSidebar[data-theme-mode='messages_glass_beige'] {
+  --mailita-glass: rgba(243, 235, 225, 0.54);
+  --mailita-glass-strong: rgba(244, 236, 226, 0.8);
+  --mailita-panel: rgba(243, 237, 229, 0.34);
+  --mailita-panel-strong: rgba(247, 241, 234, 0.52);
+  --mailita-panel-border: rgba(255, 255, 255, 0.42);
+  --mailita-rail-bg: rgba(242, 235, 226, 0.38);
+  --mailita-main-bg: rgba(247, 241, 234, 0.16);
   --mailita-bubble-out: linear-gradient(180deg, #ebd0c3 0%, #e2c1b2 100%);
   --mailita-bubble-out-flat: #e2c1b2;
   --mailita-bubble-out-text: #3b2a24;
@@ -83,19 +93,20 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 #gmailUnifiedSidebar[data-theme-mode='messages_scenic_blue'] {
   background:
-    linear-gradient(180deg, rgba(248, 239, 233, 0.3), rgba(244, 232, 226, 0.4)),
+    linear-gradient(90deg, rgba(37, 24, 22, 0.12), rgba(37, 24, 22, 0) 28%, rgba(37, 24, 22, 0) 74%, rgba(37, 24, 22, 0.12)),
+    linear-gradient(180deg, rgba(255, 242, 221, 0.1), rgba(255, 242, 221, 0.03) 30%, rgba(111, 83, 78, 0.12) 100%),
     var(--mailita-scenic-image),
-    linear-gradient(155deg, #c59486 0%, #d7b0a4 42%, #ecd8d1 100%);
+    linear-gradient(155deg, #c4bcaf 0%, #d1c6b7 44%, #ebe2d5 100%);
   background-size: cover;
   background-position: center;
 }
 
 #gmailUnifiedSidebar[data-theme-mode='messages_scenic_blue']::before {
-  background: rgba(255, 244, 238, 0.36);
+  background: rgba(247, 241, 232, 0.24);
 }
 
 #gmailUnifiedSidebar[data-theme-mode='messages_scenic_blue']::after {
-  background: rgba(135, 98, 103, 0.24);
+  background: rgba(95, 76, 63, 0.18);
 }
 
 #gmailUnifiedSidebar[hidden] {
@@ -123,8 +134,8 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   height: 100%;
   overflow: hidden;
   border-radius: 34px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.08));
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: linear-gradient(135deg, rgba(248, 243, 236, 0.2), rgba(236, 228, 218, 0.12));
   box-shadow: var(--mailita-shadow);
   backdrop-filter: blur(32px) saturate(115%);
 }
@@ -135,7 +146,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   flex-direction: column;
   gap: 12px;
   padding: 22px 18px 18px;
-  background: linear-gradient(180deg, rgba(248, 239, 233, 0.38), rgba(248, 239, 233, 0.22));
+  background: linear-gradient(180deg, rgba(243, 237, 229, 0.42), rgba(243, 237, 229, 0.24));
   border-right: 1px solid rgba(255, 255, 255, 0.28);
   backdrop-filter: blur(28px) saturate(115%);
 }
@@ -144,7 +155,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   position: relative;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.06));
+  background: linear-gradient(180deg, rgba(248, 243, 236, 0.12), rgba(255, 255, 255, 0.06));
 }
 
 .gmail-unified-left-head {
@@ -815,8 +826,8 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   display: grid;
   place-items: center;
   padding: 28px;
-  background: rgba(235, 215, 207, 0.36);
-  backdrop-filter: blur(18px);
+  background: linear-gradient(180deg, rgba(243, 236, 227, 0.24), rgba(232, 223, 211, 0.3));
+  backdrop-filter: blur(24px);
 }
 
 .gmail-unified-install-card {
@@ -827,7 +838,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   padding: 30px;
   border-radius: 32px;
   border: 1px solid rgba(255, 255, 255, 0.34);
-  background: rgba(248, 239, 233, 0.82);
+  background: linear-gradient(180deg, rgba(247, 241, 234, 0.82), rgba(237, 229, 218, 0.7));
   box-shadow: var(--mailita-shadow);
   text-align: center;
 }

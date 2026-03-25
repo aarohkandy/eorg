@@ -192,7 +192,7 @@ function numericValue(value, fallback = 0) {
 
 function defaultUiSettings() {
   return {
-    themeMode: 'messages_glass_blue',
+    themeMode: 'messages_scenic_blue',
     loadRemoteImages: true,
     confirmExternalLinks: true
   };
@@ -3463,16 +3463,30 @@ async function connectFromGuide() {
     window.setTimeout(() => {
       sidebar?.classList.remove('gmail-unified-unlocking');
     }, 500);
+    await sleep(600);
+    await refreshGuideAndAuthState();
+    state.useLegacyMailboxFallback = false;
+    state.mailboxMode = 'summary';
+    resetSectionedMailboxCaches();
+    applyGmailLayoutMode();
 
-    setTimeout(async () => {
-      await refreshGuideAndAuthState();
-      state.useLegacyMailboxFallback = false;
-      state.mailboxMode = 'summary';
-      resetSectionedMailboxCaches();
-      applyGmailLayoutMode();
-      await loadMessages({ forceSync: false, trackActivity: true });
-      startAutoRefresh();
-    }, 600);
+    const mailboxResponse = await loadMessages({
+      forceSync: false,
+      trackActivity: true
+    });
+
+    if (!mailboxResponse?.success) {
+      const errorMessage = failureMessageForResponse(mailboxResponse, 'Unable to load conversations right now.');
+      setConnectUiState(`Connected, but mailbox loading failed. ${errorMessage}`, true);
+      setStateCard('error', errorMessage, true);
+      return;
+    }
+
+    setConnectUiState('');
+    startAutoRefresh();
+  } catch (error) {
+    setConnectUiState(String(error?.message || 'Connected, but mailbox loading failed. Retry.'), true);
+    setStateCard('error', 'Unable to load conversations right now.', true);
   } finally {
     state.connectInFlight = false;
     if (connectBtn) {
@@ -3569,6 +3583,9 @@ async function bootGmailSurface() {
           refreshGuideAndAuthState()
             .then(async () => {
               applyGmailLayoutMode();
+              if (state.connectInFlight) {
+                return;
+              }
               if (state.connected && state.messages.length === 0 && state.contactSummaries.length === 0) {
                 await loadMessages();
               }
