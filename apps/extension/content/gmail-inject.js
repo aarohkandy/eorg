@@ -9,6 +9,21 @@ const THEME_LABELS = {
   messages_glass_beige: 'Monochrome Beige'
 };
 const SHOW_ACTIVITY_PANEL = false;
+const DEBUG_PANEL_MAX_EVENTS = 250;
+const WORKER_TIMEOUT_BY_ACTION = {
+  DIAGNOSTICS_LOG: 2500,
+  GET_STORAGE: 6000,
+  GUIDE_GET_STATE: 6000,
+  GUIDE_CONFIRM_STEP: 12000,
+  HEALTH_CHECK: 6000,
+  CONNECT_GOOGLE: 120000,
+  FETCH_MESSAGE_SUMMARIES: 30000,
+  FETCH_CONTACT_MESSAGES: 30000,
+  FETCH_MESSAGES: 30000,
+  SEARCH_MESSAGES: 30000,
+  SEND_MESSAGE: 60000,
+  SYNC_MESSAGES: 60000
+};
 
 const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -64,6 +79,7 @@ const state = {
   guideReviewOpen: false,
   connectInFlight: false,
   shellUnlocked: false,
+  debugOpen: true,
   uiSettings: null,
   settingsOpen: false,
   accountSnapshot: {
@@ -84,6 +100,10 @@ const state = {
     sendStatus: ''
   }
 };
+const debugState = {
+  counter: 0,
+  events: []
+};
 
 let mailitaGlobalListenersBound = false;
 let mailitaSurfaceObserver = null;
@@ -93,8 +113,155 @@ function isMailHost() {
   return window.location.hostname.includes('mail.google.com');
 }
 
-function sendWorker(action, payload = {}) {
-  return chrome.runtime.sendMessage({ action, payload });
+function debugEventPayload(input, depth = 0) {
+  if (depth > 2) return '[max-depth]';
+  if (input == null) return input;
+  if (Array.isArray(input)) {
+    return input.slice(0, 12).map((item) => debugEventPayload(item, depth + 1));
+  }
+  if (typeof input === 'object') {
+    const out = {};
+    Object.entries(input).slice(0, 24).forEach(([key, value]) => {
+      out[key] = debugEventPayload(value, depth + 1);
+    });
+    return out;
+  }
+  if (typeof input === 'string') {
+    return input.length > 240 ? `${input.slice(0, 237)}...` : input;
+  }
+  return input;
+}
+
+function buildDebugStateSnapshot() {
+  const stateCard = document.getElementById('gmailUnifiedStateCard');
+  return {
+    connected: Boolean(state.connected),
+    connectInFlight: Boolean(state.connectInFlight),
+    shellUnlocked: Boolean(state.shellUnlocked),
+    guideReviewOpen: Boolean(state.guideReviewOpen),
+    mailboxMode: state.mailboxMode,
+    filter: state.filter,
+    searchQuery: state.searchQuery || '',
+    selectedThreadId: state.selectedThreadId || '',
+    summaries: Array.isArray(state.contactSummaries) ? state.contactSummaries.length : 0,
+    messages: Array.isArray(state.messages) ? state.messages.length : 0,
+    accountEmail: state.accountSnapshot?.accountEmail || '',
+    lastSyncTime: state.accountSnapshot?.lastSyncTime || '',
+    stateCard: stateCard?.dataset?.state || '',
+    stateCardText: document.getElementById('gmailUnifiedStateText')?.textContent || '',
+    connectStatus: document.getElementById('gmailUnifiedConnectStatus')?.textContent || ''
+  };
+}
+
+function renderDebugPanel() {
+  const panel = document.getElementById('gmailUnifiedDebugPanel');
+  if (!panel) return;
+  panel.hidden = false;
+  panel.dataset.collapsed = state.debugOpen ? 'false' : 'true';
+  const sidebar = document.getElementById('gmailUnifiedSidebar');
+  if (sidebar) {
+    sidebar.dataset.debugOpen = state.debugOpen ? 'true' : 'false';
+  }
+  const snapshotNode = document.getElementById('gmailUnifiedDebugState');
+  const logNode = document.getElementById('gmailUnifiedDebugEventLog');
+  const toggleNode = document.getElementById('gmailUnifiedDebugToggleBtn');
+  const bodyNode = document.getElementById('gmailUnifiedDebugBody');
+  if (toggleNode) toggleNode.textContent = state.debugOpen ? 'Hide' : 'Show';
+  if (bodyNode) bodyNode.hidden = !state.debugOpen;
+  if (snapshotNode) {
+    snapshotNode.textContent = JSON.stringify(buildDebugStateSnapshot(), null, 2);
+  }
+  if (logNode) {
+    logNode.innerHTML = debugState.events.map((entry) => {
+      const details = entry.details ? `<pre>${entry.details}</pre>` : '';
+      return `
+        <article class="gmail-unified-debug-entry" data-level="${entry.level}">
+          <div class="gmail-unified-debug-entry-head">
+            <span>${entry.ts}</span>
+            <strong>${entry.label}</strong>
+          </div>
+          <div class="gmail-unified-debug-entry-message">${entry.message}</div>
+          ${details}
+        </article>
+      `;
+    }).join('');
+  }
+}
+
+function setDebugText(node, text) {
+  if (!node) return;
+  const normalized = String(text || '');
+  if ('value' in node) {
+    node.value = normalized;
+  } else {
+    node.textContent = normalized;
+  }
+}
+
+function pushDebugEvent(label, message, details = null, level = 'info') {
+  const normalizedDetails = details == null
+    ? ''
+    : (
+      typeof details === 'string'
+        ? details
+        : JSON.stringify(debugEventPayload(details), null, 2)
+    );
+  debugState.events.unshift({
+    id: ++debugState.counter,
+    ts: new Date().toLocaleTimeString(),
+    label,
+    message,
+    details: normalizedDetails,
+    level
+  });
+  if (debugState.events.length > DEBUG_PANEL_MAX_EVENTS) {
+    debugState.events.length = DEBUG_PANEL_MAX_EVENTS;
+  }
+  renderDebugPanel();
+}
+
+function workerTimeoutMs(action, options = {}) {
+  if (Number.isFinite(Number(options.timeoutMs))) return Number(options.timeoutMs);
+  return WORKER_TIMEOUT_BY_ACTION[action] || 20000;
+}
+
+function sendWorker(action, payload = {}, options = {}) {
+  const requestId = debugState.counter + 1;
+  const timeoutMs = workerTimeoutMs(action, options);
+  pushDebugEvent('worker:request', `${action} started`, { requestId, timeoutMs, payload });
+
+  let timeoutId = null;
+  const workerPromise = Promise.resolve().then(() => chrome.runtime.sendMessage({ action, payload }));
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      const error = new Error(`${action} timed out after ${timeoutMs}ms`);
+      error.code = 'WORKER_TIMEOUT';
+      reject(error);
+    }, timeoutMs);
+  });
+
+  return Promise.race([workerPromise, timeoutPromise])
+    .then((response) => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      pushDebugEvent(
+        response?.success === false ? 'worker:error' : 'worker:response',
+        `${action} completed`,
+        { requestId, response },
+        response?.success === false ? 'error' : 'success'
+      );
+      return response;
+    })
+    .catch((error) => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      pushDebugEvent('worker:exception', `${action} failed`, {
+        requestId,
+        error: {
+          code: error?.code || '',
+          message: error?.message || String(error)
+        }
+      }, 'error');
+      throw error;
+    });
 }
 
 function openExternalPage(url) {
@@ -535,7 +702,7 @@ async function appendUiActivity(entry, options = {}) {
       reset: Boolean(options.reset),
       entry
     };
-    await sendWorker('DIAGNOSTICS_LOG', payload);
+    await sendWorker('DIAGNOSTICS_LOG', payload, { timeoutMs: 2500 });
   } catch {
     // Ignore diagnostics failures in the UI path.
   }
@@ -2117,7 +2284,7 @@ function renderThreadDebug(group) {
     summary.textContent = 'Open a conversation to inspect exactly what the UI received.';
     status.hidden = true;
     status.textContent = '';
-    log.value = 'Select a conversation to generate a debug report.';
+    setDebugText(log, 'Select a conversation to generate a debug report.');
     return;
   }
 
@@ -2145,7 +2312,7 @@ function renderThreadDebug(group) {
     } else {
       summary.textContent = 'Select a person to trigger the focused contact request.';
     }
-    log.value = buildThreadDebugReport(group);
+    setDebugText(log, buildThreadDebugReport(group));
     return;
   }
 
@@ -2163,7 +2330,7 @@ function renderThreadDebug(group) {
       : 'This conversation has message text; use the log below to inspect the exact payload.';
   }
 
-  log.value = buildThreadDebugReport(group);
+  setDebugText(log, buildThreadDebugReport(group));
 }
 
 function setStateCard(type, text, retryVisible = false) {
@@ -2192,6 +2359,8 @@ function setStateCard(type, text, retryVisible = false) {
     detail.style.display = 'none';
   }
 
+  pushDebugEvent('ui', 'State card updated', { type, text, retryVisible });
+  renderDebugPanel();
   updateMainPanelVisibility();
 }
 
@@ -2760,6 +2929,13 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   state.contactRequestGenerationByKey[threadId] = requestGeneration;
 
   const requestedAt = new Date().toISOString();
+  pushDebugEvent('contact', 'Loading contact messages', {
+    threadId,
+    contactEmail,
+    cursor,
+    forceSync: Boolean(options.forceSync || !existing.loaded),
+    preserveScroll
+  });
   state.contactLoadStateByKey[threadId] = {
     ...existing,
     attempted: true,
@@ -2813,6 +2989,11 @@ async function loadContactMessagesForThread(threadId, options = {}) {
     upsertContactSummary(buildContactSummaryFromMessages(threadId, response.messages));
   }
 
+  pushDebugEvent(response?.success ? 'contact' : 'contact:error', response?.success ? 'Contact messages loaded' : 'Contact messages failed', {
+    threadId,
+    response
+  }, response?.success ? 'success' : 'error');
+
   state.contactLoadStateByKey[threadId] = nextState;
 
   renderThreads();
@@ -2841,6 +3022,12 @@ async function loadMessageSummaries(options = {}) {
   if (!silent) {
     setStateCard('loading', 'Loading conversations...');
   }
+  pushDebugEvent('mailbox', 'Requesting mailbox summaries', {
+    silent,
+    requestedFolder,
+    forceSync: Boolean(options.forceSync),
+    trackActivity: Boolean(options.trackActivity)
+  });
 
   const response = await sendWorker('FETCH_MESSAGE_SUMMARIES', {
     folder: requestedFolder,
@@ -2938,12 +3125,22 @@ async function loadMessageSummaries(options = {}) {
 }
 
 async function loadMessages(options = {}) {
+  pushDebugEvent('mailbox', 'loadMessages entered', {
+    options,
+    useLegacyMailboxFallback: state.useLegacyMailboxFallback,
+    mailboxMode: state.mailboxMode
+  });
   if (state.useLegacyMailboxFallback && !options.forceSectionedRetry) {
+    pushDebugEvent('mailbox', 'Using legacy mailbox fallback');
     return loadLegacyMessages(options);
   }
 
   const summaryResponse = await loadMessageSummaries(options);
   if (summaryResponse?.success) {
+    pushDebugEvent('mailbox', 'loadMessages resolved via summaries', {
+      count: summaryResponse.count,
+      source: summaryResponse.source
+    }, 'success');
     return summaryResponse;
   }
 
@@ -2959,6 +3156,7 @@ async function loadMessages(options = {}) {
 
   const fallbackResponse = await loadLegacyMessages(options);
   if (fallbackResponse?.success) {
+    pushDebugEvent('mailbox', 'Summary load failed; switched to legacy fallback', summaryResponse, 'error');
     state.useLegacyMailboxFallback = true;
     resetSectionedMailboxCaches();
   }
@@ -3010,6 +3208,7 @@ async function handleSearch(query) {
   }
 
   if (!response?.success) {
+    pushDebugEvent('mailbox', 'Mailbox summaries failed', response, 'error');
     state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
     state.lastMailboxSource = 'search-error';
     state.lastMailboxTimings = normalizeTimings(response?.timings);
@@ -3026,6 +3225,11 @@ async function handleSearch(query) {
   }
 
   clearRetryTimer();
+  pushDebugEvent('mailbox', 'Mailbox summaries loaded', {
+    source: response.source,
+    count: response.count,
+    timings: response.timings
+  }, 'success');
   state.mailboxMode = 'search';
   state.messages = Array.isArray(response.messages) ? response.messages : [];
   state.lastMailboxTrace = normalizeTraceEntries(response.trace);
@@ -3075,11 +3279,31 @@ function updateGuideProgressUI() {
 }
 
 async function refreshGuideAndAuthState() {
-  const [storage, guide, uiSettings] = await Promise.all([
+  pushDebugEvent('flow', 'Refreshing guide/auth state');
+  const [storageResult, guideResult, uiSettingsResult] = await Promise.allSettled([
     sendWorker('GET_STORAGE'),
     sendWorker('GUIDE_GET_STATE'),
     readUiSettings()
   ]);
+  const storage = storageResult.status === 'fulfilled' ? storageResult.value : null;
+  const guide = guideResult.status === 'fulfilled' ? guideResult.value : null;
+  const uiSettings = uiSettingsResult.status === 'fulfilled' ? uiSettingsResult.value : null;
+
+  if (storageResult.status === 'rejected') {
+    pushDebugEvent('flow:error', 'GET_STORAGE failed during refresh', {
+      message: storageResult.reason?.message || String(storageResult.reason)
+    }, 'error');
+  }
+  if (guideResult.status === 'rejected') {
+    pushDebugEvent('flow:error', 'GUIDE_GET_STATE failed during refresh', {
+      message: guideResult.reason?.message || String(guideResult.reason)
+    }, 'error');
+  }
+  if (uiSettingsResult.status === 'rejected') {
+    pushDebugEvent('flow:error', 'readUiSettings failed during refresh', {
+      message: uiSettingsResult.reason?.message || String(uiSettingsResult.reason)
+    }, 'error');
+  }
 
   const storageConnected = Boolean(storage?.success && storage.connected);
   const preserveUnlockedShell = Boolean(state.shellUnlocked && !storageConnected);
@@ -3108,6 +3332,14 @@ async function refreshGuideAndAuthState() {
     state.lastMailboxTimings = normalizeTimings(null);
     resetSectionedMailboxCaches();
   }
+
+  pushDebugEvent('flow', 'Guide/auth state refreshed', {
+    storageConnected,
+    preserveUnlockedShell,
+    connected: state.connected,
+    accountSnapshot: state.accountSnapshot
+  }, state.connected ? 'success' : 'info');
+  renderDebugPanel();
 
   return { storage, guide: state.guideState };
 }
@@ -3172,6 +3404,7 @@ function setConnectUiState(status, error = false) {
   statusNode.textContent = status || '';
   statusNode.classList.toggle('is-error', Boolean(error));
   statusNode.classList.toggle('is-success', !error && Boolean(status));
+  pushDebugEvent('ui', 'Connect status updated', { status, error }, error ? 'error' : 'info');
 }
 
 function bindGuideEvents(sidebar) {
@@ -3418,10 +3651,61 @@ function buildSidebar() {
         <button id="gmailUnifiedGuideCloseBtn" class="gmail-unified-guide-close-modal" hidden type="button">Close</button>
       </div>
     </section>
+
+    <aside id="gmailUnifiedDebugPanel" class="gmail-unified-debug-panel" data-collapsed="false">
+      <div class="gmail-unified-debug-head">
+        <div>
+          <div class="gmail-unified-debug-kicker">Temp Debug</div>
+          <strong>Mailita Trace</strong>
+        </div>
+        <div class="gmail-unified-debug-actions">
+          <button id="gmailUnifiedDebugClearBtn" class="gmail-unified-icon-btn" type="button" aria-label="Clear debug log">Clear</button>
+          <button id="gmailUnifiedDebugToggleBtn" class="gmail-unified-icon-btn" type="button" aria-label="Hide debug panel">Hide</button>
+        </div>
+      </div>
+      <div id="gmailUnifiedDebugBody" class="gmail-unified-debug-body">
+        <pre id="gmailUnifiedDebugState" class="gmail-unified-debug-state"></pre>
+        <div class="gmail-unified-debug-thread">
+          <div id="gmailUnifiedDebugSummary" class="gmail-unified-debug-summary">Open a conversation to inspect exactly what the UI received.</div>
+          <div id="gmailUnifiedDebugStatus" class="gmail-unified-debug-status" hidden></div>
+          <pre id="gmailUnifiedDebugLog" class="gmail-unified-thread-debug-log">Select a conversation to generate a debug report.</pre>
+        </div>
+        <div id="gmailUnifiedDebugEventLog" class="gmail-unified-debug-log"></div>
+      </div>
+    </aside>
   `;
 
   document.body.appendChild(sidebar);
   bindGuideEvents(sidebar);
+  sidebar.querySelector('#gmailUnifiedDebugClearBtn')?.addEventListener('click', () => {
+    debugState.events = [];
+    pushDebugEvent('debug', 'Debug log cleared');
+  });
+  sidebar.querySelector('#gmailUnifiedDebugToggleBtn')?.addEventListener('click', () => {
+    state.debugOpen = !state.debugOpen;
+    renderDebugPanel();
+  });
+  if (!window.__mailitaDebugHooksBound) {
+    window.addEventListener('error', (event) => {
+      pushDebugEvent('window:error', 'Unhandled window error', {
+        message: event.message,
+        file: event.filename,
+        line: event.lineno,
+        column: event.colno
+      }, 'error');
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      pushDebugEvent('window:rejection', 'Unhandled promise rejection', {
+        reason: event.reason?.message || String(event.reason)
+      }, 'error');
+    });
+    window.__mailitaDebugHooksBound = true;
+  }
+  pushDebugEvent('boot', 'Sidebar and debug panel built', {
+    mailHost: isMailHost(),
+    href: window.location.href
+  }, 'success');
+  renderDebugPanel();
   updateMainPanelVisibility();
 }
 
@@ -3436,7 +3720,8 @@ async function connectFromGuide() {
     connectBtn.textContent = 'Connecting...';
   }
   setConnectUiState('Connecting...');
-  await appendUiActivity({
+  pushDebugEvent('connect', 'Connect flow started');
+  appendUiActivity({
     source: 'UI',
     level: 'info',
     stage: 'connect_button_clicked',
@@ -3444,22 +3729,41 @@ async function connectFromGuide() {
   }, { reset: true });
 
   try {
-    const response = await sendWorker('CONNECT_GOOGLE');
+    sendWorker('HEALTH_CHECK', {}, { timeoutMs: 6000 })
+      .then((health) => {
+        pushDebugEvent('connect', 'Pre-connect health check finished', health, health?.success ? 'success' : 'error');
+      })
+      .catch((error) => {
+        pushDebugEvent('connect', 'Pre-connect health check failed', {
+          code: error?.code || 'HEALTH_CHECK_FAILED',
+          error: error?.message || 'Health check failed.'
+        }, 'error');
+      });
+
+    const response = await sendWorker('CONNECT_GOOGLE', {}, { timeoutMs: 120000 });
     if (!response?.success) {
       setConnectUiState(mapConnectError(response), true);
       return;
     }
+    pushDebugEvent('connect', 'CONNECT_GOOGLE succeeded', response, 'success');
 
-    await guideConfirm('connect_account', {
-      substep: 'connect_submitted',
-      reason: 'oauth_connected',
-      evidence: {
-        oauth: {
-          connectedAt: new Date().toISOString(),
-          source: 'guide_connect'
+    try {
+      await guideConfirm('connect_account', {
+        substep: 'connect_submitted',
+        reason: 'oauth_connected',
+        evidence: {
+          oauth: {
+            connectedAt: new Date().toISOString(),
+            source: 'guide_connect'
+          }
         }
-      }
-    });
+      });
+      pushDebugEvent('connect', 'Guide confirm completed', null, 'success');
+    } catch (error) {
+      pushDebugEvent('connect', 'Guide confirm failed', {
+        message: error?.message || String(error)
+      }, 'error');
+    }
     state.connected = true;
     state.shellUnlocked = true;
     state.accountSnapshot = {
@@ -3482,11 +3786,19 @@ async function connectFromGuide() {
     window.setTimeout(() => {
       sidebar?.classList.remove('gmail-unified-unlocking');
     }, 500);
-    await sleep(600);
-    await refreshGuideAndAuthState();
+    try {
+      await refreshGuideAndAuthState();
+    } catch (error) {
+      pushDebugEvent('connect', 'refreshGuideAndAuthState failed after auth', {
+        message: error?.message || String(error)
+      }, 'error');
+    }
     state.useLegacyMailboxFallback = false;
     state.mailboxMode = 'summary';
     applyGmailLayoutMode();
+    pushDebugEvent('connect', 'Starting first mailbox load after auth', {
+      mailboxMode: state.mailboxMode
+    });
 
     const mailboxResponse = await loadMessages({
       forceSync: false,
@@ -3502,7 +3814,15 @@ async function connectFromGuide() {
 
     setConnectUiState('');
     startAutoRefresh();
+    pushDebugEvent('connect', 'Connect flow completed', {
+      summaries: state.contactSummaries.length,
+      messages: state.messages.length
+    }, 'success');
   } catch (error) {
+    pushDebugEvent('connect', 'Connect flow crashed', {
+      code: error?.code || '',
+      message: error?.message || String(error)
+    }, 'error');
     setConnectUiState(String(error?.message || 'Connected, but mailbox loading failed. Retry.'), true);
     setStateCard('error', 'Unable to load conversations right now.', true);
   } finally {

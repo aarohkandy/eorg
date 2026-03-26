@@ -883,6 +883,12 @@ function localTrace(level, stage, message, extra = {}) {
 function mapLocalError(error, fallbackCode = 'GMAIL_API_FAILED') {
   const message = String(error?.message || 'Local Gmail request failed.');
   const code = String(error?.code || '');
+  const details = [
+    error?.stage ? `stage=${error.stage}` : '',
+    Number.isFinite(Number(error?.status)) && Number(error?.status) > 0 ? `status=${Number(error.status)}` : '',
+    error?.path ? `path=${error.path}` : '',
+    message
+  ].filter(Boolean).join('; ');
 
   if (code === 'OAUTH_NOT_CONFIGURED') {
     return {
@@ -924,13 +930,27 @@ function mapLocalError(error, fallbackCode = 'GMAIL_API_FAILED') {
     };
   }
 
+  if (code === 'GMAIL_API_TIMEOUT') {
+    return {
+      success: false,
+      code: 'GMAIL_API_TIMEOUT',
+      error: 'Gmail took too long to respond. Try again in a moment.',
+      retriable: true,
+      retryAfterSec: 10,
+      trace: [localTrace('error', 'gmail_api_timeout', 'A Gmail API request timed out in the extension.', {
+        code: 'GMAIL_API_TIMEOUT',
+        details
+      })]
+    };
+  }
+
   return {
     success: false,
     code: fallbackCode,
     error: message,
     trace: [localTrace('error', 'gmail_api_failed', 'The Gmail API request failed in the extension.', {
       code: fallbackCode,
-      details: message
+      details
     })]
   };
 }

@@ -5,6 +5,7 @@
   const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
   const GMAIL_SCOPE = GMAIL_READ_SCOPE;
   const API_ROOT = 'https://www.googleapis.com/gmail/v1/users/me';
+  const GMAIL_API_TIMEOUT_MS = 20000;
   const DB_NAME = 'mailita-local-cache';
   const DB_VERSION = 1;
   const MESSAGE_STORE = 'messages';
@@ -187,6 +188,14 @@
 
   function uniqueScopes(...groups) {
     return [...new Set(groups.flat().filter(Boolean).map((scope) => String(scope).trim()).filter(Boolean))];
+  }
+
+  function assignErrorDetails(error, extras = {}) {
+    Object.entries(extras).forEach(([key, value]) => {
+      if (value == null || value === '') return;
+      error[key] = value;
+    });
+    return error;
   }
 
   function emailLocalPart(value) {
@@ -719,8 +728,12 @@
   }
 
   async function persistGrantedScopes(scopes) {
-    const existing = await metaGet(META_KEYS.grantedScopes, []);
-    await metaSet(META_KEYS.grantedScopes, uniqueScopes(existing, scopes));
+    try {
+      const existing = await metaGet(META_KEYS.grantedScopes, []);
+      await metaSet(META_KEYS.grantedScopes, uniqueScopes(existing, scopes));
+    } catch {
+      // Do not block auth if IndexedDB is temporarily unavailable.
+    }
   }
 
   async function getAuthToken(interactive = false, scopes = [GMAIL_READ_SCOPE]) {
@@ -784,16 +797,46 @@
       throw new Error('OAuth token was not returned by chrome.identity.');
     }
 
-    await metaSet('lastToken', auth.token);
+    try {
+      await metaSet('lastToken', auth.token);
+    } catch {
+      // Do not block Gmail API requests on cache persistence.
+    }
 
-    const response = await fetch(`${API_ROOT}${path}`, {
-      method: options.method || 'GET',
-      headers: {
-        Authorization: `Bearer ${auth.token}`,
-        ...(options.headers || {})
-      },
-      body: options.body
-    });
+    const controller = new AbortController();
+    const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+      ? Number(options.timeoutMs)
+      : GMAIL_API_TIMEOUT_MS;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(`${API_ROOT}${path}`, {
+        method: options.method || 'GET',
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+          ...(options.headers || {})
+        },
+        body: options.body,
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw assignErrorDetails(
+          new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)} seconds.`),
+          {
+            code: 'GMAIL_API_TIMEOUT',
+            path,
+            timeoutMs
+          }
+        );
+      }
+      throw assignErrorDetails(error instanceof Error ? error : new Error(String(error || 'Gmail API request failed.')), {
+        path
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (response.status === 401 && attempt === 0) {
       try {
@@ -824,18 +867,23 @@
     };
   }
 
-  async function fetchThreadsPage(query, limit, pageToken = '') {
+  async function fetchThreadsPage(query, limit, pageToken = '', interactive = false) {
     const params = new URLSearchParams({
       maxResults: String(limit)
     });
     if (query) params.set('q', query);
     if (pageToken) params.set('pageToken', pageToken);
 
-    const response = await fetchJson(`/threads?${params.toString()}`, { interactive: true });
+    const response = await fetchJson(`/threads?${params.toString()}`, { interactive });
     if (!response.ok) {
-      const error = new Error(response?.data?.error?.message || `Gmail threads list failed with HTTP ${response.status}.`);
-      error.status = response.status;
-      throw error;
+      throw assignErrorDetails(
+        new Error(response?.data?.error?.message || `Gmail threads list failed with HTTP ${response.status}.`),
+        {
+          status: response.status,
+          stage: 'threads_list',
+          path: `/threads?${params.toString()}`
+        }
+      );
     }
 
     return {
@@ -844,8 +892,8 @@
     };
   }
 
-  async function fetchThreads(query, limit) {
-    const page = await fetchThreadsPage(query, limit);
+  async function fetchThreads(query, limit, interactive = false) {
+    const page = await fetchThreadsPage(query, limit, '', interactive);
     return page.threads;
   }
 
@@ -866,23 +914,59 @@
   }
 
   async function fetchThreadDetails(threadIds) {
-    return mapWithConcurrency(threadIds, 6, async (threadId) => {
-      const response = await fetchJson(`/threads/${threadId}?format=full`, { interactive: false });
-      if (!response.ok) {
-        const error = new Error(response?.data?.error?.message || `Gmail thread fetch failed with HTTP ${response.status}.`);
-        error.status = response.status;
-        throw error;
+    const failures = [];
+    const threads = await mapWithConcurrency(threadIds, 6, async (threadId) => {
+      try {
+        const response = await fetchJson(`/threads/${threadId}?format=full`, { interactive: false });
+        if (!response.ok) {
+          throw assignErrorDetails(
+            new Error(response?.data?.error?.message || `Gmail thread fetch failed with HTTP ${response.status}.`),
+            {
+              status: response.status,
+              stage: 'thread_detail',
+              path: `/threads/${threadId}?format=full`,
+              threadId
+            }
+          );
+        }
+        return response.data;
+      } catch (error) {
+        failures.push({
+          threadId,
+          code: error?.code || '',
+          status: Number(error?.status || 0) || undefined,
+          stage: error?.stage || 'thread_detail',
+          message: error?.message || 'Unknown thread detail failure.'
+        });
+        return null;
       }
-      return response.data;
     });
+
+    const resolved = threads.filter(Boolean);
+    if (!resolved.length && failures.length) {
+      const first = failures[0];
+      throw assignErrorDetails(new Error(first.message || 'Gmail thread fetch failed.'), {
+        code: first.code || 'GMAIL_THREAD_FETCH_FAILED',
+        status: first.status,
+        stage: first.stage,
+        threadId: first.threadId
+      });
+    }
+
+    return resolved;
   }
 
-  async function fetchProfile() {
-    const response = await fetchJson('/profile', { interactive: true });
+  async function fetchProfile(interactive = false) {
+    const response = await fetchJson('/profile', { interactive });
     if (!response.ok) {
-      const error = new Error(response?.data?.error?.message || `Gmail profile fetch failed with HTTP ${response.status}.`);
-      error.status = response.status;
-      throw error;
+      throw assignErrorDetails(
+        new Error(response?.data?.error?.message || `Gmail profile fetch failed with HTTP ${response.status}.`),
+        {
+          status: response.status,
+          stage: 'profile',
+          path: '/profile'
+        }
+      );
     }
     return response.data;
   }
@@ -903,9 +987,9 @@
   async function fetchMessagesForQuery(query, limit) {
     const startedAt = Date.now();
     const threadLimit = Math.max(Number(limit || 20) * 2, 20);
-    const profile = await fetchProfile();
+    const profile = await fetchProfile(false);
     const accountEmail = normalizeEmail(profile?.emailAddress);
-    const threads = await fetchThreads(String(query || ''), threadLimit);
+    const threads = await fetchThreads(String(query || ''), threadLimit, false);
     const threadDetails = await fetchThreadDetails(threads.map((thread) => thread.id).filter(Boolean));
     const messages = threadDetails
       .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
@@ -927,9 +1011,16 @@
   async function fullRefresh(options = {}) {
     const startedAt = Date.now();
     const threadLimit = Math.max(Number(options.limit || 50) * 2, 50);
-    const profile = await fetchProfile();
-    const accountEmail = normalizeEmail(profile?.emailAddress);
-    const threads = await fetchThreads(String(options.query || ''), threadLimit);
+    const cached = await readCachedMailbox().catch(() => ({
+      messages: [],
+      accountEmail: '',
+      lastHistoryId: '',
+      lastSyncTime: '',
+      lastFullSyncAt: 0
+    }));
+    const profile = await fetchProfile(false);
+    const accountEmail = normalizeEmail(profile?.emailAddress || cached.accountEmail);
+    const threads = await fetchThreads(String(options.query || ''), threadLimit, false);
     const threadDetails = await fetchThreadDetails(threads.map((thread) => thread.id).filter(Boolean));
     const messages = threadDetails
       .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
@@ -941,26 +1032,38 @@
       .filter((value) => Number.isFinite(value) && value > 0);
     const lastHistoryId = historyIds.length ? String(Math.max(...historyIds)) : String(profile?.historyId || '');
 
-    await replaceMessages(messages);
-    await metaSetMany([
-      [META_KEYS.accountEmail, accountEmail],
-      [META_KEYS.grantedScopes, uniqueScopes([GMAIL_READ_SCOPE])],
-      [META_KEYS.lastHistoryId, lastHistoryId],
-      [META_KEYS.lastSyncTime, nowIso()],
-      [META_KEYS.lastFullSyncAt, Date.now()]
-    ]);
+    const existingScopes = await metaGet(META_KEYS.grantedScopes, []).catch(() => []);
+    const lastSyncTime = nowIso();
+    const shouldKeepCachedMessages = !messages.length && cached.messages.length > 0;
+    const finalMessages = shouldKeepCachedMessages ? cached.messages : messages;
 
-    const coverage = contentCoverage(messages);
+    try {
+      if (!shouldKeepCachedMessages) {
+        await replaceMessages(finalMessages);
+      }
+      await metaSetMany([
+        [META_KEYS.accountEmail, accountEmail],
+        [META_KEYS.grantedScopes, uniqueScopes(existingScopes, [GMAIL_READ_SCOPE])],
+        [META_KEYS.lastHistoryId, lastHistoryId],
+        [META_KEYS.lastSyncTime, lastSyncTime],
+        [META_KEYS.lastFullSyncAt, Date.now()]
+      ]);
+    } catch {
+      // Do not block live data from returning if cache persistence fails.
+    }
+
+    const coverage = contentCoverage(finalMessages);
     return {
       accountEmail,
-      messages,
+      messages: finalMessages,
       lastHistoryId,
-      lastSyncTime: nowIso(),
+      lastSyncTime,
       timings: timingEnvelope(startedAt, { imap_fetch_ms: Date.now() - startedAt }),
       debug: debugEnvelope('live', {
         ...coverage,
-        newestCachedAt: nowIso(),
-        limitPerFolder: threadLimit
+        newestCachedAt: lastSyncTime,
+        limitPerFolder: threadLimit,
+        usedCachedMessages: shouldKeepCachedMessages
       })
     };
   }
@@ -986,7 +1089,14 @@
   }
 
   async function ensureFreshMailbox(options = {}) {
-    const cached = await readCachedMailbox();
+    const cached = await readCachedMailbox().catch(() => ({
+      messages: [],
+      accountEmail: '',
+      lastHistoryId: '',
+      lastSyncTime: '',
+      lastFullSyncAt: 0,
+      timings: timingEnvelope(Date.now(), { cache_read_ms: 0 })
+    }));
     const useCache = !options.forceSync && cached.messages.length > 0 && (Date.now() - cached.lastFullSyncAt) < CACHE_TTL_MS;
     if (useCache) {
       return {
@@ -999,7 +1109,23 @@
       };
     }
 
-    const refreshed = await fullRefresh(options);
+    let refreshed;
+    try {
+      refreshed = await fullRefresh(options);
+    } catch (error) {
+      if (cached.messages.length) {
+        return {
+          ...cached,
+          debug: debugEnvelope('stale-cache', {
+            ...contentCoverage(cached.messages),
+            newestCachedAt: cached.lastSyncTime || null,
+            refreshError: error?.message || 'Unknown refresh failure.'
+          }),
+          source: 'gmail_api_local_stale_cache'
+        };
+      }
+      throw error;
+    }
     return {
       ...refreshed,
       source: 'gmail_api_local'
@@ -1013,14 +1139,14 @@
       throw error;
     }
 
-    const auth = await getAuthToken(true, [GMAIL_READ_SCOPE]);
+    const auth = await getAuthToken(true, [GMAIL_READ_SCOPE, GMAIL_SEND_SCOPE]);
     if (!auth.token) {
       const error = new Error('Google did not return an OAuth token.');
       error.code = 'AUTH_FAILED';
       throw error;
     }
 
-    const profile = await fetchProfile();
+    const profile = await fetchProfile(false);
     const accountEmail = normalizeEmail(profile?.emailAddress);
     if (!accountEmail) {
       const error = new Error('Google did not return the Gmail account address.');
@@ -1028,13 +1154,17 @@
       throw error;
     }
 
-    await metaSetMany([
-      [META_KEYS.accountEmail, accountEmail],
-      [META_KEYS.grantedScopes, auth.grantedScopes],
-      [META_KEYS.lastHistoryId, String(profile?.historyId || '')],
-      [META_KEYS.lastSyncTime, ''],
-      [META_KEYS.lastFullSyncAt, 0]
-    ]);
+    try {
+      await metaSetMany([
+        [META_KEYS.accountEmail, accountEmail],
+        [META_KEYS.grantedScopes, auth.grantedScopes],
+        [META_KEYS.lastHistoryId, String(profile?.historyId || '')],
+        [META_KEYS.lastSyncTime, ''],
+        [META_KEYS.lastFullSyncAt, 0]
+      ]);
+    } catch {
+      // Allow successful OAuth to continue even if cache initialization is unavailable.
+    }
 
     return {
       accountEmail,
@@ -1081,9 +1211,9 @@
         gmailQueryForContact(targetEmail, targetKey),
         scopeQuery(scope)
       );
-      const page = await fetchThreadsPage(query, pageSize * 2, cursor);
+      const page = await fetchThreadsPage(query, pageSize * 2, cursor, false);
       const threadDetails = await fetchThreadDetails(page.threads.map((thread) => thread.id).filter(Boolean));
-      const accountEmail = cached.accountEmail || normalizeEmail((await fetchProfile())?.emailAddress);
+      const accountEmail = cached.accountEmail || normalizeEmail(await metaGet(META_KEYS.accountEmail, '').catch(() => '')) || normalizeEmail((await fetchProfile(false))?.emailAddress);
       const remoteMessages = threadDetails
         .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
         .map((message) => normalizeMessage(message, accountEmail))
