@@ -986,7 +986,7 @@
 
   async function fetchMessagesForQuery(query, limit) {
     const startedAt = Date.now();
-    const threadLimit = Math.max(Number(limit || 20) * 2, 20);
+    const threadLimit = Math.max(Number(limit || 20), 20);
     const profile = await fetchProfile(false);
     const accountEmail = normalizeEmail(profile?.emailAddress);
     const threads = await fetchThreads(String(query || ''), threadLimit, false);
@@ -1010,7 +1010,7 @@
 
   async function fullRefresh(options = {}) {
     const startedAt = Date.now();
-    const threadLimit = Math.max(Number(options.limit || 50) * 2, 50);
+    const threadLimit = Math.max(Number(options.limit || 50), 20);
     const cached = await readCachedMailbox().catch(() => ({
       messages: [],
       accountEmail: '',

@@ -50,6 +50,9 @@ const state = {
   contactMessagesByKey: {},
   contactLoadStateByKey: {},
   summaryRequestGeneration: 0,
+  summaryPageSize: 50,
+  summaryCanLoadMore: true,
+  summaryLoadInFlight: false,
   contactRequestGenerationByKey: {},
   searchRequestGeneration: 0,
   filter: 'all',
@@ -144,6 +147,9 @@ function buildDebugStateSnapshot() {
     searchQuery: state.searchQuery || '',
     selectedThreadId: state.selectedThreadId || '',
     summaries: Array.isArray(state.contactSummaries) ? state.contactSummaries.length : 0,
+    summaryPageSize: numericValue(state.summaryPageSize, 50),
+    summaryCanLoadMore: Boolean(state.summaryCanLoadMore),
+    summaryLoadInFlight: Boolean(state.summaryLoadInFlight),
     messages: Array.isArray(state.messages) ? state.messages.length : 0,
     accountEmail: state.accountSnapshot?.accountEmail || '',
     lastSyncTime: state.accountSnapshot?.lastSyncTime || '',
@@ -3018,6 +3024,8 @@ async function loadMessageSummaries(options = {}) {
   const requestGeneration = numericValue(state.summaryRequestGeneration, 0) + 1;
   state.summaryRequestGeneration = requestGeneration;
   const requestedFolder = options.folder || 'all';
+  const requestedLimit = Math.max(Number(options.limit || state.summaryPageSize || 50), 20);
+  state.summaryLoadInFlight = true;
 
   if (!silent) {
     setStateCard('loading', 'Loading conversations...');
@@ -3025,22 +3033,25 @@ async function loadMessageSummaries(options = {}) {
   pushDebugEvent('mailbox', 'Requesting mailbox summaries', {
     silent,
     requestedFolder,
+    requestedLimit,
     forceSync: Boolean(options.forceSync),
     trackActivity: Boolean(options.trackActivity)
   });
 
   const response = await sendWorker('FETCH_MESSAGE_SUMMARIES', {
     folder: requestedFolder,
-    limit: 50,
+    limit: requestedLimit,
     forceSync: Boolean(options.forceSync),
     trackActivity: Boolean(options.trackActivity)
   });
 
   if (state.summaryRequestGeneration !== requestGeneration) {
+    state.summaryLoadInFlight = false;
     return response;
   }
 
   if (!response?.success) {
+    state.summaryLoadInFlight = false;
     state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
     state.lastMailboxSource = 'summary-error';
     state.lastMailboxTimings = normalizeTimings(response?.timings);
@@ -3079,6 +3090,8 @@ async function loadMessageSummaries(options = {}) {
   clearRetryTimer();
   state.mailboxMode = 'summary';
   state.useLegacyMailboxFallback = false;
+  state.summaryLoadInFlight = false;
+  state.summaryPageSize = requestedLimit;
   state.messages = [];
   state.mailboxAutoRefresh = {
     attempted: false,
@@ -3095,12 +3108,19 @@ async function loadMessageSummaries(options = {}) {
   state.contactSummaries = Array.isArray(response.summaries)
     ? response.summaries.map(normalizeContactSummary).filter((summary) => summary.contactKey)
     : [];
+  state.summaryCanLoadMore = state.contactSummaries.length >= requestedLimit;
 
   if (state.selectedThreadId && !findSummaryByThreadId(state.selectedThreadId)) {
     state.selectedThreadId = '';
     state.detailLastThreadId = '';
     state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
+  }
+
+  if (state.connected) {
+    state.shellUnlocked = true;
+    state.guideReviewOpen = false;
+    applyGmailLayoutMode();
   }
 
   renderThreads();
@@ -3121,6 +3141,37 @@ async function loadMessageSummaries(options = {}) {
     }).catch(() => {});
   }
 
+  return response;
+}
+
+async function loadMoreMessageSummaries() {
+  if (usingLegacyMailboxFlow() || state.mailboxMode === 'search') return null;
+  if (state.summaryLoadInFlight || !state.summaryCanLoadMore) return null;
+
+  const currentList = document.getElementById('gmailUnifiedList');
+  const previousScrollTop = currentList?.scrollTop || 0;
+  const nextLimit = Math.max(20, numericValue(state.summaryPageSize, 50) + 50);
+  pushDebugEvent('mailbox', 'Requesting next summary page', {
+    previousLimit: state.summaryPageSize,
+    nextLimit
+  });
+
+  const response = await loadMessageSummaries({
+    silent: true,
+    forceSync: true,
+    limit: nextLimit
+  });
+
+  if (currentList) {
+    window.requestAnimationFrame(() => {
+      currentList.scrollTop = previousScrollTop;
+    });
+  }
+
+  pushDebugEvent(response?.success ? 'mailbox' : 'mailbox:error', response?.success ? 'Next summary page loaded' : 'Next summary page failed', {
+    nextLimit,
+    response
+  }, response?.success ? 'success' : 'error');
   return response;
 }
 
@@ -3163,6 +3214,44 @@ async function loadMessages(options = {}) {
   return fallbackResponse;
 }
 
+function primeMailboxInBackground(options = {}) {
+  const run = async () => {
+    const response = await loadMessages(options);
+    if (!response?.success) {
+      pushDebugEvent('mailbox:error', 'Background mailbox load failed', response, 'error');
+      if (!state.contactSummaries.length && !state.messages.length) {
+        const errorMessage = failureMessageForResponse(response, 'Unable to load conversations right now.');
+        setStateCard('error', errorMessage, true);
+        setConnectUiState(`Connected, but mailbox loading failed. ${errorMessage}`, true);
+      }
+      return response;
+    }
+
+    pushDebugEvent('mailbox', 'Background mailbox load completed', {
+      summaries: state.contactSummaries.length,
+      messages: state.messages.length,
+      source: response.source
+    }, 'success');
+    setConnectUiState('');
+    startAutoRefresh();
+    return response;
+  };
+
+  return run().catch((error) => {
+    const message = error?.message || String(error);
+    pushDebugEvent('mailbox:error', 'Background mailbox load crashed', { message }, 'error');
+    if (!state.contactSummaries.length && !state.messages.length) {
+      setStateCard('error', 'Unable to load conversations right now.', true);
+      setConnectUiState(`Connected, but mailbox loading failed. ${message}`, true);
+    }
+    return {
+      success: false,
+      code: error?.code || 'MAILBOX_LOAD_FAILED',
+      error: message
+    };
+  });
+}
+
 function setFilter(filter) {
   state.filter = filter;
 
@@ -3192,7 +3281,7 @@ async function handleSearch(query) {
 
   if (!trimmed) {
     state.mailboxMode = state.useLegacyMailboxFallback ? 'legacy' : 'summary';
-    await loadMessages();
+    await loadMessages({ limit: state.summaryPageSize || 50 });
     return;
   }
 
@@ -3308,6 +3397,10 @@ async function refreshGuideAndAuthState() {
   const storageConnected = Boolean(storage?.success && storage.connected);
   const preserveUnlockedShell = Boolean(state.shellUnlocked && !storageConnected);
   state.connected = storageConnected || preserveUnlockedShell || (state.connectInFlight && state.connected);
+  if (storageConnected) {
+    state.shellUnlocked = true;
+    state.guideReviewOpen = false;
+  }
   state.guideState = normalizeGuideState(guide?.success ? guide.guideState : state.guideState);
   state.setupDiagnostics = normalizeSetupDiagnostics(storage?.setupDiagnostics);
   state.uiSettings = normalizeUiSettings(uiSettings);
@@ -3374,6 +3467,8 @@ function applyGmailLayoutMode() {
   const showGuide = !shellAccessible || state.guideReviewOpen;
   shell.hidden = !shellAccessible;
   onboardingOverlay.hidden = !showGuide;
+  shell.style.display = shellAccessible ? '' : 'none';
+  onboardingOverlay.style.display = showGuide ? 'grid' : 'none';
   if (guideClose) guideClose.hidden = !state.connected || !state.guideReviewOpen;
 
   updateGuideProgressUI();
@@ -3431,7 +3526,16 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedRetryBtn')?.addEventListener('click', () => {
-    loadMessages({ forceSync: false, trackActivity: true });
+    loadMessages({ forceSync: false, trackActivity: true, limit: state.summaryPageSize || 50 });
+  });
+
+  sidebar.querySelector('#gmailUnifiedList')?.addEventListener('scroll', () => {
+    if (usingLegacyMailboxFlow() || state.mailboxMode === 'search') return;
+    const list = document.getElementById('gmailUnifiedList');
+    if (!list) return;
+    const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 180;
+    if (!nearBottom) return;
+    loadMoreMessageSummaries().catch(() => {});
   });
 
   sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
@@ -3800,24 +3904,18 @@ async function connectFromGuide() {
       mailboxMode: state.mailboxMode
     });
 
-    const mailboxResponse = await loadMessages({
-      forceSync: false,
-      trackActivity: true
-    });
-
-    if (!mailboxResponse?.success) {
-      const errorMessage = failureMessageForResponse(mailboxResponse, 'Unable to load conversations right now.');
-      setConnectUiState(`Connected, but mailbox loading failed. ${errorMessage}`, true);
-      setStateCard('error', errorMessage, true);
-      return;
-    }
-
     setConnectUiState('');
-    startAutoRefresh();
-    pushDebugEvent('connect', 'Connect flow completed', {
-      summaries: state.contactSummaries.length,
-      messages: state.messages.length
-    }, 'success');
+    primeMailboxInBackground({
+      forceSync: false,
+      trackActivity: true,
+      limit: 50
+    }).then((mailboxResponse) => {
+      if (!mailboxResponse?.success) return;
+      pushDebugEvent('connect', 'Connect flow completed', {
+        summaries: state.contactSummaries.length,
+        messages: state.messages.length
+      }, 'success');
+    });
   } catch (error) {
     pushDebugEvent('connect', 'Connect flow crashed', {
       code: error?.code || '',
@@ -3925,7 +4023,7 @@ async function bootGmailSurface() {
                 return;
               }
               if (state.connected && state.messages.length === 0 && state.contactSummaries.length === 0) {
-                await loadMessages();
+                primeMailboxInBackground({ limit: state.summaryPageSize || 50 });
               }
             })
             .catch(() => {});
@@ -3936,7 +4034,8 @@ async function bootGmailSurface() {
           loadMessageSummaries({
             forceSync: false,
             trackActivity: false,
-            silent: true
+            silent: true,
+            limit: state.summaryPageSize || 50
           }).catch(() => {});
         }
         if (changes.setupDiagnostics) {
@@ -3955,7 +4054,7 @@ async function bootGmailSurface() {
     ensureMailitaSurfaceObserver();
 
     if (state.connected) {
-      await loadMessages();
+      primeMailboxInBackground({ limit: 50 });
       sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
       startAutoRefresh();
     }
