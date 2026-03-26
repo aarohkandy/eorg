@@ -63,6 +63,7 @@ const state = {
   contactDebug: {},
   guideReviewOpen: false,
   connectInFlight: false,
+  shellUnlocked: false,
   uiSettings: null,
   settingsOpen: false,
   accountSnapshot: {
@@ -3080,19 +3081,22 @@ async function refreshGuideAndAuthState() {
     readUiSettings()
   ]);
 
-  state.connected = Boolean(storage?.success && storage.connected);
+  const storageConnected = Boolean(storage?.success && storage.connected);
+  const preserveUnlockedShell = Boolean(state.shellUnlocked && !storageConnected);
+  state.connected = storageConnected || preserveUnlockedShell || (state.connectInFlight && state.connected);
   state.guideState = normalizeGuideState(guide?.success ? guide.guideState : state.guideState);
   state.setupDiagnostics = normalizeSetupDiagnostics(storage?.setupDiagnostics);
   state.uiSettings = normalizeUiSettings(uiSettings);
   state.accountSnapshot = {
-    connected: Boolean(storage?.connected),
-    accountEmail: storage?.accountEmail || storage?.userEmail || '',
+    connected: storageConnected || preserveUnlockedShell || (state.connectInFlight && state.accountSnapshot.connected),
+    accountEmail: storage?.accountEmail || storage?.userEmail || ((preserveUnlockedShell || state.connectInFlight) ? state.accountSnapshot.accountEmail : ''),
     mailSource: storage?.mailSource || 'gmail_api_local',
     lastSyncTime: storage?.lastSyncTime || '',
     onboardingComplete: Boolean(storage?.onboardingComplete)
   };
 
-  if (!state.connected) {
+  if (!state.connected && !state.connectInFlight && !preserveUnlockedShell) {
+    state.shellUnlocked = false;
     state.selectedThreadId = '';
     state.detailLastThreadId = '';
     state.detailSnapToLatestThreadId = '';
@@ -3134,8 +3138,9 @@ function applyGmailLayoutMode() {
   }
   applyThemeSettings();
 
-  const showGuide = !state.connected || state.guideReviewOpen;
-  shell.hidden = !state.connected;
+  const shellAccessible = state.connected || state.shellUnlocked;
+  const showGuide = !shellAccessible || state.guideReviewOpen;
+  shell.hidden = !shellAccessible;
   onboardingOverlay.hidden = !showGuide;
   if (guideClose) guideClose.hidden = !state.connected || !state.guideReviewOpen;
 
@@ -3235,6 +3240,7 @@ function bindGuideEvents(sidebar) {
   sidebar.querySelector('#gmailUnifiedSettingsDisconnectBtn')?.addEventListener('click', async () => {
     const response = await sendWorker('DISCONNECT_GOOGLE');
     if (!response?.success) return;
+    state.shellUnlocked = false;
     state.messages = [];
     resetSectionedMailboxCaches();
     state.selectedThreadId = '';
@@ -3454,12 +3460,25 @@ async function connectFromGuide() {
         }
       }
     });
-    setConnectUiState('Connected. Loading your messages...');
     state.connected = true;
+    state.shellUnlocked = true;
+    state.accountSnapshot = {
+      ...state.accountSnapshot,
+      connected: true,
+      accountEmail: String(response.accountEmail || response.email || state.accountSnapshot.accountEmail || '').trim().toLowerCase(),
+      mailSource: 'gmail_api_local',
+      onboardingComplete: true
+    };
     state.guideReviewOpen = false;
+    setConnectUiState('');
     const sidebar = document.getElementById('gmailUnifiedSidebar');
     sidebar?.classList.add('gmail-unified-unlocking');
     applyGmailLayoutMode();
+    if (state.contactSummaries.length || state.messages.length) {
+      renderThreads();
+    } else {
+      setStateCard('loading', 'Loading conversations...');
+    }
     window.setTimeout(() => {
       sidebar?.classList.remove('gmail-unified-unlocking');
     }, 500);
@@ -3467,7 +3486,6 @@ async function connectFromGuide() {
     await refreshGuideAndAuthState();
     state.useLegacyMailboxFallback = false;
     state.mailboxMode = 'summary';
-    resetSectionedMailboxCaches();
     applyGmailLayoutMode();
 
     const mailboxResponse = await loadMessages({
