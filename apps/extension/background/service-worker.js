@@ -1080,22 +1080,24 @@ async function handleLocalMailAction(action, payload = {}) {
   if (action === 'FETCH_MESSAGE_SUMMARIES') {
     const response = await MailitaGmailLocal.loadSummaries({
       limit: Number(payload.limit || 50),
+      cursor: payload.cursor,
+      append: Boolean(payload.append),
       forceSync: Boolean(payload.forceSync)
     });
     const snapshot = await MailitaGmailLocal.snapshot();
-    await persistLocalSession({
-      ...snapshot,
-      lastSyncTime: response?.timings ? nowIso() : snapshot.lastSyncTime
-    });
+    await persistLocalSession(snapshot);
     return {
       success: true,
       summaries: response.summaries,
       count: response.count,
+      loadedCount: Number(response.loadedCount || response.count || 0),
+      nextCursor: String(response.nextCursor || ''),
+      hasMore: Boolean(response.hasMore),
       source: response.source,
       debug: response.debug,
       timings: response.timings,
       trace: [localTrace('success', 'local_summary_loaded', 'Loaded mailbox summaries from the Gmail API.', {
-        details: `count=${response.count}`
+        details: `count=${response.count}; loadedCount=${Number(response.loadedCount || response.count || 0)}; hasMore=${Boolean(response.hasMore)}`
       })]
     };
   }
@@ -1699,6 +1701,12 @@ async function handleBackendAction(message) {
       limit: String(payload.limit || 50),
       forceSync: String(Boolean(payload.forceSync))
     });
+    if (payload.cursor) {
+      params.set('cursor', String(payload.cursor));
+    }
+    if (payload.append) {
+      params.set('append', 'true');
+    }
 
     const response = await fetchBackend(`/api/messages?${params.toString()}`);
     if (response.success) {
@@ -1756,6 +1764,9 @@ async function handleBackendAction(message) {
       await appendSetupDiagnostics(mergeTraceLists(backendTrace, extTrace));
       return {
         ...response,
+        loadedCount: Number(response.loadedCount || response.count || (Array.isArray(response.summaries) ? response.summaries.length : 0)),
+        nextCursor: String(response.nextCursor || ''),
+        hasMore: Boolean(response.hasMore),
         trace: mergeTraceLists(startTrace, backendTrace, extTrace)
       };
     }

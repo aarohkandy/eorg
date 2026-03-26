@@ -46,13 +46,22 @@ const GUIDE_SUBSTEP_COPY = {
 
 const state = {
   messages: [],
-  contactSummaries: [],
+  summaryItems: [],
+  summaryCursor: '',
+  summaryHasMore: false,
+  summaryInitialLoadInFlight: false,
+  summaryAppendInFlight: false,
+  summaryAppliedGeneration: 0,
+  summaryLastRequestId: 0,
+  summaryLastIgnoredReason: '',
+  summaryWorkerCount: 0,
+  summaryNormalizedCount: 0,
+  summaryRenderedCount: 0,
+  summaryLoadedCount: 0,
   contactMessagesByKey: {},
   contactLoadStateByKey: {},
   summaryRequestGeneration: 0,
   summaryPageSize: 50,
-  summaryCanLoadMore: true,
-  summaryLoadInFlight: false,
   contactRequestGenerationByKey: {},
   searchRequestGeneration: 0,
   filter: 'all',
@@ -120,7 +129,11 @@ function debugEventPayload(input, depth = 0) {
   if (depth > 2) return '[max-depth]';
   if (input == null) return input;
   if (Array.isArray(input)) {
-    return input.slice(0, 12).map((item) => debugEventPayload(item, depth + 1));
+    return {
+      kind: 'array',
+      length: input.length,
+      sample: input.slice(0, 6).map((item) => debugEventPayload(item, depth + 1))
+    };
   }
   if (typeof input === 'object') {
     const out = {};
@@ -146,10 +159,19 @@ function buildDebugStateSnapshot() {
     filter: state.filter,
     searchQuery: state.searchQuery || '',
     selectedThreadId: state.selectedThreadId || '',
-    summaries: Array.isArray(state.contactSummaries) ? state.contactSummaries.length : 0,
+    summaries: Array.isArray(state.summaryItems) ? state.summaryItems.length : 0,
     summaryPageSize: numericValue(state.summaryPageSize, 50),
-    summaryCanLoadMore: Boolean(state.summaryCanLoadMore),
-    summaryLoadInFlight: Boolean(state.summaryLoadInFlight),
+    summaryCursor: state.summaryCursor || '',
+    summaryHasMore: Boolean(state.summaryHasMore),
+    summaryInitialLoadInFlight: Boolean(state.summaryInitialLoadInFlight),
+    summaryAppendInFlight: Boolean(state.summaryAppendInFlight),
+    summaryAppliedGeneration: numericValue(state.summaryAppliedGeneration, 0),
+    summaryLastRequestId: numericValue(state.summaryLastRequestId, 0),
+    summaryLastIgnoredReason: state.summaryLastIgnoredReason || '',
+    summaryWorkerCount: numericValue(state.summaryWorkerCount, 0),
+    summaryNormalizedCount: numericValue(state.summaryNormalizedCount, 0),
+    summaryRenderedCount: numericValue(state.summaryRenderedCount, 0),
+    summaryLoadedCount: numericValue(state.summaryLoadedCount, 0),
     messages: Array.isArray(state.messages) ? state.messages.length : 0,
     accountEmail: state.accountSnapshot?.accountEmail || '',
     lastSyncTime: state.accountSnapshot?.lastSyncTime || '',
@@ -231,6 +253,48 @@ function workerTimeoutMs(action, options = {}) {
   return WORKER_TIMEOUT_BY_ACTION[action] || 20000;
 }
 
+function summarizeWorkerResponse(action, response) {
+  const base = {
+    success: Boolean(response?.success),
+    code: response?.code || '',
+    error: response?.error || ''
+  };
+
+  if (action === 'FETCH_MESSAGE_SUMMARIES') {
+    return {
+      ...base,
+      count: numericValue(response?.count, 0),
+      loadedCount: numericValue(response?.loadedCount, 0),
+      summariesLength: Array.isArray(response?.summaries) ? response.summaries.length : 0,
+      nextCursor: String(response?.nextCursor || ''),
+      hasMore: Boolean(response?.hasMore),
+      source: response?.source || ''
+    };
+  }
+
+  if (action === 'FETCH_CONTACT_MESSAGES') {
+    return {
+      ...base,
+      count: numericValue(response?.count, 0),
+      messagesLength: Array.isArray(response?.messages) ? response.messages.length : 0,
+      nextCursor: String(response?.nextCursor || ''),
+      hasMore: Boolean(response?.hasMore),
+      source: response?.source || ''
+    };
+  }
+
+  if (action === 'SEARCH_MESSAGES') {
+    return {
+      ...base,
+      count: numericValue(response?.count, 0),
+      messagesLength: Array.isArray(response?.messages) ? response.messages.length : 0,
+      source: response?.source || ''
+    };
+  }
+
+  return response;
+}
+
 function sendWorker(action, payload = {}, options = {}) {
   const requestId = debugState.counter + 1;
   const timeoutMs = workerTimeoutMs(action, options);
@@ -252,7 +316,7 @@ function sendWorker(action, payload = {}, options = {}) {
       pushDebugEvent(
         response?.success === false ? 'worker:error' : 'worker:response',
         `${action} completed`,
-        { requestId, response },
+        { requestId, response: summarizeWorkerResponse(action, response) },
         response?.success === false ? 'error' : 'success'
       );
       return response;
@@ -497,6 +561,50 @@ function normalizeContactSummary(input) {
   };
 }
 
+function currentSummaryItems() {
+  return Array.isArray(state.summaryItems) ? state.summaryItems : [];
+}
+
+function replaceSummaryItems(items) {
+  const normalized = Array.isArray(items)
+    ? items.map(normalizeContactSummary).filter((summary) => summary.contactKey)
+    : [];
+  state.summaryItems = [...normalized].sort((left, right) =>
+    new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime());
+  state.summaryRenderedCount = state.summaryItems.length;
+  return normalized;
+}
+
+function mergeSummaryItems(existingItems, incomingItems) {
+  const byKey = new Map();
+  (Array.isArray(existingItems) ? existingItems : []).forEach((item) => {
+    const normalized = normalizeContactSummary(item);
+    if (normalized.contactKey) byKey.set(normalized.contactKey, normalized);
+  });
+  (Array.isArray(incomingItems) ? incomingItems : []).forEach((item) => {
+    const normalized = normalizeContactSummary(item);
+    if (!normalized.contactKey) return;
+    const existing = byKey.get(normalized.contactKey);
+    if (!existing) {
+      byKey.set(normalized.contactKey, normalized);
+      return;
+    }
+    const existingDate = new Date(existing.latestDate || 0).getTime();
+    const incomingDate = new Date(normalized.latestDate || 0).getTime();
+    const merged = incomingDate >= existingDate
+      ? { ...existing, ...normalized }
+      : { ...normalized, ...existing };
+    merged.messageCount = Math.max(numericValue(existing.messageCount, 0), numericValue(normalized.messageCount, 0));
+    merged.threadCount = Math.max(numericValue(existing.threadCount, 0), numericValue(normalized.threadCount, 0));
+    merged.unreadCount = Math.max(numericValue(existing.unreadCount, 0), numericValue(normalized.unreadCount, 0));
+    merged.inboxCount = Math.max(numericValue(existing.inboxCount, 0), numericValue(normalized.inboxCount, 0));
+    merged.sentCount = Math.max(numericValue(existing.sentCount, 0), numericValue(normalized.sentCount, 0));
+    merged.hasMissingContent = Boolean(existing.hasMissingContent || normalized.hasMissingContent);
+    byKey.set(normalized.contactKey, normalizeContactSummary(merged));
+  });
+  return [...byKey.values()].sort((a, b) => new Date(b.latestDate).getTime() - new Date(a.latestDate).getTime());
+}
+
 function defaultContactLoadState() {
   return {
     attempted: false,
@@ -534,11 +642,24 @@ function requestDetailSnapToLatest(threadId = state.selectedThreadId) {
 }
 
 function resetSectionedMailboxCaches(options = {}) {
-  state.contactSummaries = [];
+  state.summaryItems = [];
+  state.summaryCursor = '';
+  state.summaryHasMore = false;
+  state.summaryInitialLoadInFlight = false;
+  state.summaryAppendInFlight = false;
+  state.summaryAppliedGeneration = 0;
+  state.summaryLastRequestId = 0;
+  state.summaryLastIgnoredReason = '';
+  state.summaryWorkerCount = 0;
+  state.summaryNormalizedCount = 0;
+  state.summaryRenderedCount = 0;
+  state.summaryLoadedCount = 0;
   state.contactMessagesByKey = {};
   state.contactLoadStateByKey = {};
   state.contactRequestGenerationByKey = {};
-  state.summaryRequestGeneration += 1;
+  if (options.invalidateRequests !== false) {
+    state.summaryRequestGeneration += 1;
+  }
   if (options.resetContactDebug !== false) {
     state.contactDebug = {};
   }
@@ -699,7 +820,7 @@ function getContactDebugState(threadId) {
 }
 
 function findSummaryByThreadId(threadId) {
-  return state.contactSummaries.find((summary) => summary.contactKey === threadId) || null;
+  return currentSummaryItems().find((summary) => summary.contactKey === threadId) || null;
 }
 
 async function appendUiActivity(entry, options = {}) {
@@ -1900,7 +2021,7 @@ function currentThreadGroups() {
       .filter((group) => summaryVisibleInCurrentFilter(group.summary)));
   }
 
-  return sortThreadGroups(state.contactSummaries
+  return sortThreadGroups(currentSummaryItems()
     .filter((summary) => summaryVisibleInCurrentFilter(summary))
     .map((summary) => {
       const allMessages = state.contactMessagesByKey[summary.contactKey] || [];
@@ -1921,12 +2042,15 @@ function findSelectedGroup() {
 function upsertContactSummary(summary) {
   if (!summary?.contactKey) return;
   const next = normalizeContactSummary(summary);
-  const existingIndex = state.contactSummaries.findIndex((item) => item.contactKey === next.contactKey);
+  const existingIndex = currentSummaryItems().findIndex((item) => item.contactKey === next.contactKey);
   if (existingIndex >= 0) {
-    state.contactSummaries[existingIndex] = next;
+    state.summaryItems[existingIndex] = next;
   } else {
-    state.contactSummaries = [next, ...state.contactSummaries];
+    state.summaryItems = [next, ...currentSummaryItems()];
   }
+  state.summaryItems = [...currentSummaryItems()].sort((left, right) =>
+    new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime());
+  state.summaryRenderedCount = currentSummaryItems().length;
 }
 
 function groupDisplayName(group) {
@@ -2287,10 +2411,31 @@ function renderThreadDebug(group) {
   if (!log || !summary || !status) return;
 
   if (!group) {
-    summary.textContent = 'Open a conversation to inspect exactly what the UI received.';
+    summary.textContent = [
+      `Rail metrics: worker ${numericValue(state.summaryWorkerCount, 0)}`,
+      `normalized ${numericValue(state.summaryNormalizedCount, 0)}`,
+      `rendered ${numericValue(state.summaryRenderedCount, 0)}`,
+      `loaded ${numericValue(state.summaryLoadedCount, 0)}`,
+      `cursor ${state.summaryCursor ? 'present' : 'none'}`,
+      `hasMore ${Boolean(state.summaryHasMore)}`
+    ].join(' · ');
     status.hidden = true;
     status.textContent = '';
-    setDebugText(log, 'Select a conversation to generate a debug report.');
+    setDebugText(log, [
+      `summary_worker_count: ${numericValue(state.summaryWorkerCount, 0)}`,
+      `summary_normalized_count: ${numericValue(state.summaryNormalizedCount, 0)}`,
+      `summary_rendered_count: ${numericValue(state.summaryRenderedCount, 0)}`,
+      `summary_loaded_count: ${numericValue(state.summaryLoadedCount, 0)}`,
+      `summary_cursor: ${state.summaryCursor || 'none'}`,
+      `summary_has_more: ${Boolean(state.summaryHasMore)}`,
+      `summary_initial_load_in_flight: ${Boolean(state.summaryInitialLoadInFlight)}`,
+      `summary_append_in_flight: ${Boolean(state.summaryAppendInFlight)}`,
+      `summary_applied_generation: ${numericValue(state.summaryAppliedGeneration, 0)}`,
+      `summary_last_request_id: ${numericValue(state.summaryLastRequestId, 0)}`,
+      `summary_last_ignored_reason: ${state.summaryLastIgnoredReason || 'none'}`,
+      '',
+      'Open a conversation to generate a per-thread debug report.'
+    ].join('\n'));
     return;
   }
 
@@ -2376,10 +2521,17 @@ function renderThreads() {
 
   const threadGroups = currentThreadGroups();
   const previousScrollTop = list.scrollTop;
+  state.summaryRenderedCount = threadGroups.length;
 
   if (!threadGroups.length) {
-    setStateCard('empty', 'No messages found.');
+    if (state.summaryInitialLoadInFlight) {
+      setStateCard('loading', 'Loading conversations...');
+    } else {
+      setStateCard('empty', 'No conversations found yet.');
+    }
     list.innerHTML = '';
+    renderThreadDebug(null);
+    renderDebugPanel();
     return;
   }
 
@@ -2451,6 +2603,13 @@ function renderThreads() {
     list.appendChild(row);
   });
 
+  if (state.summaryAppendInFlight || state.summaryHasMore) {
+    const tail = document.createElement('div');
+    tail.className = 'gmail-unified-thread-tail-loader';
+    tail.textContent = state.summaryAppendInFlight ? 'Loading more conversations...' : 'Scroll for more';
+    list.appendChild(tail);
+  }
+
   list.scrollTop = previousScrollTop;
 
   const selectedGroup = findSelectedGroup();
@@ -2469,6 +2628,7 @@ function renderThreads() {
     renderThreadDebug(null);
     updateMainPanelVisibility();
   }
+  renderDebugPanel();
 }
 
 async function maybeDebugRefetchContact(group) {
@@ -3020,20 +3180,42 @@ async function loadContactMessagesForThread(threadId, options = {}) {
 }
 
 async function loadMessageSummaries(options = {}) {
-  const silent = Boolean(options.silent);
-  const requestGeneration = numericValue(state.summaryRequestGeneration, 0) + 1;
-  state.summaryRequestGeneration = requestGeneration;
+  const append = Boolean(options.append);
+  const silent = Boolean(options.silent || append || currentSummaryItems().length > 0);
   const requestedFolder = options.folder || 'all';
   const requestedLimit = Math.max(Number(options.limit || state.summaryPageSize || 50), 20);
-  state.summaryLoadInFlight = true;
+  const requestedCursor = String(options.cursor || '').trim();
 
-  if (!silent) {
+  if (append) {
+    if (state.summaryAppendInFlight || !state.summaryHasMore) {
+      state.summaryLastIgnoredReason = state.summaryAppendInFlight ? 'append_in_flight' : 'append_without_more';
+      renderDebugPanel();
+      return { success: true, skipped: true, code: 'SUMMARY_APPEND_SKIPPED' };
+    }
+    state.summaryAppendInFlight = true;
+  } else {
+    if (state.summaryInitialLoadInFlight) {
+      state.summaryLastIgnoredReason = 'initial_in_flight';
+      renderDebugPanel();
+      return { success: true, skipped: true, code: 'SUMMARY_INITIAL_SKIPPED' };
+    }
+    state.summaryInitialLoadInFlight = true;
+  }
+
+  const requestGeneration = numericValue(state.summaryRequestGeneration, 0) + 1;
+  state.summaryRequestGeneration = requestGeneration;
+  state.summaryLastRequestId = requestGeneration;
+
+  if (!silent && !currentSummaryItems().length) {
     setStateCard('loading', 'Loading conversations...');
   }
-  pushDebugEvent('mailbox', 'Requesting mailbox summaries', {
+  pushDebugEvent('mailbox', append ? 'Requesting summary page append' : 'Requesting mailbox summaries', {
+    requestGeneration,
     silent,
+    append,
     requestedFolder,
     requestedLimit,
+    requestedCursor,
     forceSync: Boolean(options.forceSync),
     trackActivity: Boolean(options.trackActivity)
   });
@@ -3041,23 +3223,52 @@ async function loadMessageSummaries(options = {}) {
   const response = await sendWorker('FETCH_MESSAGE_SUMMARIES', {
     folder: requestedFolder,
     limit: requestedLimit,
+    cursor: requestedCursor,
+    append,
     forceSync: Boolean(options.forceSync),
     trackActivity: Boolean(options.trackActivity)
   });
 
+  const workerCount = numericValue(response?.count, Array.isArray(response?.summaries) ? response.summaries.length : 0);
+  const loadedCount = numericValue(response?.loadedCount, 0);
+  const normalizedSummaries = Array.isArray(response?.summaries)
+    ? response.summaries.map(normalizeContactSummary).filter((summary) => summary.contactKey)
+    : [];
+  state.summaryWorkerCount = workerCount;
+  state.summaryLoadedCount = loadedCount;
+  state.summaryNormalizedCount = normalizedSummaries.length;
+
   if (state.summaryRequestGeneration !== requestGeneration) {
-    state.summaryLoadInFlight = false;
+    if (append) {
+      state.summaryAppendInFlight = false;
+    } else {
+      state.summaryInitialLoadInFlight = false;
+    }
+    state.summaryLastIgnoredReason = `stale_response_${append ? 'append' : 'replace'}_${requestGeneration}`;
+    pushDebugEvent('mailbox', 'Ignored stale summary response', {
+      requestGeneration,
+      activeGeneration: state.summaryRequestGeneration,
+      append,
+      workerCount,
+      normalizedCount: normalizedSummaries.length
+    }, 'error');
+    renderDebugPanel();
     return response;
   }
 
   if (!response?.success) {
-    state.summaryLoadInFlight = false;
+    if (append) {
+      state.summaryAppendInFlight = false;
+    } else {
+      state.summaryInitialLoadInFlight = false;
+    }
     state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
     state.lastMailboxSource = 'summary-error';
     state.lastMailboxTimings = normalizeTimings(response?.timings);
 
-    if (silent) {
+    if (silent && currentSummaryItems().length) {
       renderSettingsUi();
+      renderDebugPanel();
       return response;
     }
 
@@ -3090,25 +3301,81 @@ async function loadMessageSummaries(options = {}) {
   clearRetryTimer();
   state.mailboxMode = 'summary';
   state.useLegacyMailboxFallback = false;
-  state.summaryLoadInFlight = false;
   state.summaryPageSize = requestedLimit;
-  state.messages = [];
-  state.mailboxAutoRefresh = {
-    attempted: false,
-    inFlight: false,
-    before: null,
-    after: null,
-    failedToFillContent: false,
-    error: ''
-  };
+  state.summaryCursor = String(response?.nextCursor || '');
+  state.summaryHasMore = Boolean(response?.hasMore);
+  state.summaryAppliedGeneration = requestGeneration;
+  state.summaryLastIgnoredReason = '';
+  if (append) {
+    state.summaryAppendInFlight = false;
+  } else {
+    state.summaryInitialLoadInFlight = false;
+    state.messages = [];
+    state.mailboxAutoRefresh = {
+      attempted: false,
+      inFlight: false,
+      before: null,
+      after: null,
+      failedToFillContent: false,
+      error: ''
+    };
+  }
   state.lastMailboxTrace = normalizeTraceEntries(response.trace);
   state.lastMailboxSource = 'summary';
   state.lastMailboxTimings = normalizeTimings(response?.timings);
   state.lastMailboxDebug = normalizeMailboxDebug(response?.debug);
-  state.contactSummaries = Array.isArray(response.summaries)
-    ? response.summaries.map(normalizeContactSummary).filter((summary) => summary.contactKey)
-    : [];
-  state.summaryCanLoadMore = state.contactSummaries.length >= requestedLimit;
+
+  if (workerCount > 0 && normalizedSummaries.length === 0) {
+    state.summaryLastIgnoredReason = 'normalized_zero_from_nonzero_worker_count';
+    pushDebugEvent('mailbox:error', 'Summary normalization dropped all worker rows', {
+      requestGeneration,
+      workerCount,
+      response
+    }, 'error');
+    if (!currentSummaryItems().length) {
+      setStateCard('error', 'Mailita received conversations from Gmail, but none could be rendered.', true);
+      renderDebugPanel();
+      return {
+        success: false,
+        code: 'SUMMARY_RENDER_INVALID',
+        error: 'No summaries survived normalization.'
+      };
+    }
+    renderDebugPanel();
+    return {
+      success: true,
+      skipped: true,
+      count: workerCount,
+      loadedCount,
+      nextCursor: state.summaryCursor,
+      hasMore: state.summaryHasMore,
+      source: response?.source || 'summary'
+    };
+  }
+
+  if (!append && normalizedSummaries.length === 0 && currentSummaryItems().length > 0) {
+    state.summaryLastIgnoredReason = 'empty_replace_preserved_existing_rows';
+    pushDebugEvent('mailbox', 'Ignored empty summary replace to preserve visible rows', {
+      requestGeneration,
+      workerCount,
+      renderedCount: currentSummaryItems().length
+    }, 'error');
+    renderDebugPanel();
+    return {
+      success: true,
+      skipped: true,
+      count: workerCount,
+      loadedCount,
+      nextCursor: state.summaryCursor,
+      hasMore: state.summaryHasMore,
+      source: response?.source || 'summary'
+    };
+  }
+
+  const nextSummaryItems = append
+    ? mergeSummaryItems(currentSummaryItems(), normalizedSummaries)
+    : normalizedSummaries;
+  replaceSummaryItems(nextSummaryItems);
 
   if (state.selectedThreadId && !findSummaryByThreadId(state.selectedThreadId)) {
     state.selectedThreadId = '';
@@ -3124,14 +3391,25 @@ async function loadMessageSummaries(options = {}) {
   }
 
   renderThreads();
+  state.summaryRenderedCount = currentThreadGroups().length;
+
+  pushDebugEvent('mailbox', append ? 'Applied summary append' : 'Applied summary replace', {
+    requestGeneration,
+    workerCount,
+    normalizedCount: normalizedSummaries.length,
+    renderedCount: state.summaryRenderedCount,
+    loadedCount,
+    nextCursor: state.summaryCursor,
+    hasMore: state.summaryHasMore
+  }, 'success');
 
   if (options.trackActivity) {
     appendUiActivity({
       source: 'UI',
       level: 'success',
       stage: 'mailbox_summary_rendered',
-      message: `Mailbox summary view rendered with ${response.count || state.contactSummaries.length || 0} people.`,
-      details: `Source ${response.source || 'unknown'}.`
+      message: `Mailbox summary view rendered with ${state.summaryRenderedCount || workerCount || currentSummaryItems().length || 0} people.`,
+      details: `Source ${response.source || 'unknown'}; nextCursor=${state.summaryCursor || 'none'}; hasMore=${state.summaryHasMore}.`
     }).catch(() => {});
   }
 
@@ -3141,25 +3419,27 @@ async function loadMessageSummaries(options = {}) {
     }).catch(() => {});
   }
 
+  renderDebugPanel();
   return response;
 }
 
 async function loadMoreMessageSummaries() {
   if (usingLegacyMailboxFlow() || state.mailboxMode === 'search') return null;
-  if (state.summaryLoadInFlight || !state.summaryCanLoadMore) return null;
+  if (state.summaryAppendInFlight || !state.summaryHasMore || !state.summaryCursor) return null;
 
   const currentList = document.getElementById('gmailUnifiedList');
   const previousScrollTop = currentList?.scrollTop || 0;
-  const nextLimit = Math.max(20, numericValue(state.summaryPageSize, 50) + 50);
   pushDebugEvent('mailbox', 'Requesting next summary page', {
-    previousLimit: state.summaryPageSize,
-    nextLimit
+    limit: state.summaryPageSize,
+    cursor: state.summaryCursor
   });
 
   const response = await loadMessageSummaries({
     silent: true,
-    forceSync: true,
-    limit: nextLimit
+    forceSync: false,
+    append: true,
+    cursor: state.summaryCursor,
+    limit: state.summaryPageSize
   });
 
   if (currentList) {
@@ -3169,7 +3449,7 @@ async function loadMoreMessageSummaries() {
   }
 
   pushDebugEvent(response?.success ? 'mailbox' : 'mailbox:error', response?.success ? 'Next summary page loaded' : 'Next summary page failed', {
-    nextLimit,
+    cursor: state.summaryCursor,
     response
   }, response?.success ? 'success' : 'error');
   return response;
@@ -3215,11 +3495,25 @@ async function loadMessages(options = {}) {
 }
 
 function primeMailboxInBackground(options = {}) {
+  if (state.summaryInitialLoadInFlight || currentSummaryItems().length) {
+    return Promise.resolve({
+      success: true,
+      source: state.lastMailboxSource || 'summary',
+      summaries: currentSummaryItems(),
+      count: currentSummaryItems().length,
+      nextCursor: state.summaryCursor,
+      hasMore: state.summaryHasMore,
+      skipped: true
+    });
+  }
   const run = async () => {
-    const response = await loadMessages(options);
+    const response = await loadMessages({
+      allowLegacyFallback: false,
+      ...options
+    });
     if (!response?.success) {
       pushDebugEvent('mailbox:error', 'Background mailbox load failed', response, 'error');
-      if (!state.contactSummaries.length && !state.messages.length) {
+      if (!currentSummaryItems().length && !state.messages.length) {
         const errorMessage = failureMessageForResponse(response, 'Unable to load conversations right now.');
         setStateCard('error', errorMessage, true);
         setConnectUiState(`Connected, but mailbox loading failed. ${errorMessage}`, true);
@@ -3228,7 +3522,7 @@ function primeMailboxInBackground(options = {}) {
     }
 
     pushDebugEvent('mailbox', 'Background mailbox load completed', {
-      summaries: state.contactSummaries.length,
+      summaries: currentSummaryItems().length,
       messages: state.messages.length,
       source: response.source
     }, 'success');
@@ -3240,7 +3534,7 @@ function primeMailboxInBackground(options = {}) {
   return run().catch((error) => {
     const message = error?.message || String(error);
     pushDebugEvent('mailbox:error', 'Background mailbox load crashed', { message }, 'error');
-    if (!state.contactSummaries.length && !state.messages.length) {
+    if (!currentSummaryItems().length && !state.messages.length) {
       setStateCard('error', 'Unable to load conversations right now.', true);
       setConnectUiState(`Connected, but mailbox loading failed. ${message}`, true);
     }
@@ -3249,6 +3543,33 @@ function primeMailboxInBackground(options = {}) {
       code: error?.code || 'MAILBOX_LOAD_FAILED',
       error: message
     };
+  });
+}
+
+function ensureInitialSummaryLoad(options = {}) {
+  const force = Boolean(options.force);
+  const limit = Math.max(Number(options.limit || state.summaryPageSize || 50), 20);
+
+  if (!state.connected || state.connectInFlight || usingLegacyMailboxFlow() || state.mailboxMode === 'search') {
+    return Promise.resolve({ success: true, skipped: true, code: 'SUMMARY_BOOTSTRAP_NOT_APPLICABLE' });
+  }
+
+  if (state.summaryInitialLoadInFlight || state.summaryAppendInFlight) {
+    return Promise.resolve({ success: true, skipped: true, code: 'SUMMARY_BOOTSTRAP_IN_FLIGHT' });
+  }
+
+  if (currentSummaryItems().length) {
+    return Promise.resolve({ success: true, skipped: true, code: 'SUMMARY_BOOTSTRAP_ALREADY_RENDERED' });
+  }
+
+  if (!force && numericValue(state.summaryAppliedGeneration, 0) > 0) {
+    return Promise.resolve({ success: true, skipped: true, code: 'SUMMARY_BOOTSTRAP_ALREADY_APPLIED' });
+  }
+
+  return primeMailboxInBackground({
+    ...options,
+    allowLegacyFallback: false,
+    limit
   });
 }
 
@@ -3281,7 +3602,10 @@ async function handleSearch(query) {
 
   if (!trimmed) {
     state.mailboxMode = state.useLegacyMailboxFallback ? 'legacy' : 'summary';
-    await loadMessages({ limit: state.summaryPageSize || 50 });
+    await loadMessages({
+      limit: state.summaryPageSize || 50,
+      allowLegacyFallback: false
+    });
     return;
   }
 
@@ -3394,25 +3718,44 @@ async function refreshGuideAndAuthState() {
     }, 'error');
   }
 
-  const storageConnected = Boolean(storage?.success && storage.connected);
-  const preserveUnlockedShell = Boolean(state.shellUnlocked && !storageConnected);
+  const storageKnown = storageResult.status === 'fulfilled' && Boolean(storage?.success);
+  const storageConnected = Boolean(storageKnown && storage.connected);
+  const explicitDisconnect = Boolean(
+    storageKnown
+      && !storageConnected
+      && !String(storage?.accountEmail || storage?.userEmail || '').trim()
+      && !state.connectInFlight
+  );
+  const preserveUnlockedShell = Boolean(
+    (state.connected || state.shellUnlocked)
+      && !storageConnected
+      && !explicitDisconnect
+  );
   state.connected = storageConnected || preserveUnlockedShell || (state.connectInFlight && state.connected);
   if (storageConnected) {
     state.shellUnlocked = true;
     state.guideReviewOpen = false;
   }
   state.guideState = normalizeGuideState(guide?.success ? guide.guideState : state.guideState);
-  state.setupDiagnostics = normalizeSetupDiagnostics(storage?.setupDiagnostics);
+  state.setupDiagnostics = normalizeSetupDiagnostics(storageKnown ? storage?.setupDiagnostics : state.setupDiagnostics);
   state.uiSettings = normalizeUiSettings(uiSettings);
   state.accountSnapshot = {
     connected: storageConnected || preserveUnlockedShell || (state.connectInFlight && state.accountSnapshot.connected),
-    accountEmail: storage?.accountEmail || storage?.userEmail || ((preserveUnlockedShell || state.connectInFlight) ? state.accountSnapshot.accountEmail : ''),
-    mailSource: storage?.mailSource || 'gmail_api_local',
-    lastSyncTime: storage?.lastSyncTime || '',
-    onboardingComplete: Boolean(storage?.onboardingComplete)
+    accountEmail: storageKnown
+      ? (storage?.accountEmail || storage?.userEmail || ((preserveUnlockedShell || state.connectInFlight) ? state.accountSnapshot.accountEmail : ''))
+      : state.accountSnapshot.accountEmail,
+    mailSource: storageKnown
+      ? (storage?.mailSource || state.accountSnapshot.mailSource || 'gmail_api_local')
+      : (state.accountSnapshot.mailSource || 'gmail_api_local'),
+    lastSyncTime: storageKnown
+      ? (storage?.lastSyncTime || state.accountSnapshot.lastSyncTime || '')
+      : state.accountSnapshot.lastSyncTime,
+    onboardingComplete: storageKnown
+      ? Boolean(storage?.onboardingComplete)
+      : Boolean(state.accountSnapshot.onboardingComplete)
   };
 
-  if (!state.connected && !state.connectInFlight && !preserveUnlockedShell) {
+  if (explicitDisconnect) {
     state.shellUnlocked = false;
     state.selectedThreadId = '';
     state.detailLastThreadId = '';
@@ -3427,7 +3770,9 @@ async function refreshGuideAndAuthState() {
   }
 
   pushDebugEvent('flow', 'Guide/auth state refreshed', {
+    storageKnown,
     storageConnected,
+    explicitDisconnect,
     preserveUnlockedShell,
     connected: state.connected,
     accountSnapshot: state.accountSnapshot
@@ -3526,7 +3871,12 @@ function bindGuideEvents(sidebar) {
   });
 
   sidebar.querySelector('#gmailUnifiedRetryBtn')?.addEventListener('click', () => {
-    loadMessages({ forceSync: false, trackActivity: true, limit: state.summaryPageSize || 50 });
+    loadMessages({
+      forceSync: false,
+      trackActivity: true,
+      limit: state.summaryPageSize || 50,
+      allowLegacyFallback: false
+    });
   });
 
   sidebar.querySelector('#gmailUnifiedList')?.addEventListener('scroll', () => {
@@ -3882,7 +4232,7 @@ async function connectFromGuide() {
     const sidebar = document.getElementById('gmailUnifiedSidebar');
     sidebar?.classList.add('gmail-unified-unlocking');
     applyGmailLayoutMode();
-    if (state.contactSummaries.length || state.messages.length) {
+    if (currentSummaryItems().length || state.messages.length) {
       renderThreads();
     } else {
       setStateCard('loading', 'Loading conversations...');
@@ -3905,14 +4255,14 @@ async function connectFromGuide() {
     });
 
     setConnectUiState('');
-    primeMailboxInBackground({
+    ensureInitialSummaryLoad({
       forceSync: false,
       trackActivity: true,
       limit: 50
     }).then((mailboxResponse) => {
       if (!mailboxResponse?.success) return;
       pushDebugEvent('connect', 'Connect flow completed', {
-        summaries: state.contactSummaries.length,
+        summaries: currentSummaryItems().length,
         messages: state.messages.length
       }, 'success');
     });
@@ -4022,21 +4372,14 @@ async function bootGmailSurface() {
               if (state.connectInFlight) {
                 return;
               }
-              if (state.connected && state.messages.length === 0 && state.contactSummaries.length === 0) {
-                primeMailboxInBackground({ limit: state.summaryPageSize || 50 });
-              }
+              await ensureInitialSummaryLoad({ limit: state.summaryPageSize || 50 });
             })
             .catch(() => {});
         }
         if (changes.lastSyncTime && state.connected && !state.searchQuery && !usingLegacyMailboxFlow()) {
           state.accountSnapshot.lastSyncTime = changes.lastSyncTime.newValue || '';
           renderSettingsUi();
-          loadMessageSummaries({
-            forceSync: false,
-            trackActivity: false,
-            silent: true,
-            limit: state.summaryPageSize || 50
-          }).catch(() => {});
+          ensureInitialSummaryLoad({ limit: state.summaryPageSize || 50 }).catch(() => {});
         }
         if (changes.setupDiagnostics) {
           state.setupDiagnostics = normalizeSetupDiagnostics(changes.setupDiagnostics.newValue);
@@ -4054,7 +4397,7 @@ async function bootGmailSurface() {
     ensureMailitaSurfaceObserver();
 
     if (state.connected) {
-      primeMailboxInBackground({ limit: 50 });
+      ensureInitialSummaryLoad({ limit: 50 }).catch(() => {});
       sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
       startAutoRefresh();
     }

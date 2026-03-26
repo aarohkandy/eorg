@@ -15,7 +15,8 @@
     grantedScopes: 'grantedScopes',
     lastHistoryId: 'lastHistoryId',
     lastSyncTime: 'lastSyncTime',
-    lastFullSyncAt: 'lastFullSyncAt'
+    lastFullSyncAt: 'lastFullSyncAt',
+    summaryNextCursor: 'summaryNextCursor'
   };
   const CACHE_TTL_MS = 90 * 1000;
   const PERSONAL_EMAIL_DOMAINS = new Set([
@@ -695,6 +696,9 @@
       live: {
         used: mode === 'live',
         limitPerFolder: Number(counts.limitPerFolder || 0),
+        pageCount: Number(counts.pageCount || 0),
+        loadedCount: Number(counts.loadedCount || 0),
+        nextCursor: String(counts.nextCursor || ''),
         totalMessages: Number(counts.totalMessages || 0),
         missingContentCount: Number(counts.missingContentCount || 0),
         shortContentCount: Number(counts.shortContentCount || 0),
@@ -725,6 +729,19 @@
       shortContentCount,
       contentCoveragePct
     };
+  }
+
+  function summaryDebugEnvelope(mode, messages, extra = {}) {
+    const coverage = contentCoverage(messages);
+    return debugEnvelope(mode, {
+      ...coverage,
+      newestCachedAt: extra.newestCachedAt || null,
+      limitPerFolder: Number(extra.limitPerFolder || 0),
+      pageCount: Number(extra.pageCount || 0),
+      loadedCount: Number(extra.loadedCount || 0),
+      nextCursor: extra.nextCursor || '',
+      cacheMessageCount: Number(extra.cacheMessageCount || 0)
+    });
   }
 
   async function persistGrantedScopes(scopes) {
@@ -1179,16 +1196,86 @@
   }
 
   async function loadSummaries(options = {}) {
-    const mailbox = await ensureFreshMailbox(options);
-    const summaries = buildContactSummaries(mailbox.messages, Number(options.limit || 50));
-    return {
-      accountEmail: mailbox.accountEmail,
-      summaries,
-      count: summaries.length,
-      source: mailbox.source,
-      debug: mailbox.debug,
-      timings: mailbox.timings
-    };
+    const startedAt = Date.now();
+    const limit = Math.max(Number(options.limit || 50), 20);
+    const cursor = String(options.cursor || '').trim();
+    const append = Boolean(options.append);
+    const cached = await readCachedMailbox().catch(() => ({
+      messages: [],
+      accountEmail: '',
+      lastHistoryId: '',
+      lastSyncTime: '',
+      lastFullSyncAt: 0,
+      timings: timingEnvelope(Date.now(), { cache_read_ms: 0 })
+    }));
+
+    try {
+      const accountEmail = normalizeEmail(cached.accountEmail || (await fetchProfile(false))?.emailAddress);
+      const page = await fetchThreadsPage('', limit, cursor, false);
+      const threadDetails = await fetchThreadDetails(page.threads.map((thread) => thread.id).filter(Boolean));
+      const pageMessages = threadDetails
+        .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
+        .map((message) => normalizeMessage(message, accountEmail))
+        .sort(byDateDesc);
+
+      if (pageMessages.length) {
+        await mergeMessages(pageMessages);
+      }
+
+      const nextCursor = String(page.nextPageToken || '');
+      try {
+        await metaSet(META_KEYS.summaryNextCursor, nextCursor);
+      } catch {
+        // Cursor persistence is opportunistic.
+      }
+
+      const summaries = buildContactSummaries(pageMessages, limit);
+      const lastSyncTime = nowIso();
+      return {
+        accountEmail,
+        summaries,
+        count: summaries.length,
+        loadedCount: pageMessages.length,
+        nextCursor,
+        hasMore: Boolean(nextCursor),
+        source: append ? 'gmail_api_local_summary_append' : 'gmail_api_local_summary_page',
+        debug: summaryDebugEnvelope('live', pageMessages, {
+          newestCachedAt: lastSyncTime,
+          limitPerFolder: limit,
+          pageCount: summaries.length,
+          loadedCount: pageMessages.length,
+          nextCursor
+        }),
+        timings: timingEnvelope(startedAt, {
+          cache_read_ms: cached.timings?.cache_read_ms || 0,
+          imap_fetch_ms: Date.now() - startedAt
+        })
+      };
+    } catch (error) {
+      if (!cursor && cached.messages.length) {
+        const fallbackNextCursor = await metaGet(META_KEYS.summaryNextCursor, '').catch(() => '');
+        const summaries = buildContactSummaries(cached.messages, limit);
+        return {
+          accountEmail: cached.accountEmail,
+          summaries,
+          count: summaries.length,
+          loadedCount: summaries.length,
+          nextCursor: String(fallbackNextCursor || ''),
+          hasMore: Boolean(fallbackNextCursor),
+          source: 'gmail_api_local_summary_cache',
+          debug: summaryDebugEnvelope('cache', cached.messages, {
+            newestCachedAt: cached.lastSyncTime || null,
+            limitPerFolder: limit,
+            pageCount: summaries.length,
+            loadedCount: summaries.length,
+            nextCursor: String(fallbackNextCursor || ''),
+            cacheMessageCount: cached.messages.length
+          }),
+          timings: cached.timings || timingEnvelope(startedAt, { cache_read_ms: 0 })
+        };
+      }
+      throw error;
+    }
   }
 
   async function loadContact(options = {}) {
