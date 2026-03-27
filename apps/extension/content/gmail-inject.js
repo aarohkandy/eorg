@@ -65,6 +65,9 @@ const state = {
   summaryPageSize: 50,
   contactRequestGenerationByKey: {},
   searchRequestGeneration: 0,
+  searchMessageResults: [],
+  searchMessageResultsInFlight: false,
+  searchMessageError: '',
   filter: 'all',
   selectedThreadId: '',
   searchQuery: '',
@@ -111,6 +114,15 @@ const state = {
     sendInFlight: false,
     sendError: '',
     sendStatus: ''
+  },
+  composeOverlay: {
+    open: false,
+    to: '',
+    subject: '',
+    body: '',
+    sendInFlight: false,
+    sendError: '',
+    sendStatus: ''
   }
 };
 const debugState = {
@@ -125,6 +137,7 @@ let mailitaBootRetries = 0;
 let visibleBodyHydrationFrame = 0;
 let adjacentContactPrefetchTimer = null;
 let idleContactPrefetchTimer = null;
+let debugConsoleSignature = '';
 
 function isMailHost() {
   return window.location.hostname.includes('mail.google.com');
@@ -187,38 +200,37 @@ function buildDebugStateSnapshot() {
 }
 
 function renderDebugPanel() {
-  const panel = document.getElementById('gmailUnifiedDebugPanel');
-  if (!panel) return;
-  panel.hidden = false;
-  panel.dataset.collapsed = state.debugOpen ? 'false' : 'true';
-  const sidebar = document.getElementById('gmailUnifiedSidebar');
-  if (sidebar) {
-    sidebar.dataset.debugOpen = state.debugOpen ? 'true' : 'false';
-  }
-  const snapshotNode = document.getElementById('gmailUnifiedDebugState');
-  const logNode = document.getElementById('gmailUnifiedDebugEventLog');
-  const toggleNode = document.getElementById('gmailUnifiedDebugToggleBtn');
-  const bodyNode = document.getElementById('gmailUnifiedDebugBody');
-  if (toggleNode) toggleNode.textContent = state.debugOpen ? 'Hide' : 'Show';
-  if (bodyNode) bodyNode.hidden = !state.debugOpen;
-  if (snapshotNode) {
-    snapshotNode.textContent = JSON.stringify(buildDebugStateSnapshot(), null, 2);
-  }
-  if (logNode) {
-    logNode.innerHTML = debugState.events.map((entry) => {
-      const details = entry.details ? `<pre>${entry.details}</pre>` : '';
-      return `
-        <article class="gmail-unified-debug-entry" data-level="${entry.level}">
-          <div class="gmail-unified-debug-entry-head">
-            <span>${entry.ts}</span>
-            <strong>${entry.label}</strong>
-          </div>
-          <div class="gmail-unified-debug-entry-message">${entry.message}</div>
-          ${details}
-        </article>
-      `;
-    }).join('');
-  }
+  const signature = JSON.stringify({
+    counter: debugState.counter,
+    selectedThreadId: state.selectedThreadId || '',
+    searchQuery: state.searchQuery || '',
+    summaryCursor: state.summaryCursor || '',
+    summaryRenderedCount: numericValue(state.summaryRenderedCount, 0),
+    composeOpen: Boolean(state.composeOverlay?.open)
+  });
+  if (signature === debugConsoleSignature) return;
+  debugConsoleSignature = signature;
+
+  const selectedGroup = findSelectedGroup();
+  const payload = {
+    state: buildDebugStateSnapshot(),
+    selectedThread: selectedGroup
+      ? buildThreadDebugReport(selectedGroup)
+      : 'Open a conversation to inspect the active contact payload.',
+    events: debugState.events.slice(0, 20).map((entry) => ({
+      ts: entry.ts,
+      level: entry.level,
+      label: entry.label,
+      message: entry.message,
+      details: entry.details
+    }))
+  };
+
+  console.groupCollapsed('Mailita');
+  console.log('state', payload.state);
+  console.log('selectedThread', payload.selectedThread);
+  console.log('events', payload.events);
+  console.groupEnd();
 }
 
 function setDebugText(node, text) {
@@ -1262,11 +1274,7 @@ function mountRenderedEmailCard(host, html) {
 }
 
 function shellContextLabel() {
-  if (state.accountSnapshot?.accountEmail) {
-    return state.accountSnapshot.accountEmail;
-  }
-
-  return state.connected ? 'Inbox' : 'Setup';
+  return state.connected ? 'Messages' : 'Setup';
 }
 
 function applyThemeSettings() {
@@ -1282,6 +1290,7 @@ function applyThemeSettings() {
 function renderSettingsUi() {
   const settings = normalizeUiSettings(state.uiSettings);
   const context = document.getElementById('gmailUnifiedRailContext');
+  const composeButton = document.getElementById('gmailUnifiedComposeBtn');
   const panel = document.getElementById('gmailUnifiedSettingsPanel');
   const accountEmail = document.getElementById('gmailUnifiedSettingsEmail');
   const accountSync = document.getElementById('gmailUnifiedSettingsSyncTime');
@@ -1293,6 +1302,9 @@ function renderSettingsUi() {
 
   if (panel) {
     panel.hidden = !state.settingsOpen || !state.connected;
+  }
+  if (composeButton) {
+    composeButton.disabled = !state.connected;
   }
 
   document.querySelectorAll('.gmail-unified-theme-option[data-theme-mode]').forEach((button) => {
@@ -1319,6 +1331,137 @@ function defaultComposerState() {
     sendError: '',
     sendStatus: ''
   };
+}
+
+function defaultComposeOverlayState() {
+  return {
+    open: false,
+    to: '',
+    subject: '',
+    body: '',
+    sendInFlight: false,
+    sendError: '',
+    sendStatus: ''
+  };
+}
+
+function parseComposeRecipients(value) {
+  const entries = String(value || '')
+    .split(/[;,]+/)
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const match = entry.match(/^(.*)<([^>]+)>$/);
+      if (!match) {
+        return {
+          email: entry,
+          name: ''
+        };
+      }
+      return {
+        name: String(match[1] || '').replace(/(^\"|\"$)/g, '').trim(),
+        email: String(match[2] || '').trim()
+      };
+    })
+    .filter((entry) => /\S+@\S+\.\S+/.test(String(entry.email || '').trim()));
+
+  return uniqueRecipientEntries(entries);
+}
+
+function renderComposeOverlay(options = {}) {
+  const overlay = document.getElementById('gmailUnifiedComposeOverlay');
+  const toInput = document.getElementById('gmailUnifiedComposeTo');
+  const subjectInput = document.getElementById('gmailUnifiedComposeSubject');
+  const bodyInput = document.getElementById('gmailUnifiedComposeBody');
+  const sendButton = document.getElementById('gmailUnifiedComposeSend');
+  const status = document.getElementById('gmailUnifiedComposeStatus');
+  if (!overlay || !toInput || !subjectInput || !bodyInput || !sendButton || !status) return;
+
+  overlay.hidden = !state.composeOverlay.open;
+  if (!state.composeOverlay.open) {
+    return;
+  }
+
+  if (toInput.value !== state.composeOverlay.to) toInput.value = state.composeOverlay.to;
+  if (subjectInput.value !== state.composeOverlay.subject) subjectInput.value = state.composeOverlay.subject;
+  if (bodyInput.value !== state.composeOverlay.body) bodyInput.value = state.composeOverlay.body;
+  sendButton.disabled = state.composeOverlay.sendInFlight;
+  sendButton.textContent = state.composeOverlay.sendInFlight ? 'Sending...' : 'Send';
+  status.textContent = state.composeOverlay.sendError || state.composeOverlay.sendStatus || '';
+  status.dataset.state = state.composeOverlay.sendError
+    ? 'error'
+    : (state.composeOverlay.sendStatus ? 'success' : 'idle');
+
+  if (options.focusTo) {
+    window.requestAnimationFrame(() => {
+      toInput.focus();
+      toInput.select();
+    });
+  }
+}
+
+function openComposeOverlay() {
+  if (!state.connected) return;
+  state.composeOverlay = {
+    ...defaultComposeOverlayState(),
+    open: true
+  };
+  renderComposeOverlay({ focusTo: true });
+}
+
+function closeComposeOverlay() {
+  state.composeOverlay = defaultComposeOverlayState();
+  renderComposeOverlay();
+}
+
+async function submitComposeOverlay() {
+  if (state.composeOverlay.sendInFlight) return null;
+
+  const recipients = parseComposeRecipients(state.composeOverlay.to);
+  const bodyText = String(state.composeOverlay.body || '').trim();
+  const subject = String(state.composeOverlay.subject || '').trim();
+
+  if (!recipients.length) {
+    state.composeOverlay.sendError = 'Add at least one recipient.';
+    state.composeOverlay.sendStatus = '';
+    renderComposeOverlay();
+    return null;
+  }
+
+  if (!bodyText) {
+    state.composeOverlay.sendError = 'Message body is empty.';
+    state.composeOverlay.sendStatus = '';
+    renderComposeOverlay();
+    return null;
+  }
+
+  state.composeOverlay.sendInFlight = true;
+  state.composeOverlay.sendError = '';
+  state.composeOverlay.sendStatus = '';
+  renderComposeOverlay();
+
+  const response = await sendWorker('SEND_MESSAGE', {
+    to: recipients,
+    subject,
+    bodyText
+  });
+
+  state.composeOverlay.sendInFlight = false;
+
+  if (!response?.success) {
+    state.composeOverlay.sendError = response?.code === 'AUTH_SCOPE_REQUIRED'
+      ? 'Mailita needs Gmail send permission before it can send.'
+      : failureMessageForResponse(response, 'Send failed.');
+    state.composeOverlay.sendStatus = '';
+    renderComposeOverlay();
+    return response;
+  }
+
+  closeComposeOverlay();
+  sendWorker('SYNC_MESSAGES', {
+    trackActivity: false
+  }).catch(() => {});
+  return response;
 }
 
 function setComposerMode(mode, group) {
@@ -2056,27 +2199,70 @@ function sortThreadGroups(groups) {
     new Date(groupLatestDate(right)).getTime() - new Date(groupLatestDate(left)).getTime());
 }
 
+function currentSearchTerm() {
+  return String(state.searchQuery || '').trim().toLowerCase();
+}
+
+function summaryMatchesSearch(summary, query = currentSearchTerm()) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return true;
+  const haystack = [
+    summary?.displayName,
+    summary?.contactEmail,
+    summary?.latestSubject,
+    summary?.latestPreview
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join('\n');
+  return haystack.includes(needle);
+}
+
+function currentSearchContactGroups() {
+  const query = currentSearchTerm();
+  return sortThreadGroups(currentSummaryItems()
+    .filter((summary) => summaryVisibleInCurrentFilter(summary))
+    .filter((summary) => summaryMatchesSearch(summary, query))
+    .map((summary) => {
+      const allMessages = state.contactMessagesByKey[summary.contactKey] || seedMessagesForThread(summary.contactKey);
+      return {
+        threadId: summary.contactKey,
+        summary,
+        messages: filteredMessagesForCurrentFilter(allMessages),
+        allMessages
+      };
+    }));
+}
+
+function currentSearchMessageGroups() {
+  return sortThreadGroups(groupByThread(state.searchMessageResults)
+    .map((group) => {
+      const hydratedMessages = state.contactMessagesByKey[group.threadId];
+      const allMessages = Array.isArray(hydratedMessages) && hydratedMessages.length
+        ? hydratedMessages
+        : group.messages;
+      const summary = findSummaryByThreadId(group.threadId) || buildContactSummaryFromMessages(group.threadId, allMessages);
+      return {
+        threadId: group.threadId,
+        summary,
+        messages: filteredMessagesForCurrentFilter(allMessages),
+        allMessages
+      };
+    })
+    .filter((group) => summaryVisibleInCurrentFilter(group.summary)));
+}
+
 function currentThreadGroups() {
   if (usingLegacyMailboxFlow()) {
     return sortThreadGroups(groupByThread(filteredMessages()));
   }
 
   if (state.mailboxMode === 'search') {
-    return sortThreadGroups(groupByThread(filteredMessages())
-      .map((group) => {
-        const hydratedMessages = state.contactMessagesByKey[group.threadId];
-        const allMessages = Array.isArray(hydratedMessages) && hydratedMessages.length
-          ? hydratedMessages
-          : group.messages;
-        const summary = findSummaryByThreadId(group.threadId) || buildContactSummaryFromMessages(group.threadId, allMessages);
-        return {
-          threadId: group.threadId,
-          summary,
-          messages: filteredMessagesForCurrentFilter(allMessages),
-          allMessages
-        };
-      })
-      .filter((group) => summaryVisibleInCurrentFilter(group.summary)));
+    const contactGroups = currentSearchContactGroups();
+    const contactKeys = new Set(contactGroups.map((group) => group.threadId));
+    const messageGroups = currentSearchMessageGroups()
+      .filter((group) => !contactKeys.has(group.threadId));
+    return [...contactGroups, ...messageGroups];
   }
 
   return sortThreadGroups(currentSummaryItems()
@@ -2109,6 +2295,84 @@ function upsertContactSummary(summary) {
   state.summaryItems = [...currentSummaryItems()].sort((left, right) =>
     new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime());
   state.summaryRenderedCount = currentSummaryItems().length;
+}
+
+function appendRailSection(list, title) {
+  const node = document.createElement('div');
+  node.className = 'gmail-unified-rail-section';
+  node.textContent = title;
+  list.appendChild(node);
+}
+
+function appendRailStatus(list, text, variant = 'info') {
+  const node = document.createElement('div');
+  node.className = `gmail-unified-rail-status is-${variant}`;
+  node.textContent = text;
+  list.appendChild(node);
+}
+
+function appendThreadRow(list, group, options = {}) {
+  const unread = groupUnread(group);
+  const unreadCount = groupUnreadCount(group);
+  const selected = state.selectedThreadId === group.threadId;
+  const searchKind = String(options.searchKind || '').trim();
+
+  const row = document.createElement('div');
+  row.className = 'gmail-unified-thread-row';
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+  row.dataset.threadId = group.threadId;
+  if (searchKind) row.dataset.searchKind = searchKind;
+  row.classList.toggle('is-selected', selected);
+
+  const who = groupDisplayName(group);
+  const latestDate = groupLatestDate(group);
+  const latestPreview = groupLatestPreview(group);
+  const avatar = groupAvatarLabel(group);
+  const metaParts = threadMetaParts(group);
+
+  row.innerHTML = `
+    <div class="gmail-unified-thread-row-shell">
+      <div class="gmail-unified-thread-avatar-wrap">
+        <div class="gmail-unified-thread-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
+        ${unread ? `<span class="gmail-unified-thread-unread-dot" aria-hidden="true"></span>` : ''}
+      </div>
+      <div class="gmail-unified-thread-copy">
+        <div class="gmail-unified-thread-top">
+          <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
+          <span class="gmail-unified-date">${formatDate(latestDate)}</span>
+        </div>
+        <div class="gmail-unified-thread-preview ${unread ? 'unread' : ''}">${escapeHtml(latestPreview)}</div>
+        <div class="gmail-unified-thread-meta">
+          <span class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(metaParts[0] || '')}</span>
+          ${unreadCount > 0 ? `<span class="gmail-unified-thread-unread-copy">${unreadCount} unread</span>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  const openThread = () => {
+    if (state.selectedThreadId !== group.threadId) {
+      state.composer = defaultComposerState();
+    }
+    state.selectedThreadId = group.threadId;
+    requestDetailSnapToLatest(group.threadId);
+    renderThreads();
+    if (!usingLegacyMailboxFlow()) {
+      loadContactMessagesForThread(group.threadId, {
+        pageSize: 40
+      }).catch(() => {});
+    }
+  };
+
+  row.addEventListener('click', openThread);
+  row.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openThread();
+  });
+
+  list.appendChild(row);
 }
 
 function groupDisplayName(group) {
@@ -2577,15 +2841,25 @@ function renderThreads() {
   const list = document.getElementById('gmailUnifiedList');
   if (!list) return;
 
-  const threadGroups = currentThreadGroups();
+  const showingSearch = Boolean(state.searchQuery && !usingLegacyMailboxFlow());
+  const contactSearchGroups = showingSearch ? currentSearchContactGroups() : [];
+  const contactSearchKeys = new Set(contactSearchGroups.map((group) => group.threadId));
+  const messageSearchGroups = showingSearch
+    ? currentSearchMessageGroups().filter((group) => !contactSearchKeys.has(group.threadId))
+    : [];
+  const threadGroups = showingSearch
+    ? [...contactSearchGroups, ...messageSearchGroups]
+    : currentThreadGroups();
   const previousScrollTop = list.scrollTop;
   state.summaryRenderedCount = threadGroups.length;
 
-  if (!threadGroups.length) {
+  if (!threadGroups.length && !(showingSearch && (state.searchMessageResultsInFlight || state.searchMessageError))) {
     clearAdjacentContactPrefetchTimer();
     clearIdleContactPrefetchTimer();
     if (state.summaryInitialLoadInFlight) {
       setStateCard('loading', 'Loading conversations...');
+    } else if (showingSearch && state.searchQuery) {
+      setStateCard('normal', '');
     } else {
       setStateCard('empty', 'No conversations found yet.');
     }
@@ -2599,69 +2873,30 @@ function renderThreads() {
 
   list.innerHTML = '';
 
-  threadGroups.forEach((group) => {
-    const unread = groupUnread(group);
-    const unreadCount = groupUnreadCount(group);
-    const selected = state.selectedThreadId === group.threadId;
+  if (showingSearch) {
+    if (contactSearchGroups.length) {
+      contactSearchGroups.forEach((group) => appendThreadRow(list, group, { searchKind: 'contact' }));
+    } else {
+      appendRailStatus(list, `No contacts match "${state.searchQuery}".`);
+    }
 
-    const row = document.createElement('div');
-    row.className = 'gmail-unified-thread-row';
-    row.setAttribute('role', 'button');
-    row.tabIndex = 0;
-    row.dataset.threadId = group.threadId;
-    row.classList.toggle('is-selected', selected);
-
-    const who = groupDisplayName(group);
-    const latestDate = groupLatestDate(group);
-    const latestPreview = groupLatestPreview(group);
-    const avatar = groupAvatarLabel(group);
-    const metaParts = threadMetaParts(group);
-
-    row.innerHTML = `
-      <div class="gmail-unified-thread-row-shell">
-        <div class="gmail-unified-thread-avatar-wrap">
-          <div class="gmail-unified-thread-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
-          ${unread ? `<span class="gmail-unified-thread-unread-dot" aria-hidden="true"></span>` : ''}
-        </div>
-        <div class="gmail-unified-thread-copy">
-          <div class="gmail-unified-thread-top">
-            <span class="gmail-unified-thread-who ${unread ? 'unread' : ''}">${escapeHtml(who)}</span>
-            <span class="gmail-unified-date">${formatDate(latestDate)}</span>
-          </div>
-          <div class="gmail-unified-thread-preview ${unread ? 'unread' : ''}">${escapeHtml(latestPreview)}</div>
-          <div class="gmail-unified-thread-meta">
-            <span class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(metaParts[0] || '')}</span>
-            ${unreadCount > 0 ? `<span class="gmail-unified-thread-unread-copy">${unreadCount} unread</span>` : ''}
-          </div>
-        </div>
-      </div>
-    `;
-
-    const openThread = () => {
-      if (state.selectedThreadId !== group.threadId) {
-        state.composer = defaultComposerState();
+    if (state.searchMessageResultsInFlight || state.searchMessageError || messageSearchGroups.length) {
+      appendRailSection(list, 'In messages');
+      if (state.searchMessageResultsInFlight) {
+        appendRailStatus(list, 'Searching message bodies...');
+      } else if (state.searchMessageError) {
+        appendRailStatus(list, state.searchMessageError, 'error');
+      } else if (messageSearchGroups.length) {
+        messageSearchGroups.forEach((group) => appendThreadRow(list, group, { searchKind: 'message' }));
+      } else {
+        appendRailStatus(list, `No body matches for "${state.searchQuery}".`);
       }
-      state.selectedThreadId = group.threadId;
-      requestDetailSnapToLatest(group.threadId);
-      renderThreads();
-      if (!usingLegacyMailboxFlow()) {
-        loadContactMessagesForThread(group.threadId, {
-          pageSize: 40
-        }).catch(() => {});
-      }
-    };
+    }
+  } else {
+    threadGroups.forEach((group) => appendThreadRow(list, group));
+  }
 
-    row.addEventListener('click', openThread);
-    row.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      openThread();
-    });
-
-    list.appendChild(row);
-  });
-
-  if (state.summaryAppendInFlight || state.summaryHasMore) {
+  if (!showingSearch && (state.summaryAppendInFlight || state.summaryHasMore)) {
     const tail = document.createElement('div');
     tail.className = 'gmail-unified-thread-tail-loader';
     tail.textContent = state.summaryAppendInFlight ? 'Loading more conversations...' : 'Scroll for more';
@@ -3961,23 +4196,53 @@ function setFilter(filter) {
   }
 }
 
-let searchDebounce = null;
-async function handleSearch(query) {
+let searchLocalDebounce = null;
+let searchRemoteDebounce = null;
+
+function applyLocalSearch(query) {
   const trimmed = String(query || '').trim();
-  const requestGeneration = numericValue(state.searchRequestGeneration, 0) + 1;
-  state.searchRequestGeneration = requestGeneration;
   state.searchQuery = trimmed;
 
   if (!trimmed) {
+    clearRetryTimer();
+    state.searchMessageResults = [];
+    state.searchMessageResultsInFlight = false;
+    state.searchMessageError = '';
+    state.messages = [];
     state.mailboxMode = state.useLegacyMailboxFallback ? 'legacy' : 'summary';
-    await loadMessages({
-      limit: state.summaryPageSize || 50,
-      allowLegacyFallback: false
-    });
+    renderThreads();
+    if (state.connected && !usingLegacyMailboxFlow() && !currentSummaryItems().length) {
+      ensureInitialSummaryLoad({
+        limit: state.summaryPageSize || 50
+      }).catch(() => {});
+    }
     return;
   }
 
-  setStateCard('loading', 'Searching messages...');
+  state.mailboxMode = 'search';
+  state.searchMessageResults = [];
+  state.searchMessageResultsInFlight = false;
+  state.searchMessageError = '';
+  state.messages = [];
+  renderThreads();
+}
+
+async function runRemoteSearch(query) {
+  const trimmed = String(query || '').trim();
+  if (!trimmed) {
+    return {
+      success: true,
+      skipped: true,
+      code: 'SEARCH_CLEARED'
+    };
+  }
+
+  const requestGeneration = numericValue(state.searchRequestGeneration, 0) + 1;
+  state.searchRequestGeneration = requestGeneration;
+  state.searchMessageResultsInFlight = true;
+  state.searchMessageError = '';
+  renderThreads();
+
   const response = await sendWorker('SEARCH_MESSAGES', {
     query: trimmed,
     limit: 20,
@@ -3993,16 +4258,12 @@ async function handleSearch(query) {
     state.lastMailboxTrace = normalizeTraceEntries(response?.trace);
     state.lastMailboxSource = 'search-error';
     state.lastMailboxTimings = normalizeTimings(response?.timings);
-
-    if (response.code === 'BACKEND_COLD_START') {
-      startColdStartCountdown(() => handleSearch(trimmed), {
-        message: 'Search is waiting for the backend to wake up.'
-      });
-      return;
-    }
-
-    setStateCard('error', failureMessageForResponse(response, 'Search failed.'), true);
-    return;
+    state.searchMessageResultsInFlight = false;
+    state.searchMessageResults = [];
+    state.messages = [];
+    state.searchMessageError = failureMessageForResponse(response, 'Search failed.');
+    renderThreads();
+    return response;
   }
 
   clearRetryTimer();
@@ -4012,11 +4273,18 @@ async function handleSearch(query) {
     timings: response.timings
   }, 'success');
   state.mailboxMode = 'search';
-  state.messages = Array.isArray(response.messages) ? response.messages : [];
+  state.searchMessageResultsInFlight = false;
+  state.searchMessageError = '';
+  state.searchMessageResults = Array.isArray(response.messages) ? response.messages : [];
+  state.messages = [...state.searchMessageResults];
   state.lastMailboxTrace = normalizeTraceEntries(response.trace);
   state.lastMailboxSource = response.source || 'search';
   state.lastMailboxTimings = normalizeTimings(response?.timings);
+  groupByThread(state.searchMessageResults).forEach((group) => {
+    storeContactMessages(group.threadId, group.messages);
+  });
   renderThreads();
+  return response;
 }
 
 function updateGuideProgressUI() {
@@ -4232,11 +4500,15 @@ function bindGuideEvents(sidebar) {
   const searchInput = sidebar.querySelector('#gmailUnifiedSearchInput');
   searchInput?.addEventListener('input', (event) => {
     scheduleIdleContactPrefetch([]);
-    clearTimeout(searchDebounce);
+    clearTimeout(searchLocalDebounce);
+    clearTimeout(searchRemoteDebounce);
     const value = event.target.value;
-    searchDebounce = setTimeout(() => {
-      handleSearch(value);
-    }, 220);
+    searchLocalDebounce = setTimeout(() => {
+      applyLocalSearch(value);
+    }, 200);
+    searchRemoteDebounce = setTimeout(() => {
+      runRemoteSearch(value).catch(() => {});
+    }, 400);
   });
 
   sidebar.querySelector('#gmailUnifiedRetryBtn')?.addEventListener('click', () => {
@@ -4299,11 +4571,15 @@ function bindGuideEvents(sidebar) {
     if (!response?.success) return;
     state.shellUnlocked = false;
     state.messages = [];
+    state.searchMessageResults = [];
+    state.searchMessageResultsInFlight = false;
+    state.searchMessageError = '';
     resetSectionedMailboxCaches();
     state.selectedThreadId = '';
     state.detailLastThreadId = '';
     state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
+    state.composeOverlay = defaultComposeOverlayState();
     state.useLegacyMailboxFallback = false;
     state.mailboxMode = 'summary';
     state.settingsOpen = false;
@@ -4311,6 +4587,51 @@ function bindGuideEvents(sidebar) {
     applyGmailLayoutMode();
     renderThreads();
     renderThreadDebug(null);
+    renderComposeOverlay();
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeBtn')?.addEventListener('click', () => {
+    openComposeOverlay();
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeCloseBtn')?.addEventListener('click', () => {
+    closeComposeOverlay();
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeCancelBtn')?.addEventListener('click', () => {
+    closeComposeOverlay();
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeTo')?.addEventListener('input', (event) => {
+    state.composeOverlay.to = event.target.value;
+    state.composeOverlay.sendError = '';
+    state.composeOverlay.sendStatus = '';
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeSubject')?.addEventListener('input', (event) => {
+    state.composeOverlay.subject = event.target.value;
+    state.composeOverlay.sendError = '';
+    state.composeOverlay.sendStatus = '';
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeBody')?.addEventListener('input', (event) => {
+    state.composeOverlay.body = event.target.value;
+    state.composeOverlay.sendError = '';
+    state.composeOverlay.sendStatus = '';
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeBody')?.addEventListener('keydown', async (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      await submitComposeOverlay();
+    }
+    if (event.key === 'Escape') {
+      closeComposeOverlay();
+    }
+  });
+
+  sidebar.querySelector('#gmailUnifiedComposeSend')?.addEventListener('click', async () => {
+    await submitComposeOverlay();
   });
 
   sidebar.querySelector('#gmailUnifiedComposerReply')?.addEventListener('click', () => {
@@ -4369,9 +4690,15 @@ function bindGuideEvents(sidebar) {
       const liveSettingsButton = document.getElementById('gmailUnifiedSettingsBtn');
       const liveSettingsPanel = document.getElementById('gmailUnifiedSettingsPanel');
       const insideSettings = liveSettingsButton?.contains(target) || liveSettingsPanel?.contains(target);
+      const liveComposeCard = document.querySelector('.gmail-unified-compose-card');
+      const liveComposeButton = document.getElementById('gmailUnifiedComposeBtn');
+      const insideCompose = liveComposeCard?.contains(target) || liveComposeButton?.contains(target);
       if (!insideSettings && state.settingsOpen) {
         state.settingsOpen = false;
         applyGmailLayoutMode();
+      }
+      if (!insideCompose && state.composeOverlay.open) {
+        closeComposeOverlay();
       }
     });
     window.__mailitaPointerCloseBound = true;
@@ -4388,8 +4715,8 @@ function buildSidebar() {
       <div class="gmail-unified-body">
         <section class="gmail-unified-left">
           <div class="gmail-unified-left-head">
-            <div class="gmail-unified-wordmark">Mailita</div>
             <div id="gmailUnifiedRailContext" class="gmail-unified-rail-context">Messages</div>
+            <button id="gmailUnifiedComposeBtn" class="gmail-unified-icon-btn gmail-unified-compose-launch" type="button" aria-label="Compose">&#9998;</button>
           </div>
           <div class="gmail-unified-search">
             <input id="gmailUnifiedSearchInput" type="text" placeholder="Search" />
@@ -4478,39 +4805,40 @@ function buildSidebar() {
       </div>
     </section>
 
-    <aside id="gmailUnifiedDebugPanel" class="gmail-unified-debug-panel" data-collapsed="false">
-      <div class="gmail-unified-debug-head">
-        <div>
-          <div class="gmail-unified-debug-kicker">Temp Debug</div>
-          <strong>Mailita Trace</strong>
+    <section id="gmailUnifiedComposeOverlay" class="gmail-unified-compose-overlay" hidden>
+      <div class="gmail-unified-compose-card">
+        <div class="gmail-unified-compose-head">
+          <div>
+            <div class="gmail-unified-install-kicker">Compose</div>
+            <h3>New message</h3>
+          </div>
+          <button id="gmailUnifiedComposeCloseBtn" class="gmail-unified-icon-btn" type="button" aria-label="Close compose">x</button>
         </div>
-        <div class="gmail-unified-debug-actions">
-          <button id="gmailUnifiedDebugClearBtn" class="gmail-unified-icon-btn" type="button" aria-label="Clear debug log">Clear</button>
-          <button id="gmailUnifiedDebugToggleBtn" class="gmail-unified-icon-btn" type="button" aria-label="Hide debug panel">Hide</button>
+        <label class="gmail-unified-compose-field">
+          <span>To</span>
+          <input id="gmailUnifiedComposeTo" type="text" placeholder="name@example.com" />
+        </label>
+        <label class="gmail-unified-compose-field">
+          <span>Subject</span>
+          <input id="gmailUnifiedComposeSubject" type="text" placeholder="Subject" />
+        </label>
+        <label class="gmail-unified-compose-field is-body">
+          <span>Message</span>
+          <textarea id="gmailUnifiedComposeBody" placeholder="Write your message" spellcheck="true"></textarea>
+        </label>
+        <div class="gmail-unified-compose-actions">
+          <div id="gmailUnifiedComposeStatus" class="gmail-unified-compose-status" data-state="idle"></div>
+          <div class="gmail-unified-compose-action-buttons">
+            <button id="gmailUnifiedComposeCancelBtn" class="gmail-unified-secondary-btn" type="button">Cancel</button>
+            <button id="gmailUnifiedComposeSend" class="gmail-unified-primary-btn" type="button">Send</button>
+          </div>
         </div>
       </div>
-      <div id="gmailUnifiedDebugBody" class="gmail-unified-debug-body">
-        <pre id="gmailUnifiedDebugState" class="gmail-unified-debug-state"></pre>
-        <div class="gmail-unified-debug-thread">
-          <div id="gmailUnifiedDebugSummary" class="gmail-unified-debug-summary">Open a conversation to inspect exactly what the UI received.</div>
-          <div id="gmailUnifiedDebugStatus" class="gmail-unified-debug-status" hidden></div>
-          <pre id="gmailUnifiedDebugLog" class="gmail-unified-thread-debug-log">Select a conversation to generate a debug report.</pre>
-        </div>
-        <div id="gmailUnifiedDebugEventLog" class="gmail-unified-debug-log"></div>
-      </div>
-    </aside>
+    </section>
   `;
 
   document.body.appendChild(sidebar);
   bindGuideEvents(sidebar);
-  sidebar.querySelector('#gmailUnifiedDebugClearBtn')?.addEventListener('click', () => {
-    debugState.events = [];
-    pushDebugEvent('debug', 'Debug log cleared');
-  });
-  sidebar.querySelector('#gmailUnifiedDebugToggleBtn')?.addEventListener('click', () => {
-    state.debugOpen = !state.debugOpen;
-    renderDebugPanel();
-  });
   if (!window.__mailitaDebugHooksBound) {
     window.addEventListener('error', (event) => {
       pushDebugEvent('window:error', 'Unhandled window error', {
@@ -4527,11 +4855,12 @@ function buildSidebar() {
     });
     window.__mailitaDebugHooksBound = true;
   }
-  pushDebugEvent('boot', 'Sidebar and debug panel built', {
+  pushDebugEvent('boot', 'Sidebar built', {
     mailHost: isMailHost(),
     href: window.location.href
   }, 'success');
   renderDebugPanel();
+  renderComposeOverlay();
   updateMainPanelVisibility();
 }
 
