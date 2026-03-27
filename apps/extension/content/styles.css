@@ -952,9 +952,13 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   display: grid;
   place-items: center;
   padding: 28px;
-  background: rgba(43, 34, 28, 0.2);
-  backdrop-filter: blur(22px);
+  background: rgba(28, 28, 30, 0.12);
+  backdrop-filter: blur(10px);
   z-index: 5;
+}
+
+.gmail-unified-compose-overlay[hidden] {
+  display: none !important;
 }
 
 .gmail-unified-compose-card {
@@ -962,11 +966,11 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 28px;
-  border-radius: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.38);
-  background: linear-gradient(180deg, rgba(248, 242, 235, 0.92), rgba(239, 230, 220, 0.88));
-  box-shadow: 0 26px 60px rgba(49, 38, 31, 0.18);
+  padding: 24px;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.46);
+  background: rgba(252, 250, 247, 0.96);
+  box-shadow: 0 18px 48px rgba(28, 28, 30, 0.14);
 }
 
 .gmail-unified-compose-head {
@@ -978,7 +982,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 .gmail-unified-compose-head h3 {
   margin: 4px 0 0;
-  font-size: 24px;
+  font-size: 22px;
   letter-spacing: -0.03em;
 }
 
@@ -996,10 +1000,10 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 .gmail-unified-compose-field input,
 .gmail-unified-compose-field textarea {
   width: 100%;
-  padding: 14px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.34);
+  padding: 13px 15px;
+  border: 1px solid rgba(28, 28, 30, 0.08);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.86);
   color: var(--mailita-text);
   font: inherit;
   outline: none;

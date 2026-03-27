@@ -1378,6 +1378,7 @@ function renderComposeOverlay(options = {}) {
   if (!overlay || !toInput || !subjectInput || !bodyInput || !sendButton || !status) return;
 
   overlay.hidden = !state.composeOverlay.open;
+  overlay.style.display = state.composeOverlay.open ? 'grid' : 'none';
   if (!state.composeOverlay.open) {
     return;
   }
@@ -4838,6 +4839,7 @@ function buildSidebar() {
   `;
 
   document.body.appendChild(sidebar);
+  state.composeOverlay = defaultComposeOverlayState();
   bindGuideEvents(sidebar);
   if (!window.__mailitaDebugHooksBound) {
     window.addEventListener('error', (event) => {
