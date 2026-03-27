@@ -1273,6 +1273,7 @@ async function handleLocalMailAction(action, payload = {}) {
 
   if (action === 'FETCH_MESSAGE_SUMMARIES') {
     const response = await MailitaGmailLocal.loadSummaries({
+      folder: payload.folder,
       limit: Number(payload.limit || 50),
       cursor: payload.cursor,
       append: Boolean(payload.append),

@@ -1320,9 +1320,11 @@
 
   async function loadSummaries(options = {}) {
     const startedAt = Date.now();
+    const folder = ['all', 'inbox', 'sent'].includes(options.folder) ? options.folder : 'all';
     const limit = Math.max(Number(options.limit || 50), 20);
     const cursor = String(options.cursor || '').trim();
     const append = Boolean(options.append);
+    const query = scopeQuery(folder);
     const cached = await readCachedMailbox().catch(() => ({
       messages: [],
       accountEmail: '',
@@ -1334,12 +1336,12 @@
 
     try {
       const accountEmail = normalizeEmail(cached.accountEmail || (await fetchProfile(false))?.emailAddress);
-      const page = await fetchThreadsPage('', limit, cursor, false);
+      const page = await fetchThreadsPage(query, limit, cursor, false);
       const threadDetails = await fetchThreadDetails(page.threads.map((thread) => thread.id).filter(Boolean));
-      const pageMessages = threadDetails
+      const pageMessages = filterMessagesByScope(threadDetails
         .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
         .map((message) => normalizeMessage(message, accountEmail))
-        .sort(byDateDesc);
+        .sort(byDateDesc), folder);
 
       if (pageMessages.length) {
         await mergeMessages(pageMessages);
@@ -1377,7 +1379,7 @@
     } catch (error) {
       if (!cursor && cached.messages.length) {
         const fallbackNextCursor = await metaGet(META_KEYS.summaryNextCursor, '').catch(() => '');
-        const summaries = buildContactSummaries(cached.messages, limit);
+        const summaries = buildContactSummaries(filterMessagesByScope(cached.messages, folder), limit);
         return {
           accountEmail: cached.accountEmail,
           summaries,

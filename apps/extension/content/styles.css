@@ -304,7 +304,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 .gmail-unified-thread-row {
   display: block;
   outline: none;
-  margin-bottom: 0;
+  margin-bottom: 6px;
 }
 
 .gmail-unified-thread-row-shell {
@@ -317,7 +317,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   border-radius: 24px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.26));
   border: 1px solid rgba(255, 255, 255, 0.42);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.52), 0 10px 24px rgba(82, 59, 36, 0.08);
   backdrop-filter: blur(18px) saturate(118%);
 }
@@ -453,6 +453,12 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   position: relative;
   margin-top: auto;
   padding-top: 4px;
+}
+
+#gmailUnifiedSettingsBtn,
+#gmailUnifiedSettingsPanel,
+.gmail-unified-left-footer {
+  display: none !important;
 }
 
 .gmail-unified-settings-launch {
@@ -608,7 +614,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 .gmail-unified-detail-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-items: center;
   padding: 18px 22px 14px;
@@ -623,6 +629,10 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   color: var(--mailita-text);
   font-size: 13px;
   font-weight: 600;
+}
+
+#gmailUnifiedBackBtn {
+  display: none !important;
 }
 
 .gmail-unified-detail-head-copy {
@@ -862,7 +872,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 .gmail-unified-composer-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: end;
 }
@@ -873,6 +883,12 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   padding: 4px;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.24);
+}
+
+#gmailUnifiedComposerReply,
+#gmailUnifiedComposerReplyAll,
+.gmail-unified-composer-modes {
+  display: none !important;
 }
 
 .gmail-unified-composer-mode {
@@ -967,9 +983,11 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 28px;
-  background: linear-gradient(180deg, rgba(94, 72, 51, 0.14), rgba(255, 255, 255, 0.18));
-  backdrop-filter: blur(18px) saturate(132%);
+  padding: 32px;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0) 34%),
+    linear-gradient(180deg, rgba(89, 69, 50, 0.16), rgba(255, 255, 255, 0.24));
+  backdrop-filter: blur(25px) saturate(136%);
   z-index: 5;
 }
 
@@ -978,16 +996,18 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 }
 
 .gmail-unified-compose-card {
-  width: min(560px, calc(100vw - 48px));
+  width: min(520px, calc(100vw - 56px));
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 28px;
-  border-radius: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.62);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(246, 240, 233, 0.78));
-  box-shadow: 0 34px 80px rgba(55, 35, 20, 0.22);
-  backdrop-filter: blur(30px) saturate(140%);
+  gap: 14px;
+  padding: 26px 26px 22px;
+  border-radius: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 238, 230, 0.68)),
+    rgba(255, 255, 255, 0.7);
+  box-shadow: 0 38px 82px rgba(55, 35, 20, 0.22);
+  backdrop-filter: blur(32px) saturate(145%);
 }
 
 .gmail-unified-compose-head {
@@ -999,7 +1019,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 .gmail-unified-compose-head h3 {
   margin: 4px 0 0;
-  font-size: 22px;
+  font-size: 24px;
   letter-spacing: -0.03em;
 }
 
@@ -1017,19 +1037,25 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 .gmail-unified-compose-field input,
 .gmail-unified-compose-field textarea {
   width: 100%;
-  padding: 13px 15px;
-  border: 1px solid rgba(108, 86, 64, 0.14);
+  padding: 12px 14px;
+  border: 0;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.5);
   color: var(--mailita-text);
   font: inherit;
   outline: none;
   box-sizing: border-box;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+}
+
+.gmail-unified-compose-field input {
+  height: 44px;
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .gmail-unified-compose-field textarea {
-  min-height: 200px;
+  min-height: 172px;
   resize: vertical;
 }
 
@@ -1051,6 +1077,28 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 .gmail-unified-compose-action-buttons {
   display: inline-flex;
   gap: 10px;
+  margin-left: auto;
+}
+
+#gmailUnifiedComposeCancelBtn,
+#gmailUnifiedComposeSend {
+  min-width: 88px;
+  padding: 10px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+#gmailUnifiedComposeCancelBtn {
+  background: rgba(131, 131, 138, 0.16);
+  color: var(--mailita-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.68);
+}
+
+#gmailUnifiedComposeSend {
+  background: #0b84ff;
+  color: #fff;
+  box-shadow: 0 16px 32px rgba(11, 132, 255, 0.28);
 }
 
 .gmail-unified-install-card {
