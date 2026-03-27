@@ -199,7 +199,17 @@ function buildDebugStateSnapshot() {
   };
 }
 
+function debugConsoleEnabled() {
+  try {
+    return window.__mailitaDebugLogs === true || window.localStorage?.getItem('mailita.debugLogs') === '1';
+  } catch {
+    return window.__mailitaDebugLogs === true;
+  }
+}
+
 function renderDebugPanel() {
+  if (!debugConsoleEnabled()) return;
+
   const signature = JSON.stringify({
     counter: debugState.counter,
     selectedThreadId: state.selectedThreadId || '',
