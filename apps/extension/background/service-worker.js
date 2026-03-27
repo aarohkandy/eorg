@@ -1324,8 +1324,8 @@ async function handleLocalMailAction(action, payload = {}) {
         contactKey: payload.contactKey,
         scope: payload.scope,
         cursor: payload.cursor,
-        pageSize: Number(payload.pageSize || payload.limitPerFolder || 50),
-        limitPerFolder: Number(payload.limitPerFolder || payload.pageSize || 50),
+        pageSize: Number(payload.pageSize || payload.limitPerFolder || 5),
+        limitPerFolder: Number(payload.limitPerFolder || payload.pageSize || 5),
         forceSync: Boolean(payload.forceSync),
         metadataOnly: payload.metadataOnly !== false,
         signal

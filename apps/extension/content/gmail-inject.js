@@ -25,6 +25,7 @@ const WORKER_TIMEOUT_BY_ACTION = {
   SEND_MESSAGE: 60000,
   SYNC_MESSAGES: 60000
 };
+const CONTACT_PAGE_SIZE = 5;
 
 const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -2371,7 +2372,7 @@ function appendThreadRow(list, group, options = {}) {
     renderThreads();
     if (!usingLegacyMailboxFlow()) {
       loadContactMessagesForThread(group.threadId, {
-        pageSize: 40
+        pageSize: CONTACT_PAGE_SIZE
       }).catch(() => {});
     }
   };
@@ -3247,7 +3248,7 @@ function contactFailureMessage(response, fallback = 'Unable to load this convers
   if (!response || typeof response !== 'object') return fallback;
 
   if (response.code === 'WORKER_TIMEOUT') {
-    return 'Still loading...';
+    return 'Still loading from Gmail...';
   }
 
   if (response.code === 'GMAIL_API_ERROR' || response.code === 'GMAIL_API_TIMEOUT') {
@@ -3255,11 +3256,11 @@ function contactFailureMessage(response, fallback = 'Unable to load this convers
   }
 
   if (response.code === 'ZERO_RESULTS') {
-    return 'No messages found';
+    return 'No recent messages found.';
   }
 
   if (response.code === 'REQUEST_ABORTED') {
-    return 'Still loading...';
+    return 'Still loading from Gmail...';
   }
 
   return failureMessageForResponse(response, fallback);
@@ -3721,10 +3722,11 @@ async function loadContactMessagesForThread(threadId, options = {}) {
       contactKey: threadId,
       scope: 'all',
       cursor,
-      pageSize: options.pageSize || options.limitPerFolder || 40,
-      limitPerFolder: options.limitPerFolder || options.pageSize || 40,
+      pageSize: options.pageSize || options.limitPerFolder || CONTACT_PAGE_SIZE,
+      limitPerFolder: options.limitPerFolder || options.pageSize || CONTACT_PAGE_SIZE,
       forceSync: Boolean(options.forceSync),
-      trackActivity: Boolean(options.trackActivity)
+      trackActivity: Boolean(options.trackActivity),
+      metadataOnly: options.metadataOnly !== false
     });
   } catch (error) {
     response = {
@@ -4201,7 +4203,7 @@ function setFilter(filter) {
     const loadState = getContactLoadState(state.selectedThreadId);
     if (!loadState.loaded) {
       loadContactMessagesForThread(state.selectedThreadId, {
-        pageSize: 40
+        pageSize: CONTACT_PAGE_SIZE
       }).catch(() => {});
     }
   }
@@ -4690,7 +4692,7 @@ function bindGuideEvents(sidebar) {
     loadContactMessagesForThread(state.selectedThreadId, {
       cursor: loadState.nextCursor,
       preserveScroll: true,
-      pageSize: 40
+      pageSize: CONTACT_PAGE_SIZE
     }).catch(() => {});
   });
 
