@@ -26,6 +26,8 @@ const WORKER_TIMEOUT_BY_ACTION = {
   SYNC_MESSAGES: 60000
 };
 const CONTACT_PAGE_SIZE = 5;
+const SUMMARY_APPEND_TRIGGER_PX = 220;
+const SUMMARY_APPEND_PAGE_SIZE = 15;
 
 const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -1357,26 +1359,46 @@ function defaultComposeOverlayState() {
 }
 
 function parseComposeRecipients(value) {
-  const entries = String(value || '')
-    .split(/[;,]+/)
-    .map((entry) => String(entry || '').trim())
-    .filter(Boolean)
-    .map((entry) => {
-      const match = entry.match(/^(.*)<([^>]+)>$/);
-      if (!match) {
-        return {
-          email: entry,
-          name: ''
-        };
-      }
-      return {
-        name: String(match[1] || '').replace(/(^\"|\"$)/g, '').trim(),
-        email: String(match[2] || '').trim()
-      };
-    })
-    .filter((entry) => /\S+@\S+\.\S+/.test(String(entry.email || '').trim()));
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+
+  const entries = [];
+  const structuredPattern = /([^,<;\n\r]*?)\s*<\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\s*>/gi;
+  const scrubbed = raw.replace(structuredPattern, (_match, name, email) => {
+    entries.push({
+      name: String(name || '').replace(/(^\"|\"$)/g, '').trim(),
+      email: String(email || '').trim()
+    });
+    return ',';
+  });
+
+  const plainMatches = scrubbed.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  plainMatches.forEach((email) => {
+    entries.push({
+      email: String(email || '').trim(),
+      name: ''
+    });
+  });
 
   return uniqueRecipientEntries(entries);
+}
+
+function syncComposeOverlayDraftFromDom() {
+  const toInput = document.getElementById('gmailUnifiedComposeTo');
+  const subjectInput = document.getElementById('gmailUnifiedComposeSubject');
+  const bodyInput = document.getElementById('gmailUnifiedComposeBody');
+  const nextDraft = {
+    to: toInput instanceof HTMLInputElement ? toInput.value : state.composeOverlay.to,
+    subject: subjectInput instanceof HTMLInputElement ? subjectInput.value : state.composeOverlay.subject,
+    body: bodyInput instanceof HTMLTextAreaElement ? bodyInput.value : state.composeOverlay.body
+  };
+
+  state.composeOverlay = {
+    ...state.composeOverlay,
+    ...nextDraft
+  };
+
+  return nextDraft;
 }
 
 function renderComposeOverlay(options = {}) {
@@ -1429,9 +1451,10 @@ function closeComposeOverlay() {
 async function submitComposeOverlay() {
   if (state.composeOverlay.sendInFlight) return null;
 
-  const recipients = parseComposeRecipients(state.composeOverlay.to);
-  const bodyText = String(state.composeOverlay.body || '').trim();
-  const subject = String(state.composeOverlay.subject || '').trim();
+  const draft = syncComposeOverlayDraftFromDom();
+  const recipients = parseComposeRecipients(draft.to);
+  const bodyText = String(draft.body || '').trim();
+  const subject = String(draft.subject || '').trim();
 
   if (!recipients.length) {
     state.composeOverlay.sendError = 'Add at least one recipient.';
@@ -1452,13 +1475,22 @@ async function submitComposeOverlay() {
   state.composeOverlay.sendStatus = '';
   renderComposeOverlay();
 
-  const response = await sendWorker('SEND_MESSAGE', {
-    to: recipients,
-    subject,
-    bodyText
-  });
-
-  state.composeOverlay.sendInFlight = false;
+  let response;
+  try {
+    response = await sendWorker('SEND_MESSAGE', {
+      to: recipients,
+      subject,
+      bodyText
+    });
+  } catch (error) {
+    response = {
+      success: false,
+      code: error?.code || 'SEND_FAILED',
+      error: error?.message || String(error)
+    };
+  } finally {
+    state.composeOverlay.sendInFlight = false;
+  }
 
   if (!response?.success) {
     state.composeOverlay.sendError = response?.code === 'AUTH_SCOPE_REQUIRED'
@@ -3806,7 +3838,9 @@ async function loadMessageSummaries(options = {}) {
   const append = Boolean(options.append);
   const silent = Boolean(options.silent || append || currentSummaryItems().length > 0);
   const requestedFolder = options.folder || 'all';
-  const requestedLimit = Math.max(Number(options.limit || state.summaryPageSize || 50), 20);
+  const requestedLimit = append
+    ? Math.min(20, Math.max(10, Number(options.limit || SUMMARY_APPEND_PAGE_SIZE)))
+    : Math.max(Number(options.limit || state.summaryPageSize || 50), 20);
   const requestedCursor = String(options.cursor || '').trim();
 
   if (append) {
@@ -4046,8 +4080,9 @@ async function loadMoreMessageSummaries() {
 
   const currentList = document.getElementById('gmailUnifiedList');
   const previousScrollTop = currentList?.scrollTop || 0;
+  const appendLimit = Math.min(20, Math.max(10, SUMMARY_APPEND_PAGE_SIZE));
   pushDebugEvent('mailbox', 'Requesting next summary page', {
-    limit: state.summaryPageSize,
+    limit: appendLimit,
     cursor: state.summaryCursor
   });
 
@@ -4056,7 +4091,7 @@ async function loadMoreMessageSummaries() {
     forceSync: false,
     append: true,
     cursor: state.summaryCursor,
-    limit: state.summaryPageSize
+    limit: appendLimit
   });
 
   if (currentList) {
@@ -4538,7 +4573,7 @@ function bindGuideEvents(sidebar) {
     if (usingLegacyMailboxFlow() || state.mailboxMode === 'search') return;
     const list = document.getElementById('gmailUnifiedList');
     if (!list) return;
-    const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 180;
+    const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) <= SUMMARY_APPEND_TRIGGER_PX;
     if (!nearBottom) return;
     loadMoreMessageSummaries().catch(() => {});
   });
