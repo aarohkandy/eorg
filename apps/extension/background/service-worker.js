@@ -12,6 +12,7 @@ const MailitaGmailLocal = globalThis.MailitaGmailLocal || {
   disconnect: async () => {},
   loadSummaries: async () => ({ summaries: [], count: 0, source: 'gmail_api_local' }),
   loadContact: async () => ({ messages: [], count: 0, source: 'gmail_api_local_contact' }),
+  loadContactBodies: async () => ({ messages: [], count: 0, source: 'gmail_api_local_contact_bodies' }),
   sendMessage: async () => {
     throw new Error('Mailita Gmail local send adapter is unavailable.');
   },
@@ -76,6 +77,7 @@ const GUIDE_ACTIONS = new Set([
   'DISCONNECT',
   'FETCH_MESSAGE_SUMMARIES',
   'FETCH_CONTACT_MESSAGES',
+  'FETCH_CONTACT_BODIES',
   'SEND_MESSAGE',
   'FETCH_MESSAGES',
   'DEBUG_REFETCH_CONTACT',
@@ -92,9 +94,189 @@ const GUIDE_ACTIONS = new Set([
 
 let diagnosticsWriteChain = Promise.resolve();
 const activeSyncPollers = new Map();
+const FETCH_QUEUE_CONCURRENCY = 2;
+const FETCH_PRIORITY_ORDER = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3
+};
+const fetchQueue = {
+  counter: 0,
+  pending: [],
+  active: new Map(),
+  idleTimer: null,
+  pumpScheduled: false,
+  lastUserActivityAt: Date.now()
+};
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function normalizeFetchPriority(value) {
+  return Object.prototype.hasOwnProperty.call(FETCH_PRIORITY_ORDER, value) ? value : 'P0';
+}
+
+function createFetchAbortError(message = 'Gmail API request was aborted.') {
+  const error = new Error(message);
+  error.code = 'GMAIL_API_ABORTED';
+  return error;
+}
+
+function rejectFetchJob(job, error) {
+  try {
+    job.reject(error);
+  } catch {
+    // Ignore late rejections if the caller already disconnected.
+  }
+}
+
+function clearFetchIdleTimer() {
+  if (fetchQueue.idleTimer) {
+    clearTimeout(fetchQueue.idleTimer);
+    fetchQueue.idleTimer = null;
+  }
+}
+
+function scheduleFetchPump(delayMs = 0) {
+  if (delayMs > 0) {
+    clearFetchIdleTimer();
+    fetchQueue.idleTimer = setTimeout(() => {
+      fetchQueue.idleTimer = null;
+      pumpFetchQueue();
+    }, delayMs);
+    return;
+  }
+  if (fetchQueue.pumpScheduled) return;
+  fetchQueue.pumpScheduled = true;
+  queueMicrotask(() => {
+    fetchQueue.pumpScheduled = false;
+    pumpFetchQueue();
+  });
+}
+
+function compareFetchJobs(left, right) {
+  const leftPriority = FETCH_PRIORITY_ORDER[left.priority] ?? FETCH_PRIORITY_ORDER.P3;
+  const rightPriority = FETCH_PRIORITY_ORDER[right.priority] ?? FETCH_PRIORITY_ORDER.P3;
+  if (leftPriority !== rightPriority) {
+    return leftPriority - rightPriority;
+  }
+  return left.enqueuedAt - right.enqueuedAt;
+}
+
+function hasUrgentFetchWork() {
+  const jobs = [
+    ...fetchQueue.pending,
+    ...fetchQueue.active.values()
+  ];
+  return jobs.some((job) => job.priority === 'P0' || job.priority === 'P1');
+}
+
+function canRunFetchJob(job) {
+  if (job.priority !== 'P3') return true;
+  if (hasUrgentFetchWork()) return false;
+  const idleForMs = Date.now() - fetchQueue.lastUserActivityAt;
+  return idleForMs >= 2000;
+}
+
+function cancelFetchJobs(predicate, reason = 'Gmail API request was aborted.') {
+  const nextPending = [];
+  fetchQueue.pending.forEach((job) => {
+    if (!predicate(job)) {
+      nextPending.push(job);
+      return;
+    }
+    rejectFetchJob(job, createFetchAbortError(reason));
+  });
+  fetchQueue.pending = nextPending;
+
+  fetchQueue.active.forEach((job) => {
+    if (!predicate(job)) return;
+    try {
+      job.controller.abort(reason);
+    } catch {
+      job.controller.abort();
+    }
+  });
+}
+
+function enqueueFetchJob(options = {}) {
+  const job = {
+    id: ++fetchQueue.counter,
+    kind: String(options.kind || 'generic').trim() || 'generic',
+    priority: normalizeFetchPriority(options.priority),
+    contactKey: String(options.contactKey || '').trim(),
+    dedupeKey: String(options.dedupeKey || '').trim() || `${options.kind || 'generic'}:${fetchQueue.counter}`,
+    enqueuedAt: Date.now(),
+    controller: new AbortController(),
+    run: options.run
+  };
+
+  const existingPending = fetchQueue.pending.find((entry) => entry.dedupeKey === job.dedupeKey);
+  if (existingPending) {
+    const existingPriority = FETCH_PRIORITY_ORDER[existingPending.priority] ?? FETCH_PRIORITY_ORDER.P3;
+    const nextPriority = FETCH_PRIORITY_ORDER[job.priority] ?? FETCH_PRIORITY_ORDER.P3;
+    if (nextPriority < existingPriority) {
+      existingPending.priority = job.priority;
+      existingPending.enqueuedAt = Date.now();
+      fetchQueue.pending.sort(compareFetchJobs);
+      scheduleFetchPump();
+    }
+    return existingPending.promise;
+  }
+  const existingActive = [...fetchQueue.active.values()].find((entry) => entry.dedupeKey === job.dedupeKey);
+  if (existingActive) {
+    const existingPriority = FETCH_PRIORITY_ORDER[existingActive.priority] ?? FETCH_PRIORITY_ORDER.P3;
+    const nextPriority = FETCH_PRIORITY_ORDER[job.priority] ?? FETCH_PRIORITY_ORDER.P3;
+    if (nextPriority < existingPriority) {
+      existingActive.priority = job.priority;
+    }
+    return existingActive.promise;
+  }
+
+  job.promise = new Promise((resolve, reject) => {
+    job.resolve = resolve;
+    job.reject = reject;
+  });
+
+  fetchQueue.pending.push(job);
+  fetchQueue.pending.sort(compareFetchJobs);
+  scheduleFetchPump();
+  return job.promise;
+}
+
+function pumpFetchQueue() {
+  clearFetchIdleTimer();
+  fetchQueue.pending.sort(compareFetchJobs);
+
+  while (fetchQueue.active.size < FETCH_QUEUE_CONCURRENCY) {
+    const nextIndex = fetchQueue.pending.findIndex((job) => canRunFetchJob(job));
+    if (nextIndex < 0) {
+      const hasIdleWork = fetchQueue.pending.some((job) => job.priority === 'P3');
+      if (hasIdleWork) {
+        const idleForMs = Date.now() - fetchQueue.lastUserActivityAt;
+        scheduleFetchPump(Math.max(50, 2000 - idleForMs));
+      }
+      return;
+    }
+
+    const [job] = fetchQueue.pending.splice(nextIndex, 1);
+    fetchQueue.active.set(job.id, job);
+
+    Promise.resolve()
+      .then(() => job.run({ signal: job.controller.signal }))
+      .then((result) => {
+        job.resolve(result);
+      })
+      .catch((error) => {
+        rejectFetchJob(job, error);
+      })
+      .finally(() => {
+        fetchQueue.active.delete(job.id);
+        scheduleFetchPump();
+      });
+  }
 }
 
 function firstPendingStep(status) {
@@ -880,7 +1062,7 @@ function localTrace(level, stage, message, extra = {}) {
   return buildDiagnosticEntry('EXT', level, stage, message, extra);
 }
 
-function mapLocalError(error, fallbackCode = 'GMAIL_API_FAILED') {
+function mapLocalError(error, fallbackCode = 'GMAIL_API_ERROR') {
   const message = String(error?.message || 'Local Gmail request failed.');
   const code = String(error?.code || '');
   const details = [
@@ -933,12 +1115,24 @@ function mapLocalError(error, fallbackCode = 'GMAIL_API_FAILED') {
   if (code === 'GMAIL_API_TIMEOUT') {
     return {
       success: false,
-      code: 'GMAIL_API_TIMEOUT',
-      error: 'Gmail took too long to respond. Try again in a moment.',
+      code: 'GMAIL_API_ERROR',
+      error: 'Gmail couldn\'t fetch this',
       retriable: true,
       retryAfterSec: 10,
       trace: [localTrace('error', 'gmail_api_timeout', 'A Gmail API request timed out in the extension.', {
         code: 'GMAIL_API_TIMEOUT',
+        details
+      })]
+    };
+  }
+
+  if (code === 'GMAIL_API_ABORTED') {
+    return {
+      success: false,
+      code: 'REQUEST_ABORTED',
+      error: 'Request canceled.',
+      trace: [localTrace('info', 'gmail_api_aborted', 'A Gmail API request was canceled in the extension.', {
+        code: 'REQUEST_ABORTED',
         details
       })]
     };
@@ -1103,14 +1297,39 @@ async function handleLocalMailAction(action, payload = {}) {
   }
 
   if (action === 'FETCH_CONTACT_MESSAGES') {
-    const response = await MailitaGmailLocal.loadContact({
-      contactEmail: payload.contactEmail,
+    const priority = normalizeFetchPriority(payload.priority || 'P0');
+    if (payload.userInitiated !== false || priority === 'P0' || priority === 'P1') {
+      fetchQueue.lastUserActivityAt = Date.now();
+    }
+    if (priority === 'P0' && payload.contactKey) {
+      cancelFetchJobs((job) => {
+        if (!job.contactKey || job.contactKey === payload.contactKey) return false;
+        return job.priority === 'P0' || job.priority === 'P1' || job.priority === 'P2' || job.priority === 'P3';
+      }, 'Selection changed.');
+      cancelFetchJobs((job) => job.priority === 'P2' || job.priority === 'P3', 'Higher priority contact selected.');
+    }
+
+    const response = await enqueueFetchJob({
+      kind: 'contact-page',
+      priority,
       contactKey: payload.contactKey,
-      scope: payload.scope,
-      cursor: payload.cursor,
-      pageSize: Number(payload.pageSize || payload.limitPerFolder || 50),
-      limitPerFolder: Number(payload.limitPerFolder || payload.pageSize || 50),
-      forceSync: Boolean(payload.forceSync)
+      dedupeKey: [
+        'contact-page',
+        String(payload.contactKey || ''),
+        String(payload.cursor || ''),
+        String(payload.scope || 'all')
+      ].join(':'),
+      run: ({ signal }) => MailitaGmailLocal.loadContact({
+        contactEmail: payload.contactEmail,
+        contactKey: payload.contactKey,
+        scope: payload.scope,
+        cursor: payload.cursor,
+        pageSize: Number(payload.pageSize || payload.limitPerFolder || 50),
+        limitPerFolder: Number(payload.limitPerFolder || payload.pageSize || 50),
+        forceSync: Boolean(payload.forceSync),
+        metadataOnly: payload.metadataOnly !== false,
+        signal
+      })
     });
     return {
       success: true,
@@ -1123,6 +1342,40 @@ async function handleLocalMailAction(action, payload = {}) {
       timings: response.timings,
       trace: [localTrace('success', 'local_contact_loaded', 'Loaded contact messages from the Gmail API.', {
         details: `contactEmail=${payload.contactEmail}; scope=${payload.scope || 'all'}; count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'FETCH_CONTACT_BODIES') {
+    const priority = normalizeFetchPriority(payload.priority || 'P1');
+    if (payload.userInitiated !== false || priority === 'P0' || priority === 'P1') {
+      fetchQueue.lastUserActivityAt = Date.now();
+    }
+    const messageIds = Array.isArray(payload.messageIds) ? payload.messageIds : [];
+    const response = await enqueueFetchJob({
+      kind: 'contact-bodies',
+      priority,
+      contactKey: payload.contactKey,
+      dedupeKey: [
+        'contact-bodies',
+        String(payload.contactKey || ''),
+        [...new Set(messageIds.map((id) => String(id || '').trim()).filter(Boolean))].sort().join(',')
+      ].join(':'),
+      run: ({ signal }) => MailitaGmailLocal.loadContactBodies({
+        contactEmail: payload.contactEmail,
+        contactKey: payload.contactKey,
+        messageIds,
+        signal
+      })
+    });
+    return {
+      success: true,
+      messages: response.messages,
+      count: response.count,
+      source: response.source,
+      timings: response.timings,
+      trace: [localTrace('success', 'local_contact_bodies_loaded', 'Loaded visible contact bodies from the Gmail API.', {
+        details: `contactEmail=${payload.contactEmail || ''}; count=${response.count}`
       })]
     };
   }

@@ -3,6 +3,7 @@
 (function initMailitaGmailLocal(globalScope) {
   const GMAIL_READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
   const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
+  const GMAIL_API_CONCURRENCY = 2;
   const GMAIL_SCOPE = GMAIL_READ_SCOPE;
   const API_ROOT = 'https://www.googleapis.com/gmail/v1/users/me';
   const GMAIL_API_TIMEOUT_MS = 20000;
@@ -197,6 +198,29 @@
       error[key] = value;
     });
     return error;
+  }
+
+  function bindAbortSignal(signal, controller) {
+    if (!signal || typeof signal.addEventListener !== 'function') {
+      return () => {};
+    }
+    if (signal.aborted) {
+      try {
+        controller.abort(signal.reason);
+      } catch {
+        controller.abort();
+      }
+      return () => {};
+    }
+    const onAbort = () => {
+      try {
+        controller.abort(signal.reason);
+      } catch {
+        controller.abort();
+      }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    return () => signal.removeEventListener('abort', onAbort);
   }
 
   function emailLocalPart(value) {
@@ -548,7 +572,7 @@
     return encodeBase64UrlUtf8(lines.join('\r\n'));
   }
 
-  function normalizeMessage(message, accountEmail) {
+  function normalizeMessage(message, accountEmail, options = {}) {
     const payload = message?.payload || {};
     const headers = Array.isArray(payload.headers) ? payload.headers : [];
     const from = parseAddressList(headerValue(headers, 'From'))[0] || { name: '', email: '' };
@@ -559,7 +583,16 @@
     const labelIds = Array.isArray(message?.labelIds) ? message.labelIds : [];
     const isOutgoing = labelIds.includes('SENT') || normalizeEmail(from.email) === normalizeEmail(accountEmail);
     const contactIdentity = buildContactIdentity(from, to, isOutgoing);
-    const bodies = extractBodyFromPayload(payload);
+    const contentState = options.contentState === 'metadata' ? 'metadata' : 'full';
+    const bodies = contentState === 'metadata'
+      ? {
+        bodyText: '',
+        bodyHtml: '',
+        bodyFormat: 'text',
+        hasRemoteImages: false,
+        hasLinkedImages: false
+      }
+      : extractBodyFromPayload(payload);
     const date = safeDate(message?.internalDate || headerValue(headers, 'Date'));
 
     return {
@@ -576,7 +609,7 @@
       replyTo,
       date,
       snippet: String(message?.snippet || '').trim(),
-      bodyText: bodies.bodyText || String(message?.snippet || '').trim(),
+      bodyText: contentState === 'metadata' ? '' : (bodies.bodyText || String(message?.snippet || '').trim()),
       bodyHtml: bodies.bodyHtml,
       bodyFormat: bodies.bodyFormat,
       hasRemoteImages: bodies.hasRemoteImages,
@@ -590,7 +623,8 @@
       contactKind: contactIdentity.contactKind,
       contactDomain: contactIdentity.contactDomain,
       flags: flagsFromLabels(labelIds),
-      historyId: String(message?.historyId || '')
+      historyId: String(message?.historyId || ''),
+      contentState
     };
   }
 
@@ -824,7 +858,12 @@
     const timeoutMs = Number.isFinite(Number(options.timeoutMs))
       ? Number(options.timeoutMs)
       : GMAIL_API_TIMEOUT_MS;
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const unbindAbort = bindAbortSignal(options.signal, controller);
 
     let response;
     try {
@@ -839,6 +878,15 @@
       });
     } catch (error) {
       if (error?.name === 'AbortError') {
+        if (options.signal?.aborted && !timedOut) {
+          throw assignErrorDetails(
+            new Error('Gmail API request was aborted.'),
+            {
+              code: 'GMAIL_API_ABORTED',
+              path
+            }
+          );
+        }
         throw assignErrorDetails(
           new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)} seconds.`),
           {
@@ -853,6 +901,7 @@
       });
     } finally {
       clearTimeout(timeoutId);
+      unbindAbort();
     }
 
     if (response.status === 401 && attempt === 0) {
@@ -884,14 +933,17 @@
     };
   }
 
-  async function fetchThreadsPage(query, limit, pageToken = '', interactive = false) {
+  async function fetchThreadsPage(query, limit, pageToken = '', interactive = false, options = {}) {
     const params = new URLSearchParams({
       maxResults: String(limit)
     });
     if (query) params.set('q', query);
     if (pageToken) params.set('pageToken', pageToken);
 
-    const response = await fetchJson(`/threads?${params.toString()}`, { interactive });
+    const response = await fetchJson(`/threads?${params.toString()}`, {
+      interactive,
+      signal: options.signal
+    });
     if (!response.ok) {
       throw assignErrorDetails(
         new Error(response?.data?.error?.message || `Gmail threads list failed with HTTP ${response.status}.`),
@@ -909,17 +961,22 @@
     };
   }
 
-  async function fetchThreads(query, limit, interactive = false) {
-    const page = await fetchThreadsPage(query, limit, '', interactive);
+  async function fetchThreads(query, limit, interactive = false, options = {}) {
+    const page = await fetchThreadsPage(query, limit, '', interactive, options);
     return page.threads;
   }
 
-  async function mapWithConcurrency(items, limit, task) {
+  async function mapWithConcurrency(items, limit, task, options = {}) {
     const results = [];
     let nextIndex = 0;
 
     async function worker() {
       while (nextIndex < items.length) {
+        if (options.signal?.aborted) {
+          throw assignErrorDetails(new Error('Parallel Gmail task aborted.'), {
+            code: 'GMAIL_API_ABORTED'
+          });
+        }
         const index = nextIndex++;
         results[index] = await task(items[index], index);
       }
@@ -930,18 +987,36 @@
     return results;
   }
 
-  async function fetchThreadDetails(threadIds) {
+  async function fetchThreadDetails(threadIds, metadataOnly = false, options = {}) {
     const failures = [];
-    const threads = await mapWithConcurrency(threadIds, 6, async (threadId) => {
+    const threads = await mapWithConcurrency(threadIds, GMAIL_API_CONCURRENCY, async (threadId) => {
       try {
-        const response = await fetchJson(`/threads/${threadId}?format=full`, { interactive: false });
+        const params = new URLSearchParams({
+          format: metadataOnly ? 'metadata' : 'full'
+        });
+        if (metadataOnly) {
+          [
+            'From',
+            'To',
+            'Date',
+            'Subject',
+            'Message-ID',
+            'In-Reply-To',
+            'References'
+          ].forEach((header) => params.append('metadataHeaders', header));
+        }
+        const path = `/threads/${threadId}?${params.toString()}`;
+        const response = await fetchJson(path, {
+          interactive: false,
+          signal: options.signal
+        });
         if (!response.ok) {
           throw assignErrorDetails(
             new Error(response?.data?.error?.message || `Gmail thread fetch failed with HTTP ${response.status}.`),
             {
               status: response.status,
               stage: 'thread_detail',
-              path: `/threads/${threadId}?format=full`,
+              path,
               threadId
             }
           );
@@ -957,7 +1032,7 @@
         });
         return null;
       }
-    });
+    }, { signal: options.signal });
 
     const resolved = threads.filter(Boolean);
     if (!resolved.length && failures.length) {
@@ -967,6 +1042,54 @@
         status: first.status,
         stage: first.stage,
         threadId: first.threadId
+      });
+    }
+
+    return resolved;
+  }
+
+  async function fetchMessageDetails(messageIds, options = {}) {
+    const failures = [];
+    const resolvedIds = [...new Set((Array.isArray(messageIds) ? messageIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const messages = await mapWithConcurrency(resolvedIds, GMAIL_API_CONCURRENCY, async (messageId) => {
+      try {
+        const path = `/messages/${messageId}?format=full`;
+        const response = await fetchJson(path, {
+          interactive: false,
+          signal: options.signal
+        });
+        if (!response.ok) {
+          throw assignErrorDetails(
+            new Error(response?.data?.error?.message || `Gmail message fetch failed with HTTP ${response.status}.`),
+            {
+              status: response.status,
+              stage: 'message_detail',
+              path,
+              messageId
+            }
+          );
+        }
+        return response.data;
+      } catch (error) {
+        failures.push({
+          messageId,
+          code: error?.code || '',
+          status: Number(error?.status || 0) || undefined,
+          stage: error?.stage || 'message_detail',
+          message: error?.message || 'Unknown message detail failure.'
+        });
+        return null;
+      }
+    }, { signal: options.signal });
+
+    const resolved = messages.filter(Boolean);
+    if (!resolved.length && failures.length) {
+      const first = failures[0];
+      throw assignErrorDetails(new Error(first.message || 'Gmail message fetch failed.'), {
+        code: first.code || 'GMAIL_MESSAGE_FETCH_FAILED',
+        status: first.status,
+        stage: first.stage,
+        messageId: first.messageId
       });
     }
 
@@ -1283,7 +1406,7 @@
     const targetEmail = normalizeEmail(options.contactEmail);
     const scope = ['all', 'inbox', 'sent'].includes(options.scope) ? options.scope : 'all';
     const cursor = String(options.cursor || '').trim();
-    const pageSize = Math.max(Number(options.pageSize || options.limitPerFolder || 25), 20);
+    const metadataOnly = options.metadataOnly !== false;
     let cached = await readCachedMailbox();
     let matches = filterMessagesByScope(
       cached.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey)),
@@ -1298,12 +1421,20 @@
         gmailQueryForContact(targetEmail, targetKey),
         scopeQuery(scope)
       );
-      const page = await fetchThreadsPage(query, pageSize * 2, cursor, false);
-      const threadDetails = await fetchThreadDetails(page.threads.map((thread) => thread.id).filter(Boolean));
+      const page = await fetchThreadsPage(query, 5, cursor, false, {
+        signal: options.signal
+      });
+      const threadDetails = await fetchThreadDetails(
+        page.threads.map((thread) => thread.id).filter(Boolean),
+        metadataOnly,
+        { signal: options.signal }
+      );
       const accountEmail = cached.accountEmail || normalizeEmail(await metaGet(META_KEYS.accountEmail, '').catch(() => '')) || normalizeEmail((await fetchProfile(false))?.emailAddress);
       const remoteMessages = threadDetails
         .flatMap((thread) => Array.isArray(thread?.messages) ? thread.messages : [])
-        .map((message) => normalizeMessage(message, accountEmail))
+        .map((message) => normalizeMessage(message, accountEmail, {
+          contentState: metadataOnly ? 'metadata' : 'full'
+        }))
         .sort(byDateDesc);
 
       if (remoteMessages.length) {
@@ -1327,6 +1458,52 @@
       source: 'gmail_api_local_contact',
       timings: cached.timings || timingEnvelope(Date.now()),
       debug: cached.debug || debugEnvelope('cache', contentCoverage(matches))
+    };
+  }
+
+  async function loadContactBodies(options = {}) {
+    const startedAt = Date.now();
+    const targetKey = String(options.contactKey || '').trim();
+    const targetEmail = normalizeEmail(options.contactEmail);
+    const requestedIds = [...new Set((Array.isArray(options.messageIds) ? options.messageIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+    if (!requestedIds.length) {
+      return {
+        messages: [],
+        count: 0,
+        source: 'gmail_api_local_contact_bodies',
+        timings: timingEnvelope(startedAt)
+      };
+    }
+
+    const cached = await readCachedMailbox().catch(() => ({
+      messages: [],
+      accountEmail: '',
+      lastHistoryId: '',
+      lastSyncTime: '',
+      lastFullSyncAt: 0,
+      timings: timingEnvelope(Date.now(), { cache_read_ms: 0 })
+    }));
+    const accountEmail = cached.accountEmail || normalizeEmail(await metaGet(META_KEYS.accountEmail, '').catch(() => '')) || normalizeEmail((await fetchProfile(false))?.emailAddress);
+    const fullMessages = await fetchMessageDetails(requestedIds, { signal: options.signal });
+    const normalized = fullMessages
+      .map((message) => normalizeMessage(message, accountEmail, { contentState: 'full' }))
+      .filter((message) => {
+        if (targetKey && String(message?.contactKey || '').trim() !== targetKey) return false;
+        if (targetEmail && normalizeEmail(message?.contactEmail) !== targetEmail) return false;
+        return true;
+      });
+
+    if (normalized.length) {
+      await mergeMessages(normalized);
+    }
+
+    return {
+      messages: normalized,
+      count: normalized.length,
+      source: 'gmail_api_local_contact_bodies',
+      timings: timingEnvelope(startedAt, {
+        cache_read_ms: cached.timings?.cache_read_ms || 0
+      })
     };
   }
 
@@ -1487,6 +1664,7 @@
     disconnect,
     loadSummaries,
     loadContact,
+    loadContactBodies,
     sendMessage,
     search,
     refreshIncremental,
