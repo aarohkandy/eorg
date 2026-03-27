@@ -28,6 +28,8 @@ const WORKER_TIMEOUT_BY_ACTION = {
 const CONTACT_PAGE_SIZE = 5;
 const SUMMARY_APPEND_TRIGGER_PX = 220;
 const SUMMARY_APPEND_PAGE_SIZE = 15;
+const mLog = (action, details = {}) => console.log(`[Mailita ${new Date().toISOString().split('T')[1]}] ${action}`, details);
+globalThis.mLog = mLog;
 
 const GUIDE_STEPS = ['connect_account'];
 const GUIDE_STEP_SET = new Set(GUIDE_STEPS);
@@ -337,6 +339,12 @@ function summarizeWorkerResponse(action, response) {
 function sendWorker(action, payload = {}, options = {}) {
   const requestId = debugState.counter + 1;
   const timeoutMs = workerTimeoutMs(action, options);
+  const startedAt = performance.now();
+  mLog(`${action}:request`, {
+    requestId,
+    timeout_ms: timeoutMs,
+    payload
+  });
   pushDebugEvent('worker:request', `${action} started`, { requestId, timeoutMs, payload });
 
   let timeoutId = null;
@@ -352,6 +360,11 @@ function sendWorker(action, payload = {}, options = {}) {
   return Promise.race([workerPromise, timeoutPromise])
     .then((response) => {
       if (timeoutId) window.clearTimeout(timeoutId);
+      mLog(`${action}:response`, {
+        requestId,
+        duration_ms: Math.round(performance.now() - startedAt),
+        response: summarizeWorkerResponse(action, response)
+      });
       pushDebugEvent(
         response?.success === false ? 'worker:error' : 'worker:response',
         `${action} completed`,
@@ -362,6 +375,12 @@ function sendWorker(action, payload = {}, options = {}) {
     })
     .catch((error) => {
       if (timeoutId) window.clearTimeout(timeoutId);
+      mLog(`${action}:error`, {
+        requestId,
+        duration_ms: Math.round(performance.now() - startedAt),
+        code: error?.code || '',
+        message: error?.message || String(error)
+      });
       pushDebugEvent('worker:exception', `${action} failed`, {
         requestId,
         error: {
@@ -1362,23 +1381,24 @@ function parseComposeRecipients(value) {
   const raw = String(value || '').trim();
   if (!raw) return [];
 
-  const entries = [];
-  const structuredPattern = /([^,<;\n\r]*?)\s*<\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\s*>/gi;
-  const scrubbed = raw.replace(structuredPattern, (_match, name, email) => {
-    entries.push({
-      name: String(name || '').replace(/(^\"|\"$)/g, '').trim(),
-      email: String(email || '').trim()
-    });
-    return ',';
-  });
-
-  const plainMatches = scrubbed.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-  plainMatches.forEach((email) => {
-    entries.push({
-      email: String(email || '').trim(),
-      name: ''
-    });
-  });
+  const entries = raw
+    .split(/[,\n;]+/)
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const match = entry.match(/^(.*)<([^>]+)>$/);
+      if (!match) {
+        return {
+          email: entry,
+          name: ''
+        };
+      }
+      return {
+        name: String(match[1] || '').replace(/(^\"|\"$)/g, '').trim(),
+        email: String(match[2] || '').trim()
+      };
+    })
+    .filter((entry) => /\S+@\S+\.\S+/.test(String(entry.email || '').trim()));
 
   return uniqueRecipientEntries(entries);
 }
@@ -2322,9 +2342,40 @@ function currentThreadGroups() {
     }));
 }
 
+function buildThreadGroupForDetail(threadId) {
+  const key = String(threadId || '').trim();
+  if (!key) return null;
+
+  const allMessages = Array.isArray(state.contactMessagesByKey[key]) && state.contactMessagesByKey[key].length
+    ? state.contactMessagesByKey[key]
+    : seedMessagesForThread(key);
+  const resolvedSummary = findSummaryByThreadId(key)
+    || (allMessages.length ? buildContactSummaryFromMessages(key, allMessages) : null);
+
+  if (!resolvedSummary && !allMessages.length) return null;
+
+  return {
+    threadId: key,
+    summary: resolvedSummary,
+    messages: filteredMessagesForCurrentFilter(allMessages),
+    allMessages
+  };
+}
+
 function findSelectedGroup() {
   if (!state.selectedThreadId) return null;
   return currentThreadGroups().find((group) => group.threadId === state.selectedThreadId) || null;
+}
+
+function renderActiveThreadDetail(threadId = state.selectedThreadId, options = {}) {
+  const activeThreadId = String(threadId || '').trim();
+  if (!activeThreadId || activeThreadId !== String(state.selectedThreadId || '').trim()) return null;
+
+  const group = findSelectedGroup() || buildThreadGroupForDetail(activeThreadId);
+  if (!group) return null;
+
+  renderThreadDetail(group, options);
+  return group;
 }
 
 function upsertContactSummary(summary) {
@@ -2950,7 +3001,8 @@ function renderThreads() {
   list.scrollTop = previousScrollTop;
 
   const selectedGroup = findSelectedGroup();
-  if (state.selectedThreadId && !selectedGroup) {
+  const activeDetailGroup = selectedGroup || buildThreadGroupForDetail(state.selectedThreadId);
+  if (state.selectedThreadId && !activeDetailGroup) {
     state.selectedThreadId = '';
     state.detailLastThreadId = '';
     state.detailSnapToLatestThreadId = '';
@@ -2959,8 +3011,8 @@ function renderThreads() {
   }
 
   renderSettingsUi();
-  if (selectedGroup) {
-    renderThreadDetail(selectedGroup);
+  if (activeDetailGroup) {
+    renderThreadDetail(activeDetailGroup);
   } else {
     renderThreadDebug(null);
     updateMainPanelVisibility();
@@ -3678,9 +3730,8 @@ async function hydrateVisibleBodiesForThread(threadId) {
 
   if (Array.isArray(response.messages) && response.messages.length) {
     storeContactMessages(contactKey, response.messages);
-    const selectedGroup = findSelectedGroup();
-    if (selectedGroup?.threadId === contactKey) {
-      renderThreadDetail(selectedGroup, { preserveScroll: true });
+    if (state.selectedThreadId === contactKey) {
+      renderActiveThreadDetail(contactKey, { preserveScroll: true });
     }
   }
 
@@ -3711,11 +3762,20 @@ async function loadContactMessagesForThread(threadId, options = {}) {
       completedAt: new Date().toISOString()
     };
     if (state.selectedThreadId === threadId) {
-      const selectedGroup = findSelectedGroup();
-      if (selectedGroup) renderThreadDetail(selectedGroup);
+      renderActiveThreadDetail(threadId);
     }
     return null;
   }
+
+  mLog('contact:cache-read', {
+    threadId,
+    contactEmail,
+    cursor,
+    cached_message_count: existingMessages.length,
+    loaded: Boolean(existing.loaded),
+    in_flight: Boolean(existing.inFlight),
+    force_sync: Boolean(options.forceSync)
+  });
 
   if (existing.inFlight) return null;
   if (!cursor && existing.loaded && !options.forceSync) return existingMessages;
@@ -3743,8 +3803,7 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   };
 
   if (state.selectedThreadId === threadId) {
-    const selectedGroup = findSelectedGroup();
-    if (selectedGroup) renderThreadDetail(selectedGroup);
+    renderActiveThreadDetail(threadId);
   }
 
   let response;
@@ -3810,6 +3869,18 @@ async function loadContactMessagesForThread(threadId, options = {}) {
     upsertContactSummary(buildContactSummaryFromMessages(threadId, response.messages));
   }
 
+  mLog('contact:worker-returned', {
+    threadId,
+    request_generation: requestGeneration,
+    success: Boolean(response?.success),
+    code: response?.code || '',
+    count: numericValue(response?.count, Array.isArray(response?.messages) ? response.messages.length : 0),
+    messages_length: Array.isArray(response?.messages) ? response.messages.length : 0,
+    next_cursor: String(response?.nextCursor || ''),
+    has_more: Boolean(response?.hasMore),
+    source: response?.source || ''
+  });
+
   pushDebugEvent(response?.success ? 'contact' : 'contact:error', response?.success ? 'Contact messages loaded' : 'Contact messages failed', {
     threadId,
     response
@@ -3818,9 +3889,8 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   state.contactLoadStateByKey[threadId] = nextState;
 
   renderThreads();
-  const selectedGroup = findSelectedGroup();
-  if (selectedGroup) {
-    renderThreadDetail(selectedGroup);
+  const activeDetailGroup = renderActiveThreadDetail(threadId, { preserveScroll });
+  if (activeDetailGroup) {
     if (preserveScroll) {
       window.requestAnimationFrame(() => {
         const currentBody = document.getElementById('gmailUnifiedDetailBody');
