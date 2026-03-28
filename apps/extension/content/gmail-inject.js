@@ -22,12 +22,14 @@ const WORKER_TIMEOUT_BY_ACTION = {
   FETCH_CONTACT_BODIES: 30000,
   FETCH_MESSAGES: 30000,
   SEARCH_MESSAGES: 30000,
+  ABORT_SEND_MESSAGE: 6000,
   SEND_MESSAGE: 60000,
   SYNC_MESSAGES: 60000
 };
 const CONTACT_PAGE_SIZE = 5;
 const SUMMARY_APPEND_TRIGGER_PX = 220;
 const SUMMARY_APPEND_PAGE_SIZE = 15;
+const CAMPAIGN_BLAST_DELAY_MS = 8000;
 const mLog = (action, details = {}) => console.log(`[Mailita ${new Date().toISOString().split('T')[1]}] ${action}`, details);
 globalThis.mLog = mLog;
 
@@ -128,7 +130,8 @@ const state = {
     sendInFlight: false,
     sendError: '',
     sendStatus: ''
-  }
+  },
+  campaignMode: defaultCampaignModeState()
 };
 const debugState = {
   counter: 0,
@@ -143,6 +146,9 @@ let visibleBodyHydrationFrame = 0;
 let adjacentContactPrefetchTimer = null;
 let idleContactPrefetchTimer = null;
 let debugConsoleSignature = '';
+let campaignBlastTimer = 0;
+let campaignBlastDelayResolve = null;
+let campaignBlastRunToken = 0;
 
 function isMailHost() {
   return window.location.hostname.includes('mail.google.com');
@@ -593,6 +599,19 @@ function normalizeTimings(input) {
   };
 }
 
+function timeValueMs(value) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  const date = new Date(value || 0);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function messageReceivedAtMs(message) {
+  const parsed = Number(message?.receivedAtMs || 0);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return timeValueMs(message?.date);
+}
+
 function normalizeContactSummary(input) {
   const src = input && typeof input === 'object' ? input : {};
   const contactKey = String(src.contactKey || '').trim();
@@ -606,6 +625,7 @@ function normalizeContactSummary(input) {
     latestSubject: String(src.latestSubject || '(no subject)').trim() || '(no subject)',
     latestPreview: String(src.latestPreview || '').trim(),
     latestDate: String(src.latestDate || new Date(0).toISOString()).trim() || new Date(0).toISOString(),
+    latestReceivedAtMs: numericValue(src.latestReceivedAtMs, timeValueMs(src.latestDate)),
     latestDirection: src.latestDirection === 'outgoing' ? 'outgoing' : 'incoming',
     latestMessageId: String(src.latestMessageId || '').trim(),
     messageCount: numericValue(src.messageCount, 0),
@@ -628,7 +648,8 @@ function replaceSummaryItems(items) {
     ? items.map(normalizeContactSummary).filter((summary) => summary.contactKey)
     : [];
   state.summaryItems = [...normalized].sort((left, right) =>
-    new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime());
+    numericValue(right.latestReceivedAtMs, timeValueMs(right.latestDate))
+      - numericValue(left.latestReceivedAtMs, timeValueMs(left.latestDate)));
   state.summaryRenderedCount = state.summaryItems.length;
   return normalized;
 }
@@ -647,8 +668,8 @@ function mergeSummaryItems(existingItems, incomingItems) {
       byKey.set(normalized.contactKey, normalized);
       return;
     }
-    const existingDate = new Date(existing.latestDate || 0).getTime();
-    const incomingDate = new Date(normalized.latestDate || 0).getTime();
+    const existingDate = numericValue(existing.latestReceivedAtMs, timeValueMs(existing.latestDate));
+    const incomingDate = numericValue(normalized.latestReceivedAtMs, timeValueMs(normalized.latestDate));
     const merged = incomingDate >= existingDate
       ? { ...existing, ...normalized }
       : { ...normalized, ...existing };
@@ -660,7 +681,9 @@ function mergeSummaryItems(existingItems, incomingItems) {
     merged.hasMissingContent = Boolean(existing.hasMissingContent || normalized.hasMissingContent);
     byKey.set(normalized.contactKey, normalizeContactSummary(merged));
   });
-  return [...byKey.values()].sort((a, b) => new Date(b.latestDate).getTime() - new Date(a.latestDate).getTime());
+  return [...byKey.values()].sort((a, b) =>
+    numericValue(b.latestReceivedAtMs, timeValueMs(b.latestDate))
+      - numericValue(a.latestReceivedAtMs, timeValueMs(a.latestDate)));
 }
 
 function defaultContactLoadState() {
@@ -1113,7 +1136,8 @@ function waitForGmail(callback) {
 }
 
 function formatDate(value) {
-  const date = new Date(value);
+  const date = new Date(timeValueMs(value));
+  if (Number.isNaN(date.getTime())) return '';
   const now = new Date();
 
   if (date.toDateString() === now.toDateString()) {
@@ -1128,7 +1152,7 @@ function formatDate(value) {
 }
 
 function calendarDayLabel(value) {
-  const date = new Date(value);
+  const date = new Date(timeValueMs(value));
   if (Number.isNaN(date.getTime())) return '';
 
   const today = new Date();
@@ -1187,12 +1211,12 @@ function normalizedSubjectKey(subject) {
 
 function shouldClusterWithPrevious(previousMessage, nextMessage) {
   if (!previousMessage || !nextMessage) return false;
-  if (calendarDayLabel(previousMessage.date) !== calendarDayLabel(nextMessage.date)) return false;
+  if (calendarDayLabel(previousMessage.receivedAtMs || previousMessage.date) !== calendarDayLabel(nextMessage.receivedAtMs || nextMessage.date)) return false;
   if (senderIdentityKey(previousMessage) !== senderIdentityKey(nextMessage)) return false;
   if (normalizedSubjectKey(previousMessage.subject) !== normalizedSubjectKey(nextMessage.subject)) return false;
 
-  const previousTs = new Date(previousMessage.date).getTime();
-  const nextTs = new Date(nextMessage.date).getTime();
+  const previousTs = messageReceivedAtMs(previousMessage);
+  const nextTs = messageReceivedAtMs(nextMessage);
   if (!Number.isFinite(previousTs) || !Number.isFinite(nextTs)) return false;
 
   return Math.abs(nextTs - previousTs) <= 20 * 60 * 1000;
@@ -1251,7 +1275,7 @@ function messageDisplayMarkup(message) {
       subject: escapeHtml(String(message?.subject || '(no subject)').trim() || '(no subject)'),
       preview: escapeHtml(String(message?.snippet || '').trim() || 'Loading message...'),
       sender: escapeHtml(threadCounterparty(message)),
-      date: escapeHtml(formatDate(message?.date))
+      date: escapeHtml(formatDate(message?.receivedAtMs || message?.date))
     };
   }
 
@@ -1453,6 +1477,33 @@ function defaultComposeOverlayState() {
   };
 }
 
+function defaultCampaignModeState() {
+  return {
+    active: false,
+    subjectTemplate: '',
+    bodyTemplate: '',
+    headers: [],
+    rows: [],
+    validationErrors: [],
+    missingColumns: [],
+    rowErrors: {},
+    mode: 'review',
+    reviewStarted: false,
+    blastRunning: false,
+    paused: false,
+    stopped: false,
+    stopRequested: false,
+    completed: false,
+    currentRowIndex: 0,
+    activeRequestId: '',
+    delayMs: CAMPAIGN_BLAST_DELAY_MS,
+    delayUntilMs: 0,
+    exitedToBackground: false,
+    statusMessage: '',
+    lastError: ''
+  };
+}
+
 function parseComposeRecipients(value) {
   const raw = String(value || '').trim();
   if (!raw) return [];
@@ -1604,6 +1655,1047 @@ async function submitComposeOverlay() {
   return response;
 }
 
+function createCampaignRow(cells = [], options = {}) {
+  return {
+    id: String(options.id || `campaign-row-${createDiagnosticId()}`),
+    cells: [...(Array.isArray(cells) ? cells : [])].map((value) => String(value ?? '')),
+    status: String(options.status || 'pending'),
+    sendError: String(options.sendError || ''),
+    sentAt: String(options.sentAt || '')
+  };
+}
+
+function syncCampaignTemplatesFromDom() {
+  const subjectInput = document.getElementById('gmailUnifiedCampaignSubject');
+  const bodyInput = document.getElementById('gmailUnifiedCampaignBody');
+  if (subjectInput instanceof HTMLInputElement) {
+    state.campaignMode.subjectTemplate = subjectInput.value;
+  }
+  if (bodyInput instanceof HTMLTextAreaElement) {
+    state.campaignMode.bodyTemplate = bodyInput.value;
+  }
+}
+
+function parseCampaignVariables(...values) {
+  const tokens = new Set();
+  values.forEach((value) => {
+    const text = String(value || '');
+    text.replace(/\[([^\]\r\n]+)\]/g, (_, rawToken) => {
+      const token = String(rawToken || '').trim();
+      if (token) tokens.add(token);
+      return _;
+    });
+  });
+  return [...tokens];
+}
+
+function campaignHeaderMap(headers = state.campaignMode.headers) {
+  const map = new Map();
+  (Array.isArray(headers) ? headers : []).forEach((header, index) => {
+    const key = String(header || '').trim();
+    if (key && !map.has(key)) {
+      map.set(key, index);
+    }
+  });
+  return map;
+}
+
+function isCampaignRowBlank(row, headerCount = state.campaignMode.headers.length) {
+  const cells = Array.from({ length: Math.max(0, headerCount) }, (_, index) => String(row?.cells?.[index] ?? '')).map((value) => value.trim());
+  return cells.every((value) => !value);
+}
+
+function isCampaignEmailValid(value) {
+  return /\S+@\S+\.\S+/.test(String(value || '').trim());
+}
+
+function campaignValidationSnapshot(campaign = state.campaignMode) {
+  const headers = Array.isArray(campaign.headers) ? campaign.headers.map((header) => String(header ?? '')) : [];
+  const rows = Array.isArray(campaign.rows) ? campaign.rows : [];
+  const headerLookup = campaignHeaderMap(headers);
+  const tokens = parseCampaignVariables(campaign.subjectTemplate, campaign.bodyTemplate);
+  const emailIndex = headers.findIndex((header) => String(header || '').trim() === 'Email');
+  const missingColumns = [];
+  const validationErrors = [];
+  const rowErrors = {};
+  const actionableIndexes = [];
+
+  if (!headers.length) {
+    validationErrors.push('Paste a spreadsheet to start a campaign.');
+  }
+
+  if (emailIndex < 0 && headers.length) {
+    missingColumns.push('Email');
+    validationErrors.push("Add an exact 'Email' column to send.");
+  }
+
+  tokens.forEach((token) => {
+    if (!headerLookup.has(token) && !missingColumns.includes(token)) {
+      missingColumns.push(token);
+    }
+  });
+
+  const missingTemplateColumns = missingColumns.filter((column) => column !== 'Email');
+  if (missingTemplateColumns.length) {
+    validationErrors.push(`Missing template columns: ${missingTemplateColumns.map((column) => `'${column}'`).join(', ')}.`);
+  }
+
+  rows.forEach((row, index) => {
+    const normalizedCells = Array.from({ length: headers.length }, (_, cellIndex) => String(row?.cells?.[cellIndex] ?? ''));
+    if (!normalizedCells.length || normalizedCells.every((value) => !value.trim())) {
+      return;
+    }
+
+    actionableIndexes.push(index);
+    const issues = [];
+    if (emailIndex >= 0) {
+      const emailValue = String(normalizedCells[emailIndex] || '').trim();
+      if (!emailValue || !isCampaignEmailValid(emailValue)) {
+        issues.push(`Row ${index + 2} has an invalid 'Email'.`);
+      }
+    }
+    tokens.forEach((token) => {
+      const tokenIndex = headerLookup.get(token);
+      if (tokenIndex == null) return;
+      if (!String(normalizedCells[tokenIndex] || '').trim()) {
+        issues.push(`Row ${index + 2} is missing '${token}'.`);
+      }
+    });
+    if (issues.length) {
+      rowErrors[row.id] = issues;
+    }
+  });
+
+  if (headers.length && rows.length && !actionableIndexes.length) {
+    validationErrors.push('Paste at least one non-empty recipient row.');
+  }
+
+  return {
+    headers,
+    rows,
+    tokens,
+    headerLookup,
+    emailIndex,
+    missingColumns,
+    validationErrors,
+    rowErrors,
+    actionableIndexes,
+    isValid: headers.length > 0
+      && actionableIndexes.length > 0
+      && missingColumns.length === 0
+      && Object.keys(rowErrors).length === 0
+  };
+}
+
+function applyCampaignValidation() {
+  const snapshot = campaignValidationSnapshot();
+  state.campaignMode.validationErrors = [...snapshot.validationErrors];
+  state.campaignMode.missingColumns = [...snapshot.missingColumns];
+  state.campaignMode.rowErrors = snapshot.rowErrors;
+  if (!snapshot.actionableIndexes.includes(state.campaignMode.currentRowIndex)) {
+    state.campaignMode.currentRowIndex = snapshot.actionableIndexes[0] ?? 0;
+  }
+  return snapshot;
+}
+
+function campaignRowPreviewValueMap(row, snapshot = campaignValidationSnapshot()) {
+  const values = new Map();
+  snapshot.headers.forEach((header, index) => {
+    values.set(String(header || '').trim(), String(row?.cells?.[index] ?? ''));
+  });
+  return values;
+}
+
+function resolveCampaignRowPreview(rowIndex = state.campaignMode.currentRowIndex, snapshot = campaignValidationSnapshot()) {
+  const row = snapshot.rows[rowIndex];
+  if (!row) return null;
+  const values = campaignRowPreviewValueMap(row, snapshot);
+  const mergeTemplate = (template) => String(template || '').replace(/\[([^\]\r\n]+)\]/g, (_match, rawToken) => {
+    const token = String(rawToken || '').trim();
+    return values.has(token) ? String(values.get(token) || '') : '';
+  });
+  const recipient = snapshot.emailIndex >= 0 ? String(row.cells?.[snapshot.emailIndex] || '').trim() : '';
+  return {
+    row,
+    rowIndex,
+    displayRowNumber: rowIndex + 2,
+    recipient,
+    subject: mergeTemplate(state.campaignMode.subjectTemplate),
+    body: mergeTemplate(state.campaignMode.bodyTemplate)
+  };
+}
+
+function findNextCampaignRowIndex(startIndex = -1, statuses = ['pending']) {
+  const allowed = new Set(statuses);
+  const snapshot = campaignValidationSnapshot();
+  for (let index = Math.max(0, startIndex + 1); index < snapshot.rows.length; index += 1) {
+    if (!snapshot.actionableIndexes.includes(index)) continue;
+    if (allowed.has(String(snapshot.rows[index]?.status || 'pending'))) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function campaignStatusCounts() {
+  const counts = {
+    total: 0,
+    pending: 0,
+    sending: 0,
+    sent: 0,
+    failed: 0,
+    skipped: 0,
+    stopped: 0
+  };
+  const snapshot = campaignValidationSnapshot();
+  snapshot.actionableIndexes.forEach((index) => {
+    const status = String(snapshot.rows[index]?.status || 'pending');
+    counts.total += 1;
+    if (Object.prototype.hasOwnProperty.call(counts, status)) {
+      counts[status] += 1;
+    } else {
+      counts.pending += 1;
+    }
+  });
+  return counts;
+}
+
+function campaignProgressPercent() {
+  const counts = campaignStatusCounts();
+  if (!counts.total) return 0;
+  const completed = counts.sent + counts.failed + counts.skipped + counts.stopped;
+  return Math.max(0, Math.min(100, Math.round((completed / counts.total) * 100)));
+}
+
+function campaignProgressText() {
+  const counts = campaignStatusCounts();
+  const current = resolveCampaignRowPreview();
+  const completed = counts.sent + counts.failed + counts.skipped + counts.stopped;
+  if (state.campaignMode.stopRequested && (state.campaignMode.blastRunning || state.campaignMode.activeRequestId)) {
+    return 'Stopping campaign...';
+  }
+  if (state.campaignMode.blastRunning && state.campaignMode.activeRequestId) {
+    return `Sending ${Math.min(counts.total, completed + 1)} of ${counts.total}...`;
+  }
+  if (state.campaignMode.blastRunning && state.campaignMode.delayUntilMs > Date.now()) {
+    return `Waiting before the next send... ${completed} of ${counts.total} attempted.`;
+  }
+  if (state.campaignMode.completed) {
+    return `Campaign finished. ${counts.sent} sent, ${counts.failed} failed, ${counts.skipped} skipped.`;
+  }
+  if (state.campaignMode.stopped) {
+    return 'Campaign stopped.';
+  }
+  if (state.campaignMode.reviewStarted && current) {
+    return `Reviewing row ${current.displayRowNumber} of ${counts.total || 0}.`;
+  }
+  return state.campaignMode.statusMessage || 'Paste a spreadsheet to begin.';
+}
+
+function campaignTableEditable() {
+  return !state.campaignMode.blastRunning && !state.campaignMode.activeRequestId && !state.campaignMode.stopRequested;
+}
+
+function clearCampaignBlastDelay() {
+  if (campaignBlastTimer) {
+    window.clearTimeout(campaignBlastTimer);
+    campaignBlastTimer = 0;
+  }
+  state.campaignMode.delayUntilMs = 0;
+  if (campaignBlastDelayResolve) {
+    const resolve = campaignBlastDelayResolve;
+    campaignBlastDelayResolve = null;
+    resolve(false);
+  }
+}
+
+function replaceCampaignDataset(headers, rows) {
+  clearCampaignBlastDelay();
+  campaignBlastRunToken += 1;
+  state.campaignMode.headers = [...(Array.isArray(headers) ? headers : [])].map((header) => String(header ?? ''));
+  state.campaignMode.rows = (Array.isArray(rows) ? rows : []).map((cells) =>
+    createCampaignRow(Array.from({ length: state.campaignMode.headers.length }, (_, index) => String(cells?.[index] ?? '')))
+  );
+  state.campaignMode.mode = 'review';
+  state.campaignMode.reviewStarted = false;
+  state.campaignMode.blastRunning = false;
+  state.campaignMode.paused = false;
+  state.campaignMode.stopped = false;
+  state.campaignMode.stopRequested = false;
+  state.campaignMode.completed = false;
+  state.campaignMode.activeRequestId = '';
+  state.campaignMode.currentRowIndex = 0;
+  state.campaignMode.exitedToBackground = false;
+  state.campaignMode.statusMessage = state.campaignMode.rows.length ? 'Spreadsheet loaded.' : 'No spreadsheet rows detected.';
+  state.campaignMode.lastError = '';
+  applyCampaignValidation();
+}
+
+function buildCampaignDatasetFromText(rawText) {
+  const lines = String(rawText || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .filter((line) => line.length > 0);
+  if (!lines.length) {
+    return { headers: [], rows: [] };
+  }
+  const rows = lines.map((line) => line.split('\t').map((cell) => String(cell ?? '')));
+  const width = rows.reduce((maxWidth, row) => Math.max(maxWidth, row.length), 0);
+  const headers = Array.from({ length: width }, (_, index) => String(rows[0]?.[index] ?? '').trim());
+  const bodyRows = rows
+    .slice(1)
+    .map((row) => Array.from({ length: width }, (_, index) => String(row?.[index] ?? '')))
+    .filter((row) => row.some((cell) => String(cell || '').trim()));
+  return {
+    headers,
+    rows: bodyRows
+  };
+}
+
+function openCampaignModeFromCompose() {
+  if (!state.connected) return;
+  const draft = syncComposeOverlayDraftFromDom();
+  const existing = state.campaignMode;
+  const hasExistingDraft = Boolean(existing.headers.length || existing.rows.length || existing.subjectTemplate || existing.bodyTemplate);
+  state.composeOverlay = {
+    ...state.composeOverlay,
+    open: false,
+    sendError: '',
+    sendStatus: ''
+  };
+  if (!hasExistingDraft) {
+    state.campaignMode = {
+      ...defaultCampaignModeState(),
+      active: true,
+      subjectTemplate: String(draft.subject || ''),
+      bodyTemplate: String(draft.body || '')
+    };
+  } else {
+    state.campaignMode.active = true;
+    state.campaignMode.exitedToBackground = false;
+  }
+  applyCampaignValidation();
+  renderComposeOverlay();
+  renderCampaignMode({ syncInputs: true, fullTable: true, focusTemplate: !hasExistingDraft });
+  renderCampaignBanner();
+}
+
+function reopenCampaignMode() {
+  state.campaignMode.active = true;
+  state.campaignMode.exitedToBackground = false;
+  renderCampaignMode({ syncInputs: true, fullTable: true });
+  renderCampaignBanner();
+}
+
+function closeCampaignMode(options = {}) {
+  const backgroundOnly = Boolean(options.background) || state.campaignMode.blastRunning || Boolean(state.campaignMode.activeRequestId);
+  state.campaignMode.active = false;
+  state.campaignMode.exitedToBackground = backgroundOnly && (state.campaignMode.blastRunning || Boolean(state.campaignMode.activeRequestId));
+  renderCampaignMode({ fullTable: true });
+  renderCampaignBanner();
+}
+
+function updateCampaignHeader(index, value, focusState = {}) {
+  if (!campaignTableEditable()) return;
+  state.campaignMode.headers[index] = String(value ?? '');
+  applyCampaignValidation();
+  renderCampaignMode({
+    restoreFocus: {
+      elementId: `gmailUnifiedCampaignHeaderInput-${index}`,
+      selectionStart: focusState.selectionStart ?? null,
+      selectionEnd: focusState.selectionEnd ?? focusState.selectionStart ?? null
+    }
+  });
+}
+
+function updateCampaignCell(rowId, cellIndex, value, focusState = {}) {
+  if (!campaignTableEditable()) return;
+  const target = state.campaignMode.rows.find((row) => row.id === rowId);
+  if (!target) return;
+  target.cells[cellIndex] = String(value ?? '');
+  applyCampaignValidation();
+  renderCampaignMode({
+    restoreFocus: {
+      elementId: `gmailUnifiedCampaignCellInput-${rowId}-${cellIndex}`,
+      selectionStart: focusState.selectionStart ?? null,
+      selectionEnd: focusState.selectionEnd ?? focusState.selectionStart ?? null
+    }
+  });
+}
+
+function addCampaignRow() {
+  if (!campaignTableEditable() || !state.campaignMode.headers.length) return;
+  state.campaignMode.rows.push(createCampaignRow(Array.from({ length: state.campaignMode.headers.length }, () => '')));
+  applyCampaignValidation();
+  renderCampaignMode({ fullTable: true });
+}
+
+function deleteCampaignRow(rowId) {
+  if (!campaignTableEditable()) return;
+  state.campaignMode.rows = state.campaignMode.rows.filter((row) => row.id !== rowId);
+  applyCampaignValidation();
+  renderCampaignMode({ fullTable: true });
+}
+
+function campaignRunActive() {
+  return Boolean(state.campaignMode.blastRunning || state.campaignMode.activeRequestId || state.campaignMode.delayUntilMs > Date.now());
+}
+
+function campaignBannerVisible() {
+  return Boolean(state.campaignMode.exitedToBackground && (campaignRunActive() || state.campaignMode.completed || state.campaignMode.stopped));
+}
+
+function campaignStatusLabel(status) {
+  switch (String(status || 'pending')) {
+    case 'sending':
+      return 'Sending';
+    case 'sent':
+      return 'Sent';
+    case 'failed':
+      return 'Failed';
+    case 'skipped':
+      return 'Skipped';
+    case 'stopped':
+      return 'Stopped';
+    default:
+      return 'Pending';
+  }
+}
+
+function campaignFocusById(elementId, selectionStart = null, selectionEnd = null) {
+  if (!elementId) return;
+  window.requestAnimationFrame(() => {
+    const element = document.getElementById(elementId);
+    if (!(element instanceof HTMLElement)) return;
+    element.focus();
+    if ('selectionStart' in element && selectionStart != null) {
+      try {
+        element.selectionStart = selectionStart;
+        element.selectionEnd = selectionEnd ?? selectionStart;
+      } catch {}
+    }
+  });
+}
+
+function renderCampaignValidation(snapshot) {
+  const host = document.getElementById('gmailUnifiedCampaignValidation');
+  if (!host) return;
+
+  const info = [];
+  if (snapshot.tokens.length) {
+    info.push(`Variables: ${snapshot.tokens.map((token) => `[${token}]`).join(', ')}`);
+  }
+  if (!snapshot.headers.length) {
+    info.push('Paste rows from Sheets or Excel into the data pane to build your mail merge table.');
+  }
+
+  const issueMarkup = [
+    ...snapshot.validationErrors.map((message) => `<div class="gmail-unified-campaign-validation-item is-error">${escapeHtml(message)}</div>`),
+    ...Object.values(snapshot.rowErrors)
+      .flat()
+      .slice(0, 8)
+      .map((message) => `<div class="gmail-unified-campaign-validation-item is-error">${escapeHtml(message)}</div>`)
+  ];
+
+  const infoMarkup = info.map((message) => `<div class="gmail-unified-campaign-validation-item is-info">${escapeHtml(message)}</div>`);
+  if (!issueMarkup.length && snapshot.headers.length) {
+    infoMarkup.unshift('<div class="gmail-unified-campaign-validation-item is-success">Validation clean. Review or blast can start.</div>');
+  }
+
+  host.innerHTML = `
+    <div class="gmail-unified-campaign-validation-grid">
+      ${issueMarkup.join('')}
+      ${infoMarkup.join('')}
+    </div>
+  `;
+}
+
+function renderCampaignTable(snapshot) {
+  const host = document.getElementById('gmailUnifiedCampaignTableWrap');
+  const pasteZone = document.getElementById('gmailUnifiedCampaignPasteZone');
+  if (!host || !pasteZone) return;
+
+  const editable = campaignTableEditable();
+  pasteZone.classList.toggle('has-data', snapshot.headers.length > 0);
+  pasteZone.innerHTML = snapshot.headers.length
+    ? `
+      <div class="gmail-unified-campaign-paste-copy">
+        <strong>Spreadsheet loaded.</strong>
+        <span>Paste again here to replace the table, or keep editing cells inline.</span>
+      </div>
+    `
+    : `
+      <div class="gmail-unified-campaign-paste-copy">
+        <strong>Paste your spreadsheet here</strong>
+        <span>Row 1 becomes headers. Use an exact <code>Email</code> column for recipients.</span>
+      </div>
+    `;
+
+  if (!snapshot.headers.length) {
+    host.innerHTML = `
+      <div class="gmail-unified-campaign-empty-state">
+        <h3>Waiting for recipient data</h3>
+        <p>Paste directly from Google Sheets or Excel on the right side. Mailita will turn it into an editable table instantly.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const headerMarkup = snapshot.headers.map((header, index) => `
+    <th>
+      <input
+        id="gmailUnifiedCampaignHeaderInput-${index}"
+        class="gmail-unified-campaign-table-input gmail-unified-campaign-table-header-input"
+        type="text"
+        value="${escapeHtml(header)}"
+        data-campaign-header-index="${index}"
+        ${editable ? '' : 'disabled'}
+      />
+    </th>
+  `).join('');
+
+  const rowsMarkup = state.campaignMode.rows.map((row, rowIndex) => {
+    const issues = snapshot.rowErrors[row.id] || [];
+    const isBlank = isCampaignRowBlank(row, snapshot.headers.length);
+    const status = String(row.status || 'pending');
+    const cellsMarkup = Array.from({ length: snapshot.headers.length }, (_, cellIndex) => `
+      <td>
+        <input
+          id="gmailUnifiedCampaignCellInput-${row.id}-${cellIndex}"
+          class="gmail-unified-campaign-table-input"
+          type="text"
+          value="${escapeHtml(String(row.cells?.[cellIndex] ?? ''))}"
+          data-campaign-row-id="${escapeHtml(row.id)}"
+          data-campaign-cell-index="${cellIndex}"
+          ${editable ? '' : 'disabled'}
+        />
+      </td>
+    `).join('');
+
+    return `
+      <tr class="gmail-unified-campaign-table-row ${issues.length ? 'has-error' : ''} ${isBlank ? 'is-blank' : ''}" data-status="${escapeHtml(status)}">
+        <td class="gmail-unified-campaign-table-row-number">${rowIndex + 2}</td>
+        ${cellsMarkup}
+        <td class="gmail-unified-campaign-table-status">
+          <span class="gmail-unified-campaign-status-pill is-${escapeHtml(status)}">${escapeHtml(campaignStatusLabel(status))}</span>
+          ${issues.length ? `<div class="gmail-unified-campaign-row-errors">${issues.map((message) => `<div>${escapeHtml(message)}</div>`).join('')}</div>` : ''}
+          ${row.sendError && !issues.length ? `<div class="gmail-unified-campaign-row-errors"><div>${escapeHtml(row.sendError)}</div></div>` : ''}
+        </td>
+        <td class="gmail-unified-campaign-table-actions">
+          <button class="gmail-unified-campaign-delete-row" type="button" data-campaign-delete-row="${escapeHtml(row.id)}" ${editable ? '' : 'disabled'}>Delete</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  host.innerHTML = `
+    <div class="gmail-unified-campaign-table-scroller">
+      <table class="gmail-unified-campaign-table">
+        <thead>
+          <tr>
+            <th class="gmail-unified-campaign-table-row-number">#</th>
+            ${headerMarkup}
+            <th class="gmail-unified-campaign-table-status">Status</th>
+            <th class="gmail-unified-campaign-table-actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsMarkup || `
+            <tr>
+              <td colspan="${snapshot.headers.length + 3}" class="gmail-unified-campaign-table-empty">Add a row to start sending.</td>
+            </tr>
+          `}
+        </tbody>
+      </table>
+    </div>
+    <div class="gmail-unified-campaign-table-footer">
+      <button id="gmailUnifiedCampaignAddRow" class="gmail-unified-secondary-btn gmail-unified-campaign-add-row" type="button" ${editable ? '' : 'disabled'}>Add Row</button>
+      <div class="gmail-unified-campaign-table-summary">${escapeHtml(`${snapshot.actionableIndexes.length} actionable row${snapshot.actionableIndexes.length === 1 ? '' : 's'}`)}</div>
+    </div>
+  `;
+}
+
+function renderCampaignPreview(snapshot) {
+  const host = document.getElementById('gmailUnifiedCampaignPreview');
+  if (!host) return;
+
+  const preview = resolveCampaignRowPreview(state.campaignMode.currentRowIndex, snapshot)
+    || resolveCampaignRowPreview(snapshot.actionableIndexes[0] ?? -1, snapshot);
+  const counts = campaignStatusCounts();
+  const percent = campaignProgressPercent();
+  const progressText = campaignProgressText();
+
+  if (state.campaignMode.mode === 'review' && state.campaignMode.reviewStarted && preview) {
+    host.innerHTML = `
+      <div class="gmail-unified-campaign-preview-card">
+        <div class="gmail-unified-campaign-preview-head">
+          <div>
+            <div class="gmail-unified-install-kicker">Review Mode</div>
+            <h3>Row ${preview.displayRowNumber}</h3>
+          </div>
+          <div class="gmail-unified-campaign-preview-recipient">${escapeHtml(preview.recipient)}</div>
+        </div>
+        <div class="gmail-unified-campaign-preview-subject">${escapeHtml(preview.subject || '(no subject)')}</div>
+        <pre class="gmail-unified-campaign-preview-body">${escapeHtml(preview.body || '(empty message)')}</pre>
+      </div>
+    `;
+    return;
+  }
+
+  host.innerHTML = `
+    <div class="gmail-unified-campaign-progress-card">
+      <div class="gmail-unified-campaign-progress-head">
+        <div>
+          <div class="gmail-unified-install-kicker">${state.campaignMode.mode === 'blast' ? 'Blast Mode' : 'Campaign Mode'}</div>
+          <h3>${escapeHtml(progressText)}</h3>
+        </div>
+        <div class="gmail-unified-campaign-progress-meta">${escapeHtml(`${counts.sent} sent · ${counts.failed} failed · ${counts.skipped} skipped`)}</div>
+      </div>
+      <div class="gmail-unified-campaign-progress-bar">
+        <span style="width:${percent}%"></span>
+      </div>
+      <div class="gmail-unified-campaign-progress-foot">${escapeHtml(`${percent}% complete`)}</div>
+    </div>
+  `;
+}
+
+function renderCampaignActions(snapshot) {
+  const host = document.getElementById('gmailUnifiedCampaignActions');
+  if (!host) return;
+
+  const preview = resolveCampaignRowPreview(state.campaignMode.currentRowIndex, snapshot)
+    || resolveCampaignRowPreview(snapshot.actionableIndexes[0] ?? -1, snapshot);
+  const controlsDisabled = !snapshot.isValid || Boolean(state.campaignMode.activeRequestId) || state.campaignMode.stopRequested;
+  const stopVisible = campaignRunActive();
+
+  if (state.campaignMode.mode === 'review' && state.campaignMode.reviewStarted && preview) {
+    host.innerHTML = `
+      <div class="gmail-unified-campaign-actions-row">
+        <button id="gmailUnifiedCampaignReviewSend" class="gmail-unified-primary-btn gmail-unified-campaign-send-next" type="button" ${controlsDisabled ? 'disabled' : ''}>Send &amp; Next</button>
+        <button id="gmailUnifiedCampaignReviewSkip" class="gmail-unified-secondary-btn gmail-unified-campaign-skip" type="button" ${controlsDisabled ? 'disabled' : ''}>Skip</button>
+      </div>
+    `;
+    return;
+  }
+
+  host.innerHTML = `
+    <div class="gmail-unified-campaign-actions-row">
+      <button id="gmailUnifiedCampaignStartReview" class="gmail-unified-secondary-btn" type="button" ${controlsDisabled ? 'disabled' : ''}>Start Review</button>
+      <button id="gmailUnifiedCampaignStartBlast" class="gmail-unified-primary-btn" type="button" ${controlsDisabled ? 'disabled' : ''}>Start Blast</button>
+      ${stopVisible ? '<button id="gmailUnifiedCampaignBlastStop" class="gmail-unified-danger-btn gmail-unified-campaign-stop" type="button">STOP</button>' : ''}
+    </div>
+  `;
+}
+
+function renderCampaignMode(options = {}) {
+  const overlay = document.getElementById('gmailUnifiedCampaignOverlay');
+  const subjectInput = document.getElementById('gmailUnifiedCampaignSubject');
+  const bodyInput = document.getElementById('gmailUnifiedCampaignBody');
+  const status = document.getElementById('gmailUnifiedCampaignStatus');
+  const reviewButton = document.getElementById('gmailUnifiedCampaignModeReview');
+  const blastButton = document.getElementById('gmailUnifiedCampaignModeBlast');
+  if (!overlay || !subjectInput || !bodyInput || !status || !reviewButton || !blastButton) return;
+
+  overlay.hidden = !state.campaignMode.active;
+  overlay.style.display = state.campaignMode.active ? 'grid' : 'none';
+  if (!state.campaignMode.active) return;
+
+  const snapshot = applyCampaignValidation();
+  overlay.dataset.mode = state.campaignMode.mode;
+  overlay.dataset.running = campaignRunActive() ? 'true' : 'false';
+  status.textContent = campaignProgressText();
+  status.dataset.state = snapshot.isValid ? 'ready' : 'error';
+  reviewButton.classList.toggle('is-active', state.campaignMode.mode === 'review');
+  blastButton.classList.toggle('is-active', state.campaignMode.mode === 'blast');
+  reviewButton.disabled = campaignRunActive();
+  blastButton.disabled = campaignRunActive();
+
+  if (options.syncInputs || subjectInput.value !== state.campaignMode.subjectTemplate) {
+    subjectInput.value = state.campaignMode.subjectTemplate;
+  }
+  if (options.syncInputs || bodyInput.value !== state.campaignMode.bodyTemplate) {
+    bodyInput.value = state.campaignMode.bodyTemplate;
+  }
+
+  renderCampaignValidation(snapshot);
+  renderCampaignTable(snapshot);
+  renderCampaignPreview(snapshot);
+  renderCampaignActions(snapshot);
+
+  if (options.focusTemplate) {
+    campaignFocusById('gmailUnifiedCampaignSubject');
+  }
+  if (options.restoreFocus?.elementId) {
+    campaignFocusById(
+      options.restoreFocus.elementId,
+      options.restoreFocus.selectionStart ?? null,
+      options.restoreFocus.selectionEnd ?? options.restoreFocus.selectionStart ?? null
+    );
+  }
+}
+
+function renderCampaignBanner() {
+  const banner = document.getElementById('gmailUnifiedCampaignBanner');
+  if (!banner) return;
+
+  const visible = campaignBannerVisible();
+  banner.hidden = !visible;
+  banner.style.display = visible ? 'flex' : 'none';
+  if (!visible) return;
+
+  const percent = campaignProgressPercent();
+  banner.innerHTML = `
+    <div class="gmail-unified-campaign-banner-copy">
+      <div class="gmail-unified-install-kicker">Campaign running</div>
+      <div class="gmail-unified-campaign-banner-text">${escapeHtml(campaignProgressText())}</div>
+      <div class="gmail-unified-campaign-banner-progress">
+        <span style="width:${percent}%"></span>
+      </div>
+    </div>
+    <div class="gmail-unified-campaign-banner-actions">
+      <button id="gmailUnifiedCampaignBannerReopen" class="gmail-unified-secondary-btn" type="button">Reopen Campaign</button>
+      <button id="gmailUnifiedCampaignBannerStop" class="gmail-unified-danger-btn gmail-unified-campaign-stop" type="button" ${campaignRunActive() ? '' : 'disabled'}>STOP</button>
+    </div>
+  `;
+}
+
+function waitForCampaignDelay(runToken, delayMs = state.campaignMode.delayMs) {
+  clearCampaignBlastDelay();
+  if (!delayMs) return Promise.resolve(true);
+  state.campaignMode.delayUntilMs = Date.now() + delayMs;
+  renderCampaignMode();
+  renderCampaignBanner();
+  return new Promise((resolve) => {
+    campaignBlastDelayResolve = resolve;
+    campaignBlastTimer = window.setTimeout(() => {
+      campaignBlastTimer = 0;
+      campaignBlastDelayResolve = null;
+      state.campaignMode.delayUntilMs = 0;
+      const shouldContinue = runToken === campaignBlastRunToken && !state.campaignMode.stopRequested;
+      renderCampaignMode();
+      renderCampaignBanner();
+      resolve(shouldContinue);
+    }, delayMs);
+  });
+}
+
+async function sendCampaignRow(rowIndex, options = {}) {
+  const snapshot = applyCampaignValidation();
+  const preview = resolveCampaignRowPreview(rowIndex, snapshot);
+  if (!preview) {
+    return {
+      success: false,
+      code: 'CAMPAIGN_ROW_INVALID',
+      error: 'This row is not ready to send.'
+    };
+  }
+
+  const row = state.campaignMode.rows[rowIndex];
+  if (!row) {
+    return {
+      success: false,
+      code: 'CAMPAIGN_ROW_MISSING',
+      error: 'This row no longer exists.'
+    };
+  }
+
+  const requestId = `campaign-send-${createDiagnosticId()}`;
+  row.status = 'sending';
+  row.sendError = '';
+  state.campaignMode.currentRowIndex = rowIndex;
+  state.campaignMode.activeRequestId = requestId;
+  state.campaignMode.lastError = '';
+  state.campaignMode.statusMessage = `Sending row ${preview.displayRowNumber}...`;
+  renderCampaignMode();
+  renderCampaignBanner();
+
+  let response;
+  try {
+    response = await sendWorker('SEND_MESSAGE', {
+      requestId,
+      to: [{
+        email: preview.recipient,
+        name: ''
+      }],
+      subject: preview.subject,
+      bodyText: preview.body
+    });
+  } catch (error) {
+    response = {
+      success: false,
+      code: error?.code || 'SEND_FAILED',
+      error: error?.message || String(error)
+    };
+  }
+
+  if (state.campaignMode.activeRequestId === requestId) {
+    state.campaignMode.activeRequestId = '';
+  }
+
+  const currentRow = state.campaignMode.rows[rowIndex];
+  if (!currentRow) {
+    renderCampaignMode();
+    renderCampaignBanner();
+    return response;
+  }
+
+  if (response?.success) {
+    currentRow.status = 'sent';
+    currentRow.sendError = '';
+    currentRow.sentAt = new Date().toISOString();
+    state.campaignMode.statusMessage = `Sent row ${preview.displayRowNumber}.`;
+    sendWorker('SYNC_MESSAGES', {
+      trackActivity: false
+    }).catch(() => {});
+  } else if (response?.code === 'REQUEST_ABORTED' || state.campaignMode.stopRequested) {
+    currentRow.status = 'stopped';
+    currentRow.sendError = 'Stopped by user.';
+    state.campaignMode.statusMessage = 'Campaign stopped.';
+  } else {
+    currentRow.status = 'failed';
+    currentRow.sendError = failureMessageForResponse(response, 'Send failed.');
+    state.campaignMode.lastError = currentRow.sendError;
+    state.campaignMode.statusMessage = currentRow.sendError;
+  }
+
+  renderCampaignMode();
+  renderCampaignBanner();
+  return response;
+}
+
+function finalizeCampaignReviewCompletion(message) {
+  state.campaignMode.reviewStarted = false;
+  state.campaignMode.completed = true;
+  state.campaignMode.stopped = false;
+  state.campaignMode.statusMessage = message;
+  renderCampaignMode();
+  renderCampaignBanner();
+}
+
+async function startCampaignReview() {
+  const snapshot = applyCampaignValidation();
+  state.campaignMode.mode = 'review';
+  state.campaignMode.completed = false;
+  state.campaignMode.stopped = false;
+  state.campaignMode.stopRequested = false;
+  state.campaignMode.exitedToBackground = false;
+  if (!snapshot.isValid) {
+    state.campaignMode.reviewStarted = false;
+    state.campaignMode.statusMessage = 'Fix the validation issues before starting review.';
+    renderCampaignMode();
+    renderCampaignBanner();
+    return;
+  }
+
+  const nextIndex = findNextCampaignRowIndex(-1, ['pending', 'failed']);
+  if (nextIndex < 0) {
+    finalizeCampaignReviewCompletion('Nothing is left to review.');
+    return;
+  }
+
+  state.campaignMode.reviewStarted = true;
+  state.campaignMode.currentRowIndex = nextIndex;
+  state.campaignMode.statusMessage = `Reviewing row ${nextIndex + 2}.`;
+  renderCampaignMode();
+  renderCampaignBanner();
+}
+
+function skipCampaignReviewRow() {
+  if (!state.campaignMode.reviewStarted) return;
+  const previousIndex = state.campaignMode.currentRowIndex;
+  const row = state.campaignMode.rows[state.campaignMode.currentRowIndex];
+  if (!row) return;
+  row.status = 'skipped';
+  row.sendError = '';
+  const nextIndex = findNextCampaignRowIndex(state.campaignMode.currentRowIndex, ['pending', 'failed']);
+  if (nextIndex < 0) {
+    finalizeCampaignReviewCompletion('Campaign review finished.');
+    return;
+  }
+  state.campaignMode.currentRowIndex = nextIndex;
+  state.campaignMode.statusMessage = `Skipped row ${previousIndex + 2}.`;
+  renderCampaignMode();
+  renderCampaignBanner();
+}
+
+async function sendCurrentCampaignReviewRow() {
+  if (!state.campaignMode.reviewStarted || state.campaignMode.activeRequestId) return;
+  const rowIndex = state.campaignMode.currentRowIndex;
+  const response = await sendCampaignRow(rowIndex, {
+    mode: 'review'
+  });
+  if (!response?.success) {
+    renderCampaignMode();
+    renderCampaignBanner();
+    return;
+  }
+  const nextIndex = findNextCampaignRowIndex(rowIndex, ['pending', 'failed']);
+  if (nextIndex < 0) {
+    finalizeCampaignReviewCompletion('Campaign review finished.');
+    return;
+  }
+  state.campaignMode.currentRowIndex = nextIndex;
+  state.campaignMode.reviewStarted = true;
+  state.campaignMode.statusMessage = `Ready for row ${nextIndex + 2}.`;
+  renderCampaignMode();
+  renderCampaignBanner();
+}
+
+async function stopCampaignBlast() {
+  if (!campaignRunActive() && !state.campaignMode.blastRunning) {
+    state.campaignMode.stopped = true;
+    state.campaignMode.statusMessage = 'Campaign stopped.';
+    renderCampaignMode();
+    renderCampaignBanner();
+    return;
+  }
+
+  state.campaignMode.stopRequested = true;
+  state.campaignMode.statusMessage = 'Stopping campaign...';
+  renderCampaignMode();
+  renderCampaignBanner();
+
+  clearCampaignBlastDelay();
+  campaignBlastRunToken += 1;
+
+  const requestId = String(state.campaignMode.activeRequestId || '').trim();
+  if (requestId) {
+    try {
+      await sendWorker('ABORT_SEND_MESSAGE', {
+        requestId
+      });
+    } catch {}
+  }
+
+  const sendingRow = state.campaignMode.rows.find((row) => row.status === 'sending');
+  if (sendingRow) {
+    sendingRow.status = 'stopped';
+    sendingRow.sendError = 'Stopped by user.';
+  }
+
+  state.campaignMode.activeRequestId = '';
+  state.campaignMode.blastRunning = false;
+  state.campaignMode.paused = false;
+  state.campaignMode.stopRequested = false;
+  state.campaignMode.stopped = true;
+  state.campaignMode.completed = false;
+  state.campaignMode.exitedToBackground = false;
+  state.campaignMode.statusMessage = 'Campaign stopped.';
+  renderCampaignMode();
+  renderCampaignBanner();
+}
+
+async function startCampaignBlast() {
+  if (state.campaignMode.blastRunning) return;
+  const snapshot = applyCampaignValidation();
+  state.campaignMode.mode = 'blast';
+  state.campaignMode.reviewStarted = false;
+  state.campaignMode.completed = false;
+  state.campaignMode.stopped = false;
+  state.campaignMode.stopRequested = false;
+  state.campaignMode.exitedToBackground = false;
+  if (!snapshot.isValid) {
+    state.campaignMode.statusMessage = 'Fix the validation issues before starting blast.';
+    renderCampaignMode();
+    renderCampaignBanner();
+    return;
+  }
+
+  const firstPendingIndex = findNextCampaignRowIndex(-1, ['pending']);
+  if (firstPendingIndex < 0) {
+    state.campaignMode.completed = true;
+    state.campaignMode.statusMessage = 'No pending rows remain to blast.';
+    renderCampaignMode();
+    renderCampaignBanner();
+    return;
+  }
+
+  const runToken = campaignBlastRunToken + 1;
+  campaignBlastRunToken = runToken;
+  state.campaignMode.blastRunning = true;
+  state.campaignMode.currentRowIndex = firstPendingIndex;
+  state.campaignMode.statusMessage = 'Campaign started.';
+  renderCampaignMode();
+  renderCampaignBanner();
+
+  let lastIndex = -1;
+  while (runToken === campaignBlastRunToken) {
+    if (state.campaignMode.stopRequested) {
+      break;
+    }
+
+    const nextIndex = findNextCampaignRowIndex(lastIndex, ['pending']);
+    if (nextIndex < 0) {
+      state.campaignMode.blastRunning = false;
+      state.campaignMode.completed = true;
+      state.campaignMode.statusMessage = 'Campaign finished.';
+      renderCampaignMode();
+      renderCampaignBanner();
+      return;
+    }
+
+    state.campaignMode.currentRowIndex = nextIndex;
+    renderCampaignMode();
+    renderCampaignBanner();
+
+    await sendCampaignRow(nextIndex, {
+      mode: 'blast'
+    });
+    lastIndex = nextIndex;
+
+    if (runToken !== campaignBlastRunToken || state.campaignMode.stopRequested) {
+      return;
+    }
+
+    const pendingAfter = findNextCampaignRowIndex(lastIndex, ['pending']);
+    if (pendingAfter < 0) {
+      state.campaignMode.blastRunning = false;
+      state.campaignMode.completed = true;
+      state.campaignMode.statusMessage = 'Campaign finished.';
+      renderCampaignMode();
+      renderCampaignBanner();
+      return;
+    }
+
+    const shouldContinue = await waitForCampaignDelay(runToken, state.campaignMode.delayMs);
+    if (!shouldContinue || runToken !== campaignBlastRunToken || state.campaignMode.stopRequested) {
+      return;
+    }
+  }
+}
+
+function handleGlobalSurfaceEscape(event) {
+  if (event.key !== 'Escape') return;
+
+  if (state.composeOverlay.open) {
+    event.preventDefault();
+    closeComposeOverlay();
+    return;
+  }
+
+  if (state.settingsOpen) {
+    event.preventDefault();
+    state.settingsOpen = false;
+    applyGmailLayoutMode();
+    return;
+  }
+
+  if (state.guideReviewOpen) {
+    event.preventDefault();
+    state.guideReviewOpen = false;
+    applyGmailLayoutMode();
+    return;
+  }
+
+  if (state.campaignMode.active) {
+    event.preventDefault();
+    closeCampaignMode({
+      background: campaignRunActive()
+    });
+  }
+}
+
 function setComposerMode(mode, group) {
   const targetGroup = group || findSelectedGroup();
   const resolved = mode === 'reply_all' ? 'reply_all' : 'reply';
@@ -1628,7 +2720,7 @@ function replyAllAvailable(message) {
 
 function oldestToNewestMessages(group) {
   return [...(Array.isArray(group?.messages) ? group.messages : [])]
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    .sort((a, b) => messageReceivedAtMs(a) - messageReceivedAtMs(b));
 }
 
 function selectedComposerMessage(group) {
@@ -2293,7 +3385,7 @@ function buildActivityPanelMarkup() {
 }
 
 function byDateDesc(a, b) {
-  return new Date(b.date).getTime() - new Date(a.date).getTime();
+  return messageReceivedAtMs(b) - messageReceivedAtMs(a);
 }
 
 function threadCounterparty(message) {
@@ -2360,6 +3452,7 @@ function buildContactSummaryFromMessages(threadId, messages) {
     latestSubject: latest?.subject || '(no subject)',
     latestPreview: latest ? previewTextFromMessage(latest) : '(no preview)',
     latestDate: latest?.date || new Date(0).toISOString(),
+    latestReceivedAtMs: messageReceivedAtMs(latest),
     latestDirection: latest?.isOutgoing ? 'outgoing' : 'incoming',
     latestMessageId: latest?.messageId || latest?.id || '',
     messageCount: entries.length,
@@ -2379,7 +3472,7 @@ function buildContactSummaryFromMessages(threadId, messages) {
 
 function sortThreadGroups(groups) {
   return [...groups].sort((left, right) =>
-    new Date(groupLatestDate(right)).getTime() - new Date(groupLatestDate(left)).getTime());
+    groupLatestTimeMs(right) - groupLatestTimeMs(left));
 }
 
 function currentSearchTerm() {
@@ -2507,7 +3600,7 @@ function upsertContactSummary(summary) {
     state.summaryItems = [next, ...currentSummaryItems()];
   }
   state.summaryItems = [...currentSummaryItems()].sort((left, right) =>
-    new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime());
+    numericValue(right.latestReceivedAtMs, timeValueMs(right.latestDate)) - numericValue(left.latestReceivedAtMs, timeValueMs(left.latestDate)));
   state.summaryRenderedCount = currentSummaryItems().length;
 }
 
@@ -2618,6 +3711,13 @@ function groupLatestPreview(group) {
 function groupLatestDate(group) {
   if (group?.summary) return group.summary.latestDate || new Date(0).toISOString();
   return group?.messages?.[0]?.date || new Date(0).toISOString();
+}
+
+function groupLatestTimeMs(group) {
+  if (group?.summary) {
+    return numericValue(group.summary.latestReceivedAtMs, timeValueMs(group.summary.latestDate));
+  }
+  return messageReceivedAtMs(group?.messages?.[0]);
 }
 
 function groupThreadCount(group) {
@@ -2769,7 +3869,7 @@ function buildThreadDebugReport(group) {
   const contactDebug = getContactDebugState(group?.threadId);
   const contactLoadState = group?.summary ? getContactLoadState(group.threadId) : defaultContactLoadState();
   const traceEntries = mergeTraceEntries(state.lastMailboxTrace, contactLoadState.trace, contactDebug.trace);
-  const messages = [...(group?.messages || [])].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const messages = [...(group?.messages || [])].sort((a, b) => messageReceivedAtMs(a) - messageReceivedAtMs(b));
   const selectedContactEmail = getGroupContactEmail(group);
   const backendInfo = contactDebug.attempted
     ? normalizeBuildInfo(contactDebug.backend)
@@ -3335,11 +4435,11 @@ function renderThreadDetail(group, options = {}) {
   }
 
   let previousDayLabel = '';
-  const messagesAsc = [...displayMessages].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const messagesAsc = [...displayMessages].sort((a, b) => messageReceivedAtMs(a) - messageReceivedAtMs(b));
   messagesAsc.forEach((message, index) => {
     const previousMessage = messagesAsc[index - 1] || null;
     const nextMessage = messagesAsc[index + 1] || null;
-    const dayLabel = calendarDayLabel(message.date);
+    const dayLabel = calendarDayLabel(message.receivedAtMs || message.date);
     if (dayLabel && dayLabel !== previousDayLabel) {
       previousDayLabel = dayLabel;
       const separator = document.createElement('div');
@@ -3378,7 +4478,7 @@ function renderThreadDetail(group, options = {}) {
           ${bodyMarkup}
         </div>
       </div>
-      ${groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.date))}</div>`}
+      ${groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.receivedAtMs || message.date))}</div>`}
     `;
 
     body.appendChild(item);
@@ -4642,12 +5742,16 @@ async function refreshGuideAndAuthState() {
   };
 
   if (explicitDisconnect) {
+    clearCampaignBlastDelay();
+    campaignBlastRunToken += 1;
     state.shellUnlocked = false;
     state.selectedThreadId = '';
     state.detailLastThreadId = '';
     state.detailSnapToLatestThreadId = '';
     state.settingsOpen = false;
     state.composer = defaultComposerState();
+    state.composeOverlay = defaultComposeOverlayState();
+    state.campaignMode = defaultCampaignModeState();
     state.mailboxMode = 'summary';
     state.useLegacyMailboxFallback = false;
     state.messages = [];
@@ -4700,10 +5804,14 @@ function applyGmailLayoutMode() {
   onboardingOverlay.hidden = !showGuide;
   shell.style.display = shellAccessible ? '' : 'none';
   onboardingOverlay.style.display = showGuide ? 'grid' : 'none';
+  shell.setAttribute('aria-hidden', state.campaignMode.active ? 'true' : 'false');
   if (guideClose) guideClose.hidden = !state.connected || !state.guideReviewOpen;
 
   updateGuideProgressUI();
   renderSettingsUi();
+  renderComposeOverlay();
+  renderCampaignMode();
+  renderCampaignBanner();
   updateMainPanelVisibility();
 }
 
@@ -4820,6 +5928,8 @@ function bindGuideEvents(sidebar) {
   sidebar.querySelector('#gmailUnifiedSettingsDisconnectBtn')?.addEventListener('click', async () => {
     const response = await sendWorker('DISCONNECT_GOOGLE');
     if (!response?.success) return;
+    clearCampaignBlastDelay();
+    campaignBlastRunToken += 1;
     state.shellUnlocked = false;
     state.messages = [];
     state.searchMessageResults = [];
@@ -4831,6 +5941,7 @@ function bindGuideEvents(sidebar) {
     state.detailSnapToLatestThreadId = '';
     state.composer = defaultComposerState();
     state.composeOverlay = defaultComposeOverlayState();
+    state.campaignMode = defaultCampaignModeState();
     state.useLegacyMailboxFallback = false;
     state.mailboxMode = 'summary';
     state.settingsOpen = false;
@@ -4885,6 +5996,10 @@ function bindGuideEvents(sidebar) {
     await submitComposeOverlay();
   });
 
+  sidebar.querySelector('#gmailUnifiedComposeCampaignBtn')?.addEventListener('click', () => {
+    openCampaignModeFromCompose();
+  });
+
   sidebar.querySelector('#gmailUnifiedComposerReply')?.addEventListener('click', () => {
     setComposerMode('reply');
   });
@@ -4906,6 +6021,129 @@ function bindGuideEvents(sidebar) {
 
   sidebar.querySelector('#gmailUnifiedComposerSend')?.addEventListener('click', async () => {
     await submitThreadReply(findSelectedGroup());
+  });
+
+  sidebar.querySelector('#gmailUnifiedCampaignDataPane')?.addEventListener('paste', (event) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      return;
+    }
+    const rawText = event.clipboardData?.getData('text/plain') || '';
+    if (!String(rawText || '').trim()) return;
+    event.preventDefault();
+    const dataset = buildCampaignDatasetFromText(rawText);
+    replaceCampaignDataset(dataset.headers, dataset.rows);
+    renderCampaignMode({ syncInputs: true, fullTable: true });
+    renderCampaignBanner();
+  });
+
+  sidebar.querySelector('#gmailUnifiedCampaignOverlay')?.addEventListener('input', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+
+    if (target.id === 'gmailUnifiedCampaignSubject') {
+      state.campaignMode.subjectTemplate = target.value;
+      applyCampaignValidation();
+      renderCampaignMode();
+      renderCampaignBanner();
+      return;
+    }
+
+    if (target.id === 'gmailUnifiedCampaignBody') {
+      state.campaignMode.bodyTemplate = target.value;
+      applyCampaignValidation();
+      renderCampaignMode();
+      renderCampaignBanner();
+      return;
+    }
+
+    if (target.dataset.campaignHeaderIndex != null) {
+      updateCampaignHeader(Number(target.dataset.campaignHeaderIndex), target.value, {
+        selectionStart: target.selectionStart,
+        selectionEnd: target.selectionEnd
+      });
+      return;
+    }
+
+    if (target.dataset.campaignRowId && target.dataset.campaignCellIndex != null) {
+      updateCampaignCell(target.dataset.campaignRowId, Number(target.dataset.campaignCellIndex), target.value, {
+        selectionStart: target.selectionStart,
+        selectionEnd: target.selectionEnd
+      });
+    }
+  });
+
+  sidebar.querySelector('#gmailUnifiedCampaignOverlay')?.addEventListener('click', async (event) => {
+    const button = event.target instanceof Element ? event.target.closest('button') : null;
+    if (!(button instanceof HTMLButtonElement)) return;
+
+    if (button.id === 'gmailUnifiedCampaignCloseBtn') {
+      closeCampaignMode({
+        background: campaignRunActive()
+      });
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignModeReview') {
+      if (campaignRunActive()) return;
+      state.campaignMode.mode = 'review';
+      renderCampaignMode();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignModeBlast') {
+      if (campaignRunActive()) return;
+      state.campaignMode.mode = 'blast';
+      renderCampaignMode();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignStartReview') {
+      await startCampaignReview();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignStartBlast') {
+      await startCampaignBlast();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignReviewSend') {
+      await sendCurrentCampaignReviewRow();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignReviewSkip') {
+      skipCampaignReviewRow();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignBlastStop') {
+      await stopCampaignBlast();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignAddRow') {
+      addCampaignRow();
+      return;
+    }
+
+    if (button.dataset.campaignDeleteRow) {
+      deleteCampaignRow(button.dataset.campaignDeleteRow);
+    }
+  });
+
+  sidebar.querySelector('#gmailUnifiedCampaignBanner')?.addEventListener('click', async (event) => {
+    const button = event.target instanceof Element ? event.target.closest('button') : null;
+    if (!(button instanceof HTMLButtonElement)) return;
+
+    if (button.id === 'gmailUnifiedCampaignBannerReopen') {
+      reopenCampaignMode();
+      return;
+    }
+
+    if (button.id === 'gmailUnifiedCampaignBannerStop') {
+      await stopCampaignBlast();
+    }
   });
 
   sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('click', (event) => {
@@ -5081,12 +6319,68 @@ function buildSidebar() {
         <div class="gmail-unified-compose-actions">
           <div id="gmailUnifiedComposeStatus" class="gmail-unified-compose-status" data-state="idle"></div>
           <div class="gmail-unified-compose-action-buttons">
+            <button id="gmailUnifiedComposeCampaignBtn" class="gmail-unified-secondary-btn gmail-unified-compose-campaign" type="button">Campaign Mode</button>
             <button id="gmailUnifiedComposeCancelBtn" class="gmail-unified-secondary-btn" type="button">Cancel</button>
             <button id="gmailUnifiedComposeSend" class="gmail-unified-primary-btn" type="button">Send</button>
           </div>
         </div>
       </div>
     </section>
+
+    <section id="gmailUnifiedCampaignOverlay" class="gmail-unified-campaign-overlay" hidden>
+      <div class="gmail-unified-campaign-shell">
+        <div class="gmail-unified-campaign-head">
+          <div class="gmail-unified-campaign-head-copy">
+            <div class="gmail-unified-install-kicker">Campaign Mode</div>
+            <h2>Focus Mode</h2>
+            <p>Paste a spreadsheet, merge variables like [Company], then review or blast with safe pacing.</p>
+          </div>
+          <div class="gmail-unified-campaign-head-actions">
+            <div id="gmailUnifiedCampaignStatus" class="gmail-unified-campaign-status" data-state="idle"></div>
+            <button id="gmailUnifiedCampaignCloseBtn" class="gmail-unified-icon-btn" type="button" aria-label="Close campaign mode">x</button>
+          </div>
+        </div>
+        <div class="gmail-unified-campaign-layout">
+          <section class="gmail-unified-campaign-pane gmail-unified-campaign-template-pane">
+            <div class="gmail-unified-campaign-pane-head">
+              <div>
+                <div class="gmail-unified-install-kicker">Template</div>
+                <h3>Write the template</h3>
+              </div>
+              <div class="gmail-unified-campaign-mode-switch">
+                <button id="gmailUnifiedCampaignModeReview" class="gmail-unified-campaign-mode-btn is-active" type="button">Review</button>
+                <button id="gmailUnifiedCampaignModeBlast" class="gmail-unified-campaign-mode-btn" type="button">Blast</button>
+              </div>
+            </div>
+            <label class="gmail-unified-compose-field">
+              <span>Subject</span>
+              <input id="gmailUnifiedCampaignSubject" type="text" placeholder="Application for [Company]" />
+            </label>
+            <label class="gmail-unified-compose-field is-body gmail-unified-campaign-body-field">
+              <span>Body</span>
+              <textarea id="gmailUnifiedCampaignBody" placeholder="Hi [Name],&#10;&#10;I’m excited to apply for [Company]..." spellcheck="true"></textarea>
+            </label>
+            <div id="gmailUnifiedCampaignValidation" class="gmail-unified-campaign-validation"></div>
+          </section>
+          <section id="gmailUnifiedCampaignDataPane" class="gmail-unified-campaign-pane gmail-unified-campaign-data-pane">
+            <div class="gmail-unified-campaign-pane-head">
+              <div>
+                <div class="gmail-unified-install-kicker">Data</div>
+                <h3>Paste the spreadsheet</h3>
+              </div>
+            </div>
+            <div id="gmailUnifiedCampaignPasteZone" class="gmail-unified-campaign-paste-zone" tabindex="0"></div>
+            <div id="gmailUnifiedCampaignTableWrap" class="gmail-unified-campaign-table-wrap"></div>
+          </section>
+        </div>
+        <div class="gmail-unified-campaign-footer">
+          <div id="gmailUnifiedCampaignPreview" class="gmail-unified-campaign-preview"></div>
+          <div id="gmailUnifiedCampaignActions" class="gmail-unified-campaign-actions"></div>
+        </div>
+      </div>
+    </section>
+
+    <div id="gmailUnifiedCampaignBanner" class="gmail-unified-campaign-banner" hidden></div>
   `;
 
   document.body.appendChild(sidebar);
@@ -5114,6 +6408,8 @@ function buildSidebar() {
   }, 'success');
   renderDebugPanel();
   renderComposeOverlay();
+  renderCampaignMode({ syncInputs: true, fullTable: true });
+  renderCampaignBanner();
   updateMainPanelVisibility();
 }
 
@@ -5316,6 +6612,8 @@ async function bootGmailSurface() {
         }
         applyGmailLayoutMode();
       });
+
+      document.addEventListener('keydown', handleGlobalSurfaceEscape, true);
 
       chrome.storage.onChanged.addListener((changes, areaName) => {
         if (areaName !== 'local') return;

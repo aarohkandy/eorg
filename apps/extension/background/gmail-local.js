@@ -594,6 +594,7 @@
       }
       : extractBodyFromPayload(payload);
     const date = safeDate(message?.internalDate || headerValue(headers, 'Date'));
+    const receivedAtMs = Number(Date.parse(date)) || 0;
 
     return {
       id: `gmail-${message.id}`,
@@ -608,6 +609,7 @@
       cc,
       replyTo,
       date,
+      receivedAtMs,
       snippet: String(message?.snippet || '').trim(),
       bodyText: contentState === 'metadata' ? '' : (bodies.bodyText || String(message?.snippet || '').trim()),
       bodyHtml: bodies.bodyHtml,
@@ -628,8 +630,14 @@
     };
   }
 
+  function messageTimeMs(message) {
+    const parsed = Number(message?.receivedAtMs || 0);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return new Date(message?.date || 0).getTime();
+  }
+
   function byDateDesc(a, b) {
-    return new Date(b.date).getTime() - new Date(a.date).getTime();
+    return messageTimeMs(b) - messageTimeMs(a);
   }
 
   function buildContactSummaries(messages, limit = 50) {
@@ -647,6 +655,7 @@
           displayName: String(message?.contactName || message?.contactEmail || 'Unknown contact').trim(),
           latestSubject: message?.subject || '(no subject)',
           latestDate: message?.date || new Date(0).toISOString(),
+          latestReceivedAtMs: messageTimeMs(message),
           latestDirection: message?.isOutgoing ? 'outgoing' : 'incoming',
           latestMessageId: message?.messageId || message?.id || '',
           latestPreview: previewTextFromMessage(message),
@@ -673,11 +682,12 @@
         summary.hasMissingContent = true;
       }
 
-      const currentLatest = new Date(summary.latestDate).getTime();
-      const candidateDate = new Date(message?.date || 0).getTime();
+      const currentLatest = Number(summary.latestReceivedAtMs || 0) || new Date(summary.latestDate).getTime();
+      const candidateDate = messageTimeMs(message);
       if (!Number.isFinite(currentLatest) || candidateDate >= currentLatest) {
         summary.latestSubject = message?.subject || '(no subject)';
         summary.latestDate = message?.date || summary.latestDate;
+        summary.latestReceivedAtMs = candidateDate;
         summary.latestDirection = message?.isOutgoing ? 'outgoing' : 'incoming';
         summary.latestMessageId = message?.messageId || message?.id || summary.latestMessageId;
         summary.latestPreview = previewTextFromMessage(message);
@@ -696,7 +706,7 @@
           threadCount: threadIds.size
         };
       })
-      .sort((a, b) => new Date(b.latestDate).getTime() - new Date(a.latestDate).getTime())
+      .sort((a, b) => (Number(b.latestReceivedAtMs || 0) || new Date(b.latestDate).getTime()) - (Number(a.latestReceivedAtMs || 0) || new Date(a.latestDate).getTime()))
       .slice(0, limit);
   }
 
@@ -1632,6 +1642,7 @@
       method: 'POST',
       interactive: true,
       scopes: [GMAIL_SEND_SCOPE],
+      signal: payload.signal,
       headers: {
         'Content-Type': 'application/json'
       },

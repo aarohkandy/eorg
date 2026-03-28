@@ -78,6 +78,7 @@ const GUIDE_ACTIONS = new Set([
   'FETCH_MESSAGE_SUMMARIES',
   'FETCH_CONTACT_MESSAGES',
   'FETCH_CONTACT_BODIES',
+  'ABORT_SEND_MESSAGE',
   'SEND_MESSAGE',
   'FETCH_MESSAGES',
   'DEBUG_REFETCH_CONTACT',
@@ -109,6 +110,7 @@ const fetchQueue = {
   pumpScheduled: false,
   lastUserActivityAt: Date.now()
 };
+const activeSendRequests = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -1426,30 +1428,63 @@ async function handleLocalMailAction(action, payload = {}) {
     };
   }
 
-  if (action === 'SEND_MESSAGE') {
-    const sent = await MailitaGmailLocal.sendMessage({
-      to: payload.to,
-      cc: payload.cc,
-      bcc: payload.bcc,
-      subject: payload.subject,
-      bodyText: payload.bodyText,
-      threadId: payload.threadId,
-      inReplyTo: payload.inReplyTo,
-      references: payload.references
-    });
-    const snapshot = await MailitaGmailLocal.snapshot();
-    await persistLocalSession({
-      ...snapshot,
-      lastSyncTime: nowIso()
-    });
+  if (action === 'ABORT_SEND_MESSAGE') {
+    const requestId = String(payload.requestId || '').trim();
+    const controller = requestId ? activeSendRequests.get(requestId) : null;
+    if (controller) {
+      try {
+        controller.abort('Campaign stop requested.');
+      } catch {
+        controller.abort();
+      }
+      activeSendRequests.delete(requestId);
+    }
     return {
       success: true,
-      source: MAIL_SOURCE_GMAIL_API_LOCAL,
-      sent,
-      trace: [localTrace('success', 'local_send_complete', 'Sent a message directly through the Gmail API.', {
-        details: `threadId=${sent.threadId || payload.threadId || ''}; id=${sent.id || ''}`
+      requestId,
+      aborted: Boolean(controller),
+      trace: [localTrace('info', 'local_send_abort_requested', 'Requested cancellation for a Gmail send.', {
+        details: `requestId=${requestId || 'none'}; aborted=${Boolean(controller)}`
       })]
     };
+  }
+
+  if (action === 'SEND_MESSAGE') {
+    const requestId = String(payload.requestId || '').trim();
+    const controller = new AbortController();
+    if (requestId) {
+      activeSendRequests.set(requestId, controller);
+    }
+    try {
+      const sent = await MailitaGmailLocal.sendMessage({
+        to: payload.to,
+        cc: payload.cc,
+        bcc: payload.bcc,
+        subject: payload.subject,
+        bodyText: payload.bodyText,
+        threadId: payload.threadId,
+        inReplyTo: payload.inReplyTo,
+        references: payload.references,
+        signal: controller.signal
+      });
+      const snapshot = await MailitaGmailLocal.snapshot();
+      await persistLocalSession({
+        ...snapshot,
+        lastSyncTime: nowIso()
+      });
+      return {
+        success: true,
+        source: MAIL_SOURCE_GMAIL_API_LOCAL,
+        sent,
+        trace: [localTrace('success', 'local_send_complete', 'Sent a message directly through the Gmail API.', {
+          details: `threadId=${sent.threadId || payload.threadId || ''}; id=${sent.id || ''}; requestId=${requestId || 'none'}`
+        })]
+      };
+    } finally {
+      if (requestId) {
+        activeSendRequests.delete(requestId);
+      }
+    }
   }
 
   if (action === 'SYNC_MESSAGES') {
