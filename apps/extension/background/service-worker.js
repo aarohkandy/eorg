@@ -1279,7 +1279,8 @@ async function handleLocalMailAction(action, payload = {}) {
       limit: Number(payload.limit || 50),
       cursor: payload.cursor,
       append: Boolean(payload.append),
-      forceSync: Boolean(payload.forceSync)
+      forceSync: Boolean(payload.forceSync),
+      bootstrapCacheOnly: Boolean(payload.bootstrapCacheOnly)
     });
     const snapshot = await MailitaGmailLocal.snapshot();
     await persistLocalSession(snapshot);

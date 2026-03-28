@@ -56,8 +56,11 @@ const GUIDE_SUBSTEP_COPY = {
 const state = {
   messages: [],
   summaryItems: [],
+  summaryByThreadId: {},
+  summaryOrder: [],
   summaryCursor: '',
   summaryHasMore: false,
+  summaryBootstrapInFlight: false,
   summaryInitialLoadInFlight: false,
   summaryAppendInFlight: false,
   summaryAppliedGeneration: 0,
@@ -68,6 +71,7 @@ const state = {
   summaryRenderedCount: 0,
   summaryLoadedCount: 0,
   contactMessagesByKey: {},
+  contactMessageIndexByKey: {},
   contactLoadStateByKey: {},
   summaryRequestGeneration: 0,
   summaryPageSize: 50,
@@ -150,6 +154,20 @@ let debugConsoleSignature = '';
 let campaignBlastTimer = 0;
 let campaignBlastDelayResolve = null;
 let campaignBlastRunToken = 0;
+let railPaginationObserver = null;
+let detailHistoryObserver = null;
+let detailHydrationObserver = null;
+let uiCommitFrame = 0;
+let queuedUiCommit = {
+  rail: false,
+  detail: false,
+  overlays: false,
+  selectionOnly: false,
+  preserveDetailScroll: false,
+  detailThreadId: '',
+  campaignOptions: {}
+};
+const pendingHydrationIdsByThread = new Map();
 
 function isMailHost() {
   return window.location.hostname.includes('mail.google.com');
@@ -641,6 +659,15 @@ function normalizeContactSummary(input) {
 }
 
 function currentSummaryItems() {
+  if (Array.isArray(state.summaryItems) && state.summaryItems.length === state.summaryOrder.length) {
+    return state.summaryItems;
+  }
+  if (Array.isArray(state.summaryOrder) && state.summaryOrder.length) {
+    state.summaryItems = state.summaryOrder
+      .map((threadId) => state.summaryByThreadId[threadId])
+      .filter(Boolean);
+    return state.summaryItems;
+  }
   return Array.isArray(state.summaryItems) ? state.summaryItems : [];
 }
 
@@ -648,10 +675,10 @@ function replaceSummaryItems(items) {
   const normalized = Array.isArray(items)
     ? items.map(normalizeContactSummary).filter((summary) => summary.contactKey)
     : [];
-  state.summaryItems = [...normalized].sort((left, right) =>
+  const sorted = [...normalized].sort((left, right) =>
     numericValue(right.latestReceivedAtMs, timeValueMs(right.latestDate))
       - numericValue(left.latestReceivedAtMs, timeValueMs(left.latestDate)));
-  state.summaryRenderedCount = state.summaryItems.length;
+  rebuildSummaryIndex(sorted);
   return normalized;
 }
 
@@ -727,8 +754,11 @@ function requestDetailSnapToLatest(threadId = state.selectedThreadId) {
 
 function resetSectionedMailboxCaches(options = {}) {
   state.summaryItems = [];
+  state.summaryByThreadId = {};
+  state.summaryOrder = [];
   state.summaryCursor = '';
   state.summaryHasMore = false;
+  state.summaryBootstrapInFlight = false;
   state.summaryInitialLoadInFlight = false;
   state.summaryAppendInFlight = false;
   state.summaryAppliedGeneration = 0;
@@ -739,6 +769,7 @@ function resetSectionedMailboxCaches(options = {}) {
   state.summaryRenderedCount = 0;
   state.summaryLoadedCount = 0;
   state.contactMessagesByKey = {};
+  state.contactMessageIndexByKey = {};
   state.contactLoadStateByKey = {};
   state.contactRequestGenerationByKey = {};
   if (options.invalidateRequests !== false) {
@@ -866,7 +897,13 @@ function storeContactMessages(contactKey, messages, options = {}) {
     if (!message?.id) return;
     deduped.set(message.id, message);
   });
-  state.contactMessagesByKey[contactKey] = [...deduped.values()].sort(byDateDesc);
+  const orderedMessages = [...deduped.values()].sort(byDateDesc);
+  state.contactMessagesByKey[contactKey] = orderedMessages;
+  state.contactMessageIndexByKey[contactKey] = Object.fromEntries(
+    orderedMessages
+      .filter((message) => message?.id)
+      .map((message) => [message.id, message])
+  );
   return state.contactMessagesByKey[contactKey];
 }
 
@@ -1011,8 +1048,47 @@ function getContactDebugState(threadId) {
   return state.contactDebug[key];
 }
 
+function rebuildSummaryIndex(items = []) {
+  const nextByThreadId = {};
+  const nextOrder = [];
+
+  (Array.isArray(items) ? items : []).forEach((summary) => {
+    if (!summary?.contactKey) return;
+    nextByThreadId[summary.contactKey] = summary;
+    nextOrder.push(summary.contactKey);
+  });
+
+  state.summaryByThreadId = nextByThreadId;
+  state.summaryOrder = nextOrder;
+  state.summaryItems = nextOrder
+    .map((threadId) => nextByThreadId[threadId])
+    .filter(Boolean);
+  state.summaryRenderedCount = state.summaryItems.length;
+}
+
+function resyncSummaryOrderForKey(threadId) {
+  const key = String(threadId || '').trim();
+  const summary = state.summaryByThreadId[key];
+  if (!key || !summary) return;
+
+  state.summaryOrder = state.summaryOrder.filter((entry) => entry !== key);
+  const nextTime = numericValue(summary.latestReceivedAtMs, timeValueMs(summary.latestDate));
+  let insertIndex = state.summaryOrder.findIndex((candidateKey) => {
+    const candidate = state.summaryByThreadId[candidateKey];
+    return numericValue(candidate?.latestReceivedAtMs, timeValueMs(candidate?.latestDate)) < nextTime;
+  });
+  if (insertIndex < 0) insertIndex = state.summaryOrder.length;
+  state.summaryOrder.splice(insertIndex, 0, key);
+  state.summaryItems = state.summaryOrder
+    .map((entry) => state.summaryByThreadId[entry])
+    .filter(Boolean);
+  state.summaryRenderedCount = state.summaryItems.length;
+}
+
 function findSummaryByThreadId(threadId) {
-  return currentSummaryItems().find((summary) => summary.contactKey === threadId) || null;
+  const key = String(threadId || '').trim();
+  if (!key) return null;
+  return state.summaryByThreadId[key] || currentSummaryItems().find((summary) => summary.contactKey === key) || null;
 }
 
 async function appendUiActivity(entry, options = {}) {
@@ -3265,8 +3341,13 @@ async function submitThreadReply(group) {
     upsertContactSummary(buildContactSummaryFromMessages(activeGroup.threadId, mergedMessages));
   }
   requestDetailSnapToLatest(activeGroup.threadId);
-  renderThreads();
-  renderActiveThreadDetail(activeGroup.threadId);
+  const optimisticRowPatched = refreshThreadRow(activeGroup.threadId);
+  scheduleUiCommit({
+    detail: true,
+    detailThreadId: activeGroup.threadId,
+    selectionOnly: true,
+    rail: !optimisticRowPatched
+  });
 
   let result = null;
   let sendResponse = null;
@@ -3317,8 +3398,13 @@ async function submitThreadReply(group) {
       targetMessageId: targetMessage?.id || '',
       sendError: result.reason || 'Send failed.'
     };
-    renderThreads();
-    renderActiveThreadDetail(activeGroup.threadId);
+    const failedRowPatched = refreshThreadRow(activeGroup.threadId);
+    scheduleUiCommit({
+      detail: true,
+      detailThreadId: activeGroup.threadId,
+      selectionOnly: true,
+      rail: !failedRowPatched
+    });
     return;
   }
 
@@ -3338,12 +3424,20 @@ async function submitThreadReply(group) {
     sendStatus: 'Sent'
   };
   requestDetailSnapToLatest(activeGroup.threadId);
-  renderThreads();
-  renderActiveThreadDetail(activeGroup.threadId);
+  const sentRowPatched = refreshThreadRow(activeGroup.threadId);
+  scheduleUiCommit({
+    detail: true,
+    detailThreadId: activeGroup.threadId,
+    selectionOnly: true,
+    rail: !sentRowPatched
+  });
 
   window.setTimeout(() => {
     state.composer.sendStatus = '';
-    renderActiveThreadDetail(activeGroup.threadId);
+    scheduleUiCommit({
+      detail: true,
+      detailThreadId: activeGroup.threadId
+    });
   }, 1800);
 
   sendWorker('SYNC_MESSAGES', {
@@ -3517,7 +3611,7 @@ function summaryMatchesSearch(summary, query = currentSearchTerm()) {
 
 function currentSearchContactGroups() {
   const query = currentSearchTerm();
-  return sortThreadGroups(currentSummaryItems()
+  return currentSummaryItems()
     .filter((summary) => summaryVisibleInCurrentFilter(summary))
     .filter((summary) => summaryMatchesSearch(summary, query))
     .map((summary) => {
@@ -3528,7 +3622,7 @@ function currentSearchContactGroups() {
         messages: filteredMessagesForCurrentFilter(allMessages),
         allMessages
       };
-    }));
+    });
 }
 
 function currentSearchMessageGroups() {
@@ -3562,7 +3656,7 @@ function currentThreadGroups() {
     return [...contactGroups, ...messageGroups];
   }
 
-  return sortThreadGroups(currentSummaryItems()
+  return currentSummaryItems()
     .filter((summary) => summaryVisibleInCurrentFilter(summary))
     .map((summary) => {
       const allMessages = state.contactMessagesByKey[summary.contactKey] || seedMessagesForThread(summary.contactKey);
@@ -3572,7 +3666,7 @@ function currentThreadGroups() {
         messages: filteredMessagesForCurrentFilter(allMessages),
         allMessages
       };
-    }));
+    });
 }
 
 function buildThreadGroupForDetail(threadId) {
@@ -3597,7 +3691,7 @@ function buildThreadGroupForDetail(threadId) {
 
 function findSelectedGroup() {
   if (!state.selectedThreadId) return null;
-  return currentThreadGroups().find((group) => group.threadId === state.selectedThreadId) || null;
+  return buildThreadGroupForDetail(state.selectedThreadId);
 }
 
 function renderActiveThreadDetail(threadId = state.selectedThreadId, options = {}) {
@@ -3614,15 +3708,11 @@ function renderActiveThreadDetail(threadId = state.selectedThreadId, options = {
 function upsertContactSummary(summary) {
   if (!summary?.contactKey) return;
   const next = normalizeContactSummary(summary);
-  const existingIndex = currentSummaryItems().findIndex((item) => item.contactKey === next.contactKey);
-  if (existingIndex >= 0) {
-    state.summaryItems[existingIndex] = next;
-  } else {
-    state.summaryItems = [next, ...currentSummaryItems()];
+  state.summaryByThreadId[next.contactKey] = next;
+  if (!state.summaryOrder.includes(next.contactKey)) {
+    state.summaryOrder.push(next.contactKey);
   }
-  state.summaryItems = [...currentSummaryItems()].sort((left, right) =>
-    numericValue(right.latestReceivedAtMs, timeValueMs(right.latestDate)) - numericValue(left.latestReceivedAtMs, timeValueMs(left.latestDate)));
-  state.summaryRenderedCount = currentSummaryItems().length;
+  resyncSummaryOrderForKey(next.contactKey);
 }
 
 function appendRailSection(list, title) {
@@ -3639,7 +3729,7 @@ function appendRailStatus(list, text, variant = 'info') {
   list.appendChild(node);
 }
 
-function appendThreadRow(list, group, options = {}) {
+function createThreadRow(group, options = {}) {
   const unread = groupUnread(group);
   const unreadCount = groupUnreadCount(group);
   const selected = state.selectedThreadId === group.threadId;
@@ -3652,6 +3742,7 @@ function appendThreadRow(list, group, options = {}) {
   row.dataset.threadId = group.threadId;
   if (searchKind) row.dataset.searchKind = searchKind;
   row.classList.toggle('is-selected', selected);
+  row.setAttribute('aria-selected', selected ? 'true' : 'false');
 
   const who = groupDisplayName(group);
   const latestDate = groupLatestDate(group);
@@ -3691,8 +3782,11 @@ function appendThreadRow(list, group, options = {}) {
       storeContactMessages(group.threadId, seededMessages);
     }
     requestDetailSnapToLatest(group.threadId);
-    renderThreads();
-    renderActiveThreadDetail(group.threadId);
+    scheduleUiCommit({
+      selectionOnly: true,
+      detail: true,
+      detailThreadId: group.threadId
+    });
     if (!usingLegacyMailboxFlow()) {
       loadContactMessagesForThread(group.threadId, {
         pageSize: CONTACT_PAGE_SIZE
@@ -3707,6 +3801,32 @@ function appendThreadRow(list, group, options = {}) {
     openThread();
   });
 
+  return row;
+}
+
+function refreshThreadRow(threadId) {
+  const list = document.getElementById('gmailUnifiedList');
+  const key = String(threadId || '').trim();
+  if (!list || !key || usingLegacyMailboxFlow() || state.mailboxMode === 'search') return false;
+
+  const summary = findSummaryByThreadId(key);
+  if (!summary || !summaryVisibleInCurrentFilter(summary)) return false;
+
+  const allMessages = state.contactMessagesByKey[key] || seedMessagesForThread(key);
+  const nextRow = createThreadRow({
+    threadId: key,
+    summary,
+    messages: filteredMessagesForCurrentFilter(allMessages),
+    allMessages
+  });
+  const existingRow = list.querySelector(`.gmail-unified-thread-row[data-thread-id="${CSS.escape(key)}"]`);
+  if (!existingRow) return false;
+  existingRow.replaceWith(nextRow);
+  return true;
+}
+
+function appendThreadRow(list, group, options = {}) {
+  const row = createThreadRow(group, options);
   list.appendChild(row);
 }
 
@@ -4171,6 +4291,120 @@ function setStateCard(type, text, retryVisible = false) {
   updateMainPanelVisibility();
 }
 
+function supportsIntersectionObservers() {
+  return typeof window.IntersectionObserver === 'function';
+}
+
+function disconnectRailPaginationObserver() {
+  if (railPaginationObserver) {
+    railPaginationObserver.disconnect();
+    railPaginationObserver = null;
+  }
+}
+
+function disconnectDetailHistoryObserver() {
+  if (detailHistoryObserver) {
+    detailHistoryObserver.disconnect();
+    detailHistoryObserver = null;
+  }
+}
+
+function disconnectDetailHydrationObserver() {
+  if (detailHydrationObserver) {
+    detailHydrationObserver.disconnect();
+    detailHydrationObserver = null;
+  }
+}
+
+function syncRailSelectionState() {
+  const sidebar = document.getElementById('gmailUnifiedSidebar');
+  if (sidebar) {
+    sidebar.dataset.detailOpen = state.selectedThreadId ? 'true' : 'false';
+  }
+  document.querySelectorAll('.gmail-unified-thread-row[data-thread-id]').forEach((node) => {
+    const selected = String(node.getAttribute('data-thread-id') || '').trim() === String(state.selectedThreadId || '').trim();
+    node.classList.toggle('is-selected', selected);
+    node.setAttribute('aria-selected', selected ? 'true' : 'false');
+  });
+  updateMainPanelVisibility();
+}
+
+function scheduleUiCommit(request = {}) {
+  if (request.rail) queuedUiCommit.rail = true;
+  if (request.detail) queuedUiCommit.detail = true;
+  if (request.overlays) queuedUiCommit.overlays = true;
+  if (request.selectionOnly) queuedUiCommit.selectionOnly = true;
+  if (request.preserveDetailScroll) queuedUiCommit.preserveDetailScroll = true;
+  if (request.detailThreadId) queuedUiCommit.detailThreadId = String(request.detailThreadId || '').trim();
+  if (request.campaignOptions && typeof request.campaignOptions === 'object') {
+    queuedUiCommit.campaignOptions = {
+      ...queuedUiCommit.campaignOptions,
+      ...request.campaignOptions
+    };
+  }
+  if (uiCommitFrame) return;
+  uiCommitFrame = window.requestAnimationFrame(() => {
+    uiCommitFrame = 0;
+    const commit = queuedUiCommit;
+    queuedUiCommit = {
+      rail: false,
+      detail: false,
+      overlays: false,
+      selectionOnly: false,
+      preserveDetailScroll: false,
+      detailThreadId: '',
+      campaignOptions: {}
+    };
+
+    const renderedRail = commit.rail;
+    if (renderedRail) {
+      renderThreads();
+    }
+
+    if (commit.selectionOnly && !renderedRail) {
+      syncRailSelectionState();
+    }
+
+    if (commit.detail && !renderedRail) {
+      renderActiveThreadDetail(commit.detailThreadId || state.selectedThreadId, {
+        preserveScroll: commit.preserveDetailScroll
+      });
+    }
+
+    if (commit.overlays) {
+      renderSettingsUi();
+      renderComposeOverlay();
+      if (CAMPAIGN_MODE_ENABLED) {
+        renderCampaignMode(commit.campaignOptions || {});
+        renderCampaignBanner();
+      }
+    }
+
+    updateMainPanelVisibility();
+  });
+}
+
+function renderRailSkeletons(list, count = 6) {
+  list.innerHTML = '';
+  Array.from({ length: count }).forEach(() => {
+    const row = document.createElement('div');
+    row.className = 'gmail-unified-thread-row gmail-unified-thread-row-skeleton';
+    row.innerHTML = `
+      <div class="gmail-unified-thread-row-shell">
+        <div class="gmail-unified-thread-avatar-wrap">
+          <div class="gmail-unified-thread-avatar gmail-unified-thread-avatar-skeleton" aria-hidden="true"></div>
+        </div>
+        <div class="gmail-unified-thread-copy">
+          <div class="gmail-unified-skeleton-line is-short"></div>
+          <div class="gmail-unified-skeleton-line"></div>
+          <div class="gmail-unified-skeleton-line is-medium"></div>
+        </div>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+}
+
 function renderThreads() {
   const list = document.getElementById('gmailUnifiedList');
   if (!list) return;
@@ -4190,6 +4424,14 @@ function renderThreads() {
   if (!threadGroups.length && !(showingSearch && (state.searchMessageResultsInFlight || state.searchMessageError))) {
     clearAdjacentContactPrefetchTimer();
     clearIdleContactPrefetchTimer();
+    if (!showingSearch && (state.summaryBootstrapInFlight || state.summaryInitialLoadInFlight || (state.connected && numericValue(state.summaryAppliedGeneration, 0) === 0))) {
+      setStateCard('normal', '');
+      renderRailSkeletons(list);
+      renderThreadDebug(null);
+      renderDebugPanel();
+      observeRailPagination();
+      return;
+    }
     if (state.summaryInitialLoadInFlight) {
       setStateCard('loading', 'Loading conversations...');
     } else if (showingSearch && state.searchQuery) {
@@ -4253,11 +4495,14 @@ function renderThreads() {
   if (activeDetailGroup) {
     renderThreadDetail(activeDetailGroup);
   } else {
+    disconnectDetailHistoryObserver();
+    disconnectDetailHydrationObserver();
     renderThreadDebug(null);
     updateMainPanelVisibility();
   }
   scheduleAdjacentContactPrefetch(threadGroups);
   scheduleIdleContactPrefetch(threadGroups);
+  observeRailPagination();
   renderDebugPanel();
 }
 
@@ -4443,6 +4688,8 @@ function renderThreadDetail(group, options = {}) {
     renderSettingsUi();
     renderThreadDebug(group);
     updateMainPanelVisibility();
+    observeDetailHistory(group.threadId);
+    disconnectDetailHydrationObserver();
     return;
   }
 
@@ -4536,7 +4783,11 @@ function renderThreadDetail(group, options = {}) {
     }
     state.detailLastThreadId = group.threadId;
     if (!usingLegacyMailboxFlow()) {
-      scheduleVisibleBodyHydration(group.threadId);
+      observeDetailHistory(group.threadId);
+      observeVisibleBodyHydration(group.threadId);
+      if (!supportsIntersectionObservers()) {
+        scheduleVisibleBodyHydration(group.threadId);
+      }
     }
   });
 }
@@ -4884,17 +5135,105 @@ function scheduleIdleContactPrefetch(threadGroups = currentThreadGroups()) {
   }, 2100);
 }
 
-function scheduleVisibleBodyHydration(threadId) {
+function observeRailPagination() {
+  disconnectRailPaginationObserver();
+  if (!supportsIntersectionObservers() || usingLegacyMailboxFlow() || state.mailboxMode === 'search') return;
+  const list = document.getElementById('gmailUnifiedList');
+  const tail = list?.querySelector('.gmail-unified-thread-tail-loader');
+  if (!list || !tail) return;
+
+  railPaginationObserver = new window.IntersectionObserver((entries) => {
+    if (!entries.some((entry) => entry.isIntersecting)) return;
+    loadMoreMessageSummaries().catch(() => {});
+  }, {
+    root: list,
+    rootMargin: '0px 0px 260px 0px',
+    threshold: 0.01
+  });
+
+  railPaginationObserver.observe(tail);
+}
+
+function observeDetailHistory(threadId) {
+  disconnectDetailHistoryObserver();
+  if (!supportsIntersectionObservers() || usingLegacyMailboxFlow()) return;
+  const body = document.getElementById('gmailUnifiedDetailBody');
+  const sentinel = body?.querySelector('.gmail-unified-history-status');
+  if (!body || !sentinel || !threadId) return;
+
+  detailHistoryObserver = new window.IntersectionObserver((entries) => {
+    if (!entries.some((entry) => entry.isIntersecting)) return;
+    const loadState = getContactLoadState(threadId);
+    if (!loadState.hasMore || loadState.inFlight || !loadState.nextCursor) return;
+    loadContactMessagesForThread(threadId, {
+      cursor: loadState.nextCursor,
+      preserveScroll: true,
+      pageSize: CONTACT_PAGE_SIZE
+    }).catch(() => {});
+  }, {
+    root: body,
+    rootMargin: '220px 0px 0px 0px',
+    threshold: 0.01
+  });
+
+  detailHistoryObserver.observe(sentinel);
+}
+
+function observeVisibleBodyHydration(threadId) {
+  disconnectDetailHydrationObserver();
+  if (!supportsIntersectionObservers() || usingLegacyMailboxFlow()) return;
+  const body = document.getElementById('gmailUnifiedDetailBody');
+  const contactKey = String(threadId || '').trim();
+  if (!body || !contactKey || state.selectedThreadId !== contactKey) return;
+
+  const metadataNodes = [...body.querySelectorAll('.gmail-unified-message[data-message-id]')]
+    .filter((node) => {
+      const messageId = String(node.getAttribute('data-message-id') || '').trim();
+      const message = state.contactMessageIndexByKey[contactKey]?.[messageId];
+      return Boolean(messageId && message?.contentState === 'metadata');
+    });
+  if (!metadataNodes.length) return;
+
+  const preloadMargin = Math.max(body.clientHeight, 320);
+  detailHydrationObserver = new window.IntersectionObserver((entries) => {
+    const messageIds = entries
+      .filter((entry) => entry.isIntersecting)
+      .map((entry) => String(entry.target?.getAttribute('data-message-id') || '').trim())
+      .filter(Boolean);
+    if (!messageIds.length) return;
+    scheduleVisibleBodyHydration(contactKey, messageIds);
+  }, {
+    root: body,
+    rootMargin: `${preloadMargin}px 0px ${preloadMargin}px 0px`,
+    threshold: 0.01
+  });
+
+  metadataNodes.forEach((node) => detailHydrationObserver.observe(node));
+}
+
+function scheduleVisibleBodyHydration(threadId, messageIds = []) {
+  const contactKey = String(threadId || '').trim();
+  if (!contactKey) return;
+  const pending = pendingHydrationIdsByThread.get(contactKey) || new Set();
+  (Array.isArray(messageIds) ? messageIds : []).forEach((messageId) => {
+    const normalizedId = String(messageId || '').trim();
+    if (normalizedId) pending.add(normalizedId);
+  });
+  if (pending.size) {
+    pendingHydrationIdsByThread.set(contactKey, pending);
+  }
   if (visibleBodyHydrationFrame) {
     window.cancelAnimationFrame(visibleBodyHydrationFrame);
   }
   visibleBodyHydrationFrame = window.requestAnimationFrame(() => {
     visibleBodyHydrationFrame = 0;
-    hydrateVisibleBodiesForThread(threadId).catch(() => {});
+    const queuedIds = [...(pendingHydrationIdsByThread.get(contactKey) || new Set())];
+    pendingHydrationIdsByThread.delete(contactKey);
+    hydrateVisibleBodiesForThread(contactKey, queuedIds).catch(() => {});
   });
 }
 
-async function hydrateVisibleBodiesForThread(threadId) {
+async function hydrateVisibleBodiesForThread(threadId, requestedMessageIds = []) {
   const contactKey = String(threadId || '').trim();
   if (!contactKey || state.selectedThreadId !== contactKey || usingLegacyMailboxFlow()) return null;
 
@@ -4904,24 +5243,16 @@ async function hydrateVisibleBodiesForThread(threadId) {
   const body = document.getElementById('gmailUnifiedDetailBody');
   if (!body) return null;
 
-  const messages = Array.isArray(state.contactMessagesByKey[contactKey])
-    ? state.contactMessagesByKey[contactKey]
-    : [];
+  const messages = Array.isArray(state.contactMessagesByKey[contactKey]) ? state.contactMessagesByKey[contactKey] : [];
   if (!messages.length) return null;
 
-  const bodyRect = body.getBoundingClientRect();
-  const visibleMetadataMessageIds = Array.from(body.querySelectorAll('.gmail-unified-message[data-message-id]'))
-    .map((node) => ({
-      node,
-      messageId: String(node.getAttribute('data-message-id') || '').trim()
-    }))
-    .filter(({ messageId }) => messageId)
-    .filter(({ node }) => {
-      const rect = node.getBoundingClientRect();
-      return rect.bottom >= bodyRect.top - 48 && rect.top <= bodyRect.bottom + 48;
-    })
-    .map(({ messageId }) => {
-      const message = messages.find((entry) => entry?.id === messageId);
+  const visibleMetadataMessageIds = (Array.isArray(requestedMessageIds) && requestedMessageIds.length
+    ? requestedMessageIds
+    : Array.from(body.querySelectorAll('.gmail-unified-message[data-message-id]'))
+      .map((node) => String(node.getAttribute('data-message-id') || '').trim())
+      .filter(Boolean))
+    .map((messageId) => {
+      const message = state.contactMessageIndexByKey[contactKey]?.[messageId];
       return message?.contentState === 'metadata' ? messageId : '';
     })
     .filter(Boolean);
@@ -4971,7 +5302,11 @@ async function hydrateVisibleBodiesForThread(threadId) {
   if (Array.isArray(response.messages) && response.messages.length) {
     storeContactMessages(contactKey, response.messages);
     if (state.selectedThreadId === contactKey) {
-      renderActiveThreadDetail(contactKey, { preserveScroll: true });
+      scheduleUiCommit({
+        detail: true,
+        detailThreadId: contactKey,
+        preserveDetailScroll: true
+      });
     }
   }
 
@@ -5003,7 +5338,10 @@ async function loadContactMessagesForThread(threadId, options = {}) {
       completedAt: new Date().toISOString()
     };
     if (state.selectedThreadId === threadId) {
-      renderActiveThreadDetail(threadId);
+      scheduleUiCommit({
+        detail: true,
+        detailThreadId: threadId
+      });
     }
     return null;
   }
@@ -5046,7 +5384,10 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   };
 
   if (state.selectedThreadId === threadId) {
-    renderActiveThreadDetail(threadId);
+    scheduleUiCommit({
+      detail: true,
+      detailThreadId: threadId
+    });
   }
 
   let response;
@@ -5132,17 +5473,24 @@ async function loadContactMessagesForThread(threadId, options = {}) {
 
   state.contactLoadStateByKey[threadId] = nextState;
 
-  renderThreads();
-  const activeDetailGroup = renderActiveThreadDetail(threadId, { preserveScroll });
-  if (activeDetailGroup) {
-    if (preserveScroll) {
-      window.requestAnimationFrame(() => {
-        const currentBody = document.getElementById('gmailUnifiedDetailBody');
-        if (!currentBody) return;
-        const delta = currentBody.scrollHeight - previousScrollHeight;
-        currentBody.scrollTop = Math.max(0, previousScrollTop + delta);
-      });
-    }
+  const rowPatched = response?.success && Array.isArray(response?.messages) && response.messages.length
+    ? refreshThreadRow(threadId)
+    : false;
+  scheduleUiCommit({
+    detail: true,
+    detailThreadId: threadId,
+    preserveDetailScroll: preserveScroll,
+    selectionOnly: true,
+    rail: !rowPatched && state.mailboxMode !== 'search' && Boolean(response?.success && Array.isArray(response?.messages) && response.messages.length)
+  });
+
+  if (preserveScroll && state.selectedThreadId === threadId) {
+    window.requestAnimationFrame(() => {
+      const currentBody = document.getElementById('gmailUnifiedDetailBody');
+      if (!currentBody) return;
+      const delta = currentBody.scrollHeight - previousScrollHeight;
+      currentBody.scrollTop = Math.max(0, previousScrollTop + delta);
+    });
   }
 
   return response;
@@ -5178,7 +5526,11 @@ async function loadMessageSummaries(options = {}) {
   state.summaryLastRequestId = requestGeneration;
 
   if (!silent && !currentSummaryItems().length) {
-    setStateCard('loading', 'Loading conversations...');
+    if (!usingLegacyMailboxFlow() && state.mailboxMode !== 'search') {
+      scheduleUiCommit({ rail: true });
+    } else {
+      setStateCard('loading', 'Loading conversations...');
+    }
   }
   pushDebugEvent('mailbox', append ? 'Requesting summary page append' : 'Requesting mailbox summaries', {
     requestGeneration,
@@ -5460,8 +5812,72 @@ async function loadMessages(options = {}) {
   return fallbackResponse;
 }
 
+async function loadSummaryBootstrap(options = {}) {
+  if (!state.connected || state.connectInFlight || usingLegacyMailboxFlow() || state.mailboxMode === 'search') {
+    return { success: true, skipped: true, code: 'SUMMARY_BOOTSTRAP_NOT_APPLICABLE' };
+  }
+  if (currentSummaryItems().length || state.summaryBootstrapInFlight || state.summaryInitialLoadInFlight) {
+    return { success: true, skipped: true, code: 'SUMMARY_BOOTSTRAP_SKIPPED' };
+  }
+
+  state.summaryBootstrapInFlight = true;
+  scheduleUiCommit({ rail: true });
+
+  let response;
+  try {
+    response = await sendWorker('FETCH_MESSAGE_SUMMARIES', {
+      folder: options.folder || currentMailboxScope(),
+      limit: Math.max(Number(options.limit || state.summaryPageSize || 50), 20),
+      cursor: '',
+      append: false,
+      forceSync: false,
+      bootstrapCacheOnly: true,
+      trackActivity: false
+    });
+  } finally {
+    state.summaryBootstrapInFlight = false;
+  }
+
+  if (!response?.success) {
+    scheduleUiCommit({ rail: true });
+    return response;
+  }
+
+  const normalizedSummaries = Array.isArray(response?.summaries)
+    ? response.summaries.map(normalizeContactSummary).filter((summary) => summary.contactKey)
+    : [];
+
+  if (normalizedSummaries.length) {
+    replaceSummaryItems(normalizedSummaries);
+    state.summaryCursor = String(response?.nextCursor || state.summaryCursor || '');
+    state.summaryHasMore = Boolean(response?.hasMore || state.summaryHasMore);
+    state.summaryLoadedCount = numericValue(response?.loadedCount, normalizedSummaries.length);
+    state.summaryWorkerCount = numericValue(response?.count, normalizedSummaries.length);
+    state.summaryNormalizedCount = normalizedSummaries.length;
+  }
+
+  scheduleUiCommit({ rail: true, selectionOnly: true });
+  return response;
+}
+
+function queueBackgroundMailboxPrime(options = {}) {
+  window.requestAnimationFrame(() => {
+    window.setTimeout(() => {
+      primeMailboxInBackground({
+        allowLegacyFallback: false,
+        forceVisibleRefresh: true,
+        limit: Math.max(Number(options.limit || state.summaryPageSize || 50), 20)
+      }).catch(() => {});
+      window.setTimeout(() => {
+        sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
+      }, currentSummaryItems().length ? 600 : 0);
+      startAutoRefresh();
+    }, 0);
+  });
+}
+
 function primeMailboxInBackground(options = {}) {
-  if (state.summaryInitialLoadInFlight || currentSummaryItems().length) {
+  if (state.summaryInitialLoadInFlight || (currentSummaryItems().length && !options.forceVisibleRefresh)) {
     return Promise.resolve({
       success: true,
       source: state.lastMailboxSource || 'summary',
@@ -5836,8 +6252,10 @@ function applyGmailLayoutMode() {
   updateGuideProgressUI();
   renderSettingsUi();
   renderComposeOverlay();
-  renderCampaignMode();
-  renderCampaignBanner();
+  if (CAMPAIGN_MODE_ENABLED) {
+    renderCampaignMode();
+    renderCampaignBanner();
+  }
   updateMainPanelVisibility();
 }
 
@@ -5904,16 +6322,18 @@ function bindGuideEvents(sidebar) {
     });
   });
 
-  const handleListScroll = throttle(() => {
-    scheduleIdleContactPrefetch();
-    if (usingLegacyMailboxFlow() || state.mailboxMode === 'search') return;
-    const list = document.getElementById('gmailUnifiedList');
-    if (!list) return;
-    const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) <= SUMMARY_APPEND_TRIGGER_PX;
-    if (!nearBottom) return;
-    loadMoreMessageSummaries().catch(() => {});
-  }, 100);
-  sidebar.querySelector('#gmailUnifiedList')?.addEventListener('scroll', handleListScroll, { passive: true });
+  if (!supportsIntersectionObservers()) {
+    const handleListScroll = throttle(() => {
+      scheduleIdleContactPrefetch();
+      if (usingLegacyMailboxFlow() || state.mailboxMode === 'search') return;
+      const list = document.getElementById('gmailUnifiedList');
+      if (!list) return;
+      const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) <= SUMMARY_APPEND_TRIGGER_PX;
+      if (!nearBottom) return;
+      loadMoreMessageSummaries().catch(() => {});
+    }, 100);
+    sidebar.querySelector('#gmailUnifiedList')?.addEventListener('scroll', handleListScroll, { passive: true });
+  }
 
   sidebar.querySelector('#gmailUnifiedBackBtn')?.addEventListener('click', () => {
     state.selectedThreadId = '';
@@ -6022,9 +6442,11 @@ function bindGuideEvents(sidebar) {
     await submitComposeOverlay();
   });
 
-  sidebar.querySelector('#gmailUnifiedComposeCampaignBtn')?.addEventListener('click', () => {
-    openCampaignModeFromCompose();
-  });
+  if (CAMPAIGN_MODE_ENABLED) {
+    sidebar.querySelector('#gmailUnifiedComposeCampaignBtn')?.addEventListener('click', () => {
+      openCampaignModeFromCompose();
+    });
+  }
 
   sidebar.querySelector('#gmailUnifiedComposerReply')?.addEventListener('click', () => {
     setComposerMode('reply');
@@ -6049,128 +6471,130 @@ function bindGuideEvents(sidebar) {
     await submitThreadReply(findSelectedGroup());
   });
 
-  sidebar.querySelector('#gmailUnifiedCampaignDataPane')?.addEventListener('paste', (event) => {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-      return;
-    }
-    const rawText = event.clipboardData?.getData('text/plain') || '';
-    if (!String(rawText || '').trim()) return;
-    event.preventDefault();
-    const dataset = buildCampaignDatasetFromText(rawText);
-    replaceCampaignDataset(dataset.headers, dataset.rows);
-    renderCampaignMode({ syncInputs: true, fullTable: true });
-    renderCampaignBanner();
-  });
-
-  sidebar.querySelector('#gmailUnifiedCampaignOverlay')?.addEventListener('input', (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
-
-    if (target.id === 'gmailUnifiedCampaignSubject') {
-      state.campaignMode.subjectTemplate = target.value;
-      applyCampaignValidation();
-      renderCampaignMode();
+  if (CAMPAIGN_MODE_ENABLED) {
+    sidebar.querySelector('#gmailUnifiedCampaignDataPane')?.addEventListener('paste', (event) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      const rawText = event.clipboardData?.getData('text/plain') || '';
+      if (!String(rawText || '').trim()) return;
+      event.preventDefault();
+      const dataset = buildCampaignDatasetFromText(rawText);
+      replaceCampaignDataset(dataset.headers, dataset.rows);
+      renderCampaignMode({ syncInputs: true, fullTable: true });
       renderCampaignBanner();
-      return;
-    }
+    });
 
-    if (target.id === 'gmailUnifiedCampaignBody') {
-      state.campaignMode.bodyTemplate = target.value;
-      applyCampaignValidation();
-      renderCampaignMode();
-      renderCampaignBanner();
-      return;
-    }
+    sidebar.querySelector('#gmailUnifiedCampaignOverlay')?.addEventListener('input', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
 
-    if (target.dataset.campaignHeaderIndex != null) {
-      updateCampaignHeader(Number(target.dataset.campaignHeaderIndex), target.value, {
-        selectionStart: target.selectionStart,
-        selectionEnd: target.selectionEnd
-      });
-      return;
-    }
+      if (target.id === 'gmailUnifiedCampaignSubject') {
+        state.campaignMode.subjectTemplate = target.value;
+        applyCampaignValidation();
+        renderCampaignMode();
+        renderCampaignBanner();
+        return;
+      }
 
-    if (target.dataset.campaignRowId && target.dataset.campaignCellIndex != null) {
-      updateCampaignCell(target.dataset.campaignRowId, Number(target.dataset.campaignCellIndex), target.value, {
-        selectionStart: target.selectionStart,
-        selectionEnd: target.selectionEnd
-      });
-    }
-  });
+      if (target.id === 'gmailUnifiedCampaignBody') {
+        state.campaignMode.bodyTemplate = target.value;
+        applyCampaignValidation();
+        renderCampaignMode();
+        renderCampaignBanner();
+        return;
+      }
 
-  sidebar.querySelector('#gmailUnifiedCampaignOverlay')?.addEventListener('click', async (event) => {
-    const button = event.target instanceof Element ? event.target.closest('button') : null;
-    if (!(button instanceof HTMLButtonElement)) return;
+      if (target.dataset.campaignHeaderIndex != null) {
+        updateCampaignHeader(Number(target.dataset.campaignHeaderIndex), target.value, {
+          selectionStart: target.selectionStart,
+          selectionEnd: target.selectionEnd
+        });
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignCloseBtn') {
-      closeCampaignMode({
-        background: campaignRunActive()
-      });
-      return;
-    }
+      if (target.dataset.campaignRowId && target.dataset.campaignCellIndex != null) {
+        updateCampaignCell(target.dataset.campaignRowId, Number(target.dataset.campaignCellIndex), target.value, {
+          selectionStart: target.selectionStart,
+          selectionEnd: target.selectionEnd
+        });
+      }
+    });
 
-    if (button.id === 'gmailUnifiedCampaignModeReview') {
-      if (campaignRunActive()) return;
-      state.campaignMode.mode = 'review';
-      renderCampaignMode();
-      return;
-    }
+    sidebar.querySelector('#gmailUnifiedCampaignOverlay')?.addEventListener('click', async (event) => {
+      const button = event.target instanceof Element ? event.target.closest('button') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
 
-    if (button.id === 'gmailUnifiedCampaignModeBlast') {
-      if (campaignRunActive()) return;
-      state.campaignMode.mode = 'blast';
-      renderCampaignMode();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignCloseBtn') {
+        closeCampaignMode({
+          background: campaignRunActive()
+        });
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignStartReview') {
-      await startCampaignReview();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignModeReview') {
+        if (campaignRunActive()) return;
+        state.campaignMode.mode = 'review';
+        renderCampaignMode();
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignStartBlast') {
-      await startCampaignBlast();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignModeBlast') {
+        if (campaignRunActive()) return;
+        state.campaignMode.mode = 'blast';
+        renderCampaignMode();
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignReviewSend') {
-      await sendCurrentCampaignReviewRow();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignStartReview') {
+        await startCampaignReview();
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignReviewSkip') {
-      skipCampaignReviewRow();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignStartBlast') {
+        await startCampaignBlast();
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignBlastStop') {
-      await stopCampaignBlast();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignReviewSend') {
+        await sendCurrentCampaignReviewRow();
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignAddRow') {
-      addCampaignRow();
-      return;
-    }
+      if (button.id === 'gmailUnifiedCampaignReviewSkip') {
+        skipCampaignReviewRow();
+        return;
+      }
 
-    if (button.dataset.campaignDeleteRow) {
-      deleteCampaignRow(button.dataset.campaignDeleteRow);
-    }
-  });
+      if (button.id === 'gmailUnifiedCampaignBlastStop') {
+        await stopCampaignBlast();
+        return;
+      }
 
-  sidebar.querySelector('#gmailUnifiedCampaignBanner')?.addEventListener('click', async (event) => {
-    const button = event.target instanceof Element ? event.target.closest('button') : null;
-    if (!(button instanceof HTMLButtonElement)) return;
+      if (button.id === 'gmailUnifiedCampaignAddRow') {
+        addCampaignRow();
+        return;
+      }
 
-    if (button.id === 'gmailUnifiedCampaignBannerReopen') {
-      reopenCampaignMode();
-      return;
-    }
+      if (button.dataset.campaignDeleteRow) {
+        deleteCampaignRow(button.dataset.campaignDeleteRow);
+      }
+    });
 
-    if (button.id === 'gmailUnifiedCampaignBannerStop') {
-      await stopCampaignBlast();
-    }
-  });
+    sidebar.querySelector('#gmailUnifiedCampaignBanner')?.addEventListener('click', async (event) => {
+      const button = event.target instanceof Element ? event.target.closest('button') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+
+      if (button.id === 'gmailUnifiedCampaignBannerReopen') {
+        reopenCampaignMode();
+        return;
+      }
+
+      if (button.id === 'gmailUnifiedCampaignBannerStop') {
+        await stopCampaignBlast();
+      }
+    });
+  }
 
   sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('click', (event) => {
     const anchor = event.target.closest('a[data-mailita-link]');
@@ -6183,21 +6607,23 @@ function bindGuideEvents(sidebar) {
     }
   });
 
-  const handleDetailScroll = throttle(() => {
-    scheduleIdleContactPrefetch();
-    if (!state.selectedThreadId || usingLegacyMailboxFlow()) return;
-    const currentBody = document.getElementById('gmailUnifiedDetailBody');
-    scheduleVisibleBodyHydration(state.selectedThreadId);
-    if (!currentBody || currentBody.scrollTop > 120) return;
-    const loadState = getContactLoadState(state.selectedThreadId);
-    if (!loadState.hasMore || loadState.inFlight || !loadState.nextCursor) return;
-    loadContactMessagesForThread(state.selectedThreadId, {
-      cursor: loadState.nextCursor,
-      preserveScroll: true,
-      pageSize: CONTACT_PAGE_SIZE
-    }).catch(() => {});
-  }, 100);
-  sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('scroll', handleDetailScroll, { passive: true });
+  if (!supportsIntersectionObservers()) {
+    const handleDetailScroll = throttle(() => {
+      scheduleIdleContactPrefetch();
+      if (!state.selectedThreadId || usingLegacyMailboxFlow()) return;
+      const currentBody = document.getElementById('gmailUnifiedDetailBody');
+      scheduleVisibleBodyHydration(state.selectedThreadId);
+      if (!currentBody || currentBody.scrollTop > 120) return;
+      const loadState = getContactLoadState(state.selectedThreadId);
+      if (!loadState.hasMore || loadState.inFlight || !loadState.nextCursor) return;
+      loadContactMessagesForThread(state.selectedThreadId, {
+        cursor: loadState.nextCursor,
+        preserveScroll: true,
+        pageSize: CONTACT_PAGE_SIZE
+      }).catch(() => {});
+    }, 100);
+    sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('scroll', handleDetailScroll, { passive: true });
+  }
 
   if (!window.__mailitaPointerCloseBound) {
     document.addEventListener('pointerdown', (event) => {
@@ -6677,9 +7103,8 @@ async function bootGmailSurface() {
     ensureMailitaSurfaceObserver();
 
     if (state.connected) {
-      ensureInitialSummaryLoad({ limit: 50 }).catch(() => {});
-      sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
-      startAutoRefresh();
+      await loadSummaryBootstrap({ limit: 50 }).catch(() => {});
+      queueBackgroundMailboxPrime({ limit: 50 });
     }
 
     mailitaBootRetries = 0;

@@ -1334,6 +1334,7 @@
     const limit = Math.max(Number(options.limit || 50), 20);
     const cursor = String(options.cursor || '').trim();
     const append = Boolean(options.append);
+    const bootstrapCacheOnly = Boolean(options.bootstrapCacheOnly) && !cursor;
     const query = scopeQuery(folder);
     const cached = await readCachedMailbox().catch(() => ({
       messages: [],
@@ -1343,6 +1344,30 @@
       lastFullSyncAt: 0,
       timings: timingEnvelope(Date.now(), { cache_read_ms: 0 })
     }));
+
+    if (bootstrapCacheOnly) {
+      const fallbackNextCursor = await metaGet(META_KEYS.summaryNextCursor, '').catch(() => '');
+      const cachedScopedMessages = filterMessagesByScope(cached.messages, folder);
+      const summaries = buildContactSummaries(cachedScopedMessages, limit);
+      return {
+        accountEmail: cached.accountEmail,
+        summaries,
+        count: summaries.length,
+        loadedCount: Math.min(cachedScopedMessages.length, limit),
+        nextCursor: String(fallbackNextCursor || ''),
+        hasMore: Boolean(fallbackNextCursor),
+        source: 'gmail_api_local_summary_bootstrap',
+        debug: summaryDebugEnvelope('cache', cachedScopedMessages, {
+          newestCachedAt: cached.lastSyncTime || null,
+          limitPerFolder: limit,
+          pageCount: summaries.length,
+          loadedCount: Math.min(cachedScopedMessages.length, limit),
+          nextCursor: String(fallbackNextCursor || ''),
+          cacheMessageCount: cached.messages.length
+        }),
+        timings: cached.timings || timingEnvelope(startedAt, { cache_read_ms: 0 })
+      };
+    }
 
     try {
       const accountEmail = normalizeEmail(cached.accountEmail || (await fetchProfile(false))?.emailAddress);
