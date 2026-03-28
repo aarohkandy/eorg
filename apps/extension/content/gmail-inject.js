@@ -29,6 +29,7 @@ const WORKER_TIMEOUT_BY_ACTION = {
 const CONTACT_PAGE_SIZE = 5;
 const SUMMARY_APPEND_TRIGGER_PX = 220;
 const SUMMARY_APPEND_PAGE_SIZE = 15;
+const CAMPAIGN_MODE_ENABLED = false;
 const CAMPAIGN_BLAST_DELAY_MS = 8000;
 const mLog = (action, details = {}) => console.log(`[Mailita ${new Date().toISOString().split('T')[1]}] ${action}`, details);
 globalThis.mLog = mLog;
@@ -1954,6 +1955,7 @@ function buildCampaignDatasetFromText(rawText) {
 }
 
 function openCampaignModeFromCompose() {
+  if (!CAMPAIGN_MODE_ENABLED) return;
   if (!state.connected) return;
   const draft = syncComposeOverlayDraftFromDom();
   const existing = state.campaignMode;
@@ -1982,6 +1984,7 @@ function openCampaignModeFromCompose() {
 }
 
 function reopenCampaignMode() {
+  if (!CAMPAIGN_MODE_ENABLED) return;
   state.campaignMode.active = true;
   state.campaignMode.exitedToBackground = false;
   renderCampaignMode({ syncInputs: true, fullTable: true });
@@ -1989,6 +1992,12 @@ function reopenCampaignMode() {
 }
 
 function closeCampaignMode(options = {}) {
+  if (!CAMPAIGN_MODE_ENABLED) {
+    state.campaignMode = defaultCampaignModeState();
+    renderCampaignMode({ fullTable: true });
+    renderCampaignBanner();
+    return;
+  }
   const backgroundOnly = Boolean(options.background) || state.campaignMode.blastRunning || Boolean(state.campaignMode.activeRequestId);
   state.campaignMode.active = false;
   state.campaignMode.exitedToBackground = backgroundOnly && (state.campaignMode.blastRunning || Boolean(state.campaignMode.activeRequestId));
@@ -2043,7 +2052,7 @@ function campaignRunActive() {
 }
 
 function campaignBannerVisible() {
-  return Boolean(state.campaignMode.exitedToBackground && (campaignRunActive() || state.campaignMode.completed || state.campaignMode.stopped));
+  return Boolean(CAMPAIGN_MODE_ENABLED && state.campaignMode.exitedToBackground && (campaignRunActive() || state.campaignMode.completed || state.campaignMode.stopped));
 }
 
 function campaignStatusLabel(status) {
@@ -2295,6 +2304,13 @@ function renderCampaignMode(options = {}) {
   const status = document.getElementById('gmailUnifiedCampaignStatus');
   const reviewButton = document.getElementById('gmailUnifiedCampaignModeReview');
   const blastButton = document.getElementById('gmailUnifiedCampaignModeBlast');
+  if (!CAMPAIGN_MODE_ENABLED) {
+    if (overlay) {
+      overlay.hidden = true;
+      overlay.style.display = 'none';
+    }
+    return;
+  }
   if (!overlay || !subjectInput || !bodyInput || !status || !reviewButton || !blastButton) return;
 
   overlay.hidden = !state.campaignMode.active;
@@ -2338,6 +2354,11 @@ function renderCampaignMode(options = {}) {
 function renderCampaignBanner() {
   const banner = document.getElementById('gmailUnifiedCampaignBanner');
   if (!banner) return;
+  if (!CAMPAIGN_MODE_ENABLED) {
+    banner.hidden = true;
+    banner.style.display = 'none';
+    return;
+  }
 
   const visible = campaignBannerVisible();
   banner.hidden = !visible;
@@ -2688,7 +2709,7 @@ function handleGlobalSurfaceEscape(event) {
     return;
   }
 
-  if (state.campaignMode.active) {
+  if (CAMPAIGN_MODE_ENABLED && state.campaignMode.active) {
     event.preventDefault();
     closeCampaignMode({
       background: campaignRunActive()
@@ -5796,6 +5817,11 @@ function applyGmailLayoutMode() {
   if (!state.connected) {
     state.settingsOpen = false;
   }
+  if (!CAMPAIGN_MODE_ENABLED && (state.campaignMode.active || state.campaignMode.exitedToBackground || campaignRunActive())) {
+    clearCampaignBlastDelay();
+    campaignBlastRunToken += 1;
+    state.campaignMode = defaultCampaignModeState();
+  }
   applyThemeSettings();
 
   const shellAccessible = state.connected || state.shellUnlocked;
@@ -6319,7 +6345,7 @@ function buildSidebar() {
         <div class="gmail-unified-compose-actions">
           <div id="gmailUnifiedComposeStatus" class="gmail-unified-compose-status" data-state="idle"></div>
           <div class="gmail-unified-compose-action-buttons">
-            <button id="gmailUnifiedComposeCampaignBtn" class="gmail-unified-secondary-btn gmail-unified-compose-campaign" type="button">Campaign Mode</button>
+            ${CAMPAIGN_MODE_ENABLED ? '<button id="gmailUnifiedComposeCampaignBtn" class="gmail-unified-secondary-btn gmail-unified-compose-campaign" type="button">Campaign Mode</button>' : ''}
             <button id="gmailUnifiedComposeCancelBtn" class="gmail-unified-secondary-btn" type="button">Cancel</button>
             <button id="gmailUnifiedComposeSend" class="gmail-unified-primary-btn" type="button">Send</button>
           </div>
@@ -6327,6 +6353,7 @@ function buildSidebar() {
       </div>
     </section>
 
+    ${CAMPAIGN_MODE_ENABLED ? `
     <section id="gmailUnifiedCampaignOverlay" class="gmail-unified-campaign-overlay" hidden>
       <div class="gmail-unified-campaign-shell">
         <div class="gmail-unified-campaign-head">
@@ -6381,6 +6408,7 @@ function buildSidebar() {
     </section>
 
     <div id="gmailUnifiedCampaignBanner" class="gmail-unified-campaign-banner" hidden></div>
+    ` : ''}
   `;
 
   document.body.appendChild(sidebar);
