@@ -1452,8 +1452,14 @@
 
     let nextCursor = '';
     let hasMore = false;
+    const shouldProbeRemotePage = Boolean(targetEmail || targetKey) && (
+      Boolean(cursor)
+      || !matches.length
+      || options.forceSync
+      || options.cursorProbe !== false
+    );
 
-    if ((cursor || !matches.length || options.forceSync) && (targetEmail || targetKey)) {
+    if (shouldProbeRemotePage) {
       const query = mergeQueries(
         gmailQueryForContact(targetEmail, targetKey),
         scopeQuery(scope)

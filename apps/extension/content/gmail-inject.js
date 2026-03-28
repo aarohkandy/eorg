@@ -165,6 +165,7 @@ let queuedUiCommit = {
   selectionOnly: false,
   preserveDetailScroll: false,
   detailThreadId: '',
+  scrollAnchor: null,
   campaignOptions: {}
 };
 const pendingHydrationIdsByThread = new Map();
@@ -729,6 +730,7 @@ function defaultContactLoadState() {
     backend: normalizeBuildInfo(null),
     schemaFallbackUsed: false,
     richContentSource: 'cache',
+    cursorResolved: false,
     nextCursor: '',
     hasMore: false,
     requestedAt: null,
@@ -750,6 +752,38 @@ async function persistUiSettings(nextSettings) {
 
 function requestDetailSnapToLatest(threadId = state.selectedThreadId) {
   state.detailSnapToLatestThreadId = String(threadId || '').trim();
+}
+
+function captureDetailScrollAnchor(body) {
+  if (!(body instanceof HTMLElement)) return null;
+  const bodyRect = body.getBoundingClientRect();
+  const anchorNode = [...body.querySelectorAll('.gmail-unified-message[data-message-id]')]
+    .find((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.bottom >= bodyRect.top + 8;
+    });
+  if (!(anchorNode instanceof HTMLElement)) return null;
+
+  const messageId = String(anchorNode.getAttribute('data-message-id') || '').trim();
+  if (!messageId) return null;
+
+  return {
+    messageId,
+    offsetTop: anchorNode.getBoundingClientRect().top - bodyRect.top
+  };
+}
+
+function restoreDetailScrollAnchor(body, anchor) {
+  if (!(body instanceof HTMLElement) || !anchor?.messageId) return false;
+  const target = body.querySelector(`.gmail-unified-message[data-message-id="${CSS.escape(anchor.messageId)}"]`);
+  if (!(target instanceof HTMLElement)) return false;
+
+  const bodyRect = body.getBoundingClientRect();
+  const desiredTop = numericValue(anchor.offsetTop, 0);
+  const actualTop = target.getBoundingClientRect().top - bodyRect.top;
+  body.scrollTop += actualTop - desiredTop;
+  return true;
 }
 
 function resetSectionedMailboxCaches(options = {}) {
@@ -907,6 +941,17 @@ function storeContactMessages(contactKey, messages, options = {}) {
   return state.contactMessagesByKey[contactKey];
 }
 
+function refreshContactMessageIndex(contactKey) {
+  const key = String(contactKey || '').trim();
+  if (!key) return;
+  const messages = Array.isArray(state.contactMessagesByKey[key]) ? state.contactMessagesByKey[key] : [];
+  state.contactMessageIndexByKey[key] = Object.fromEntries(
+    messages
+      .filter((message) => message?.id)
+      .map((message) => [message.id, message])
+  );
+}
+
 function replaceMessageInCollections(contactKey, messageId, updater) {
   const key = String(contactKey || '').trim();
   const targetId = String(messageId || '').trim();
@@ -922,6 +967,7 @@ function replaceMessageInCollections(contactKey, messageId, updater) {
 
   if (key && Array.isArray(state.contactMessagesByKey[key])) {
     state.contactMessagesByKey[key] = state.contactMessagesByKey[key].map(applyUpdate).sort(byDateDesc);
+    refreshContactMessageIndex(key);
     return state.contactMessagesByKey[key];
   }
 
@@ -941,6 +987,7 @@ function removeMessageFromCollections(contactKey, messageId) {
     state.contactMessagesByKey[key] = state.contactMessagesByKey[key]
       .filter((message) => String(message?.id || '').trim() !== targetId)
       .sort(byDateDesc);
+    refreshContactMessageIndex(key);
     return state.contactMessagesByKey[key];
   }
 
@@ -982,6 +1029,23 @@ function getGroupContactEmail(group) {
   return '';
 }
 
+function findSummaryByContactEmail(contactEmail) {
+  const target = String(contactEmail || '').trim().toLowerCase();
+  if (!target) return null;
+  return currentSummaryItems().find((summary) => String(summary?.contactEmail || '').trim().toLowerCase() === target) || null;
+}
+
+function removeSummaryByThreadId(threadId) {
+  const key = String(threadId || '').trim();
+  if (!key) return;
+  delete state.summaryByThreadId[key];
+  state.summaryOrder = state.summaryOrder.filter((entry) => entry !== key);
+  state.summaryItems = state.summaryOrder
+    .map((entry) => state.summaryByThreadId[entry])
+    .filter(Boolean);
+  state.summaryRenderedCount = state.summaryItems.length;
+}
+
 function buildSelectedMessageRefs(group) {
   return Array.isArray(group?.messages)
     ? group.messages.map((message) => ({
@@ -1005,7 +1069,10 @@ function replaceMessagesForThread(threadId, nextMessages) {
 
   state.messages = [...merged.values()];
   if (threadId) {
-    storeContactMessages(threadId, replacements, { replace: true });
+    const storedMessages = storeContactMessages(threadId, replacements, { replace: true });
+    if (storedMessages.length) {
+      upsertContactSummary(buildContactSummaryFromMessages(threadId, storedMessages));
+    }
   }
 }
 
@@ -1554,6 +1621,116 @@ function defaultComposeOverlayState() {
   };
 }
 
+function buildOptimisticOutgoingMessage(options = {}) {
+  const primaryRecipient = Array.isArray(options.recipients) && options.recipients.length
+    ? options.recipients[0]
+    : { email: '', name: '' };
+  const contactKey = String(options.contactKey || '').trim() || `contact:${String(primaryRecipient?.email || '').trim().toLowerCase()}`;
+  const isoNow = new Date().toISOString();
+  const bodyText = String(options.bodyText || '').trim();
+  const subject = String(options.subject || '').trim();
+
+  return {
+    id: String(options.id || `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+    threadId: String(options.threadId || contactKey).trim() || contactKey,
+    folder: 'SENT',
+    date: isoNow,
+    receivedAtMs: Date.now(),
+    from: {
+      name: '',
+      email: state.accountSnapshot.accountEmail || ''
+    },
+    to: Array.isArray(options.recipients) ? options.recipients : [],
+    subject,
+    snippet: bodyText,
+    bodyText,
+    bodyHtml: '',
+    bodyFormat: 'text',
+    hasRemoteImages: false,
+    hasLinkedImages: false,
+    isOutgoing: true,
+    optimisticLocal: true,
+    optimisticPending: true,
+    contactKey,
+    contactEmail: String(options.contactEmail || primaryRecipient?.email || '').trim().toLowerCase(),
+    contactName: String(options.contactName || primaryRecipient?.name || primaryRecipient?.email || 'Unknown contact').trim(),
+    contactKind: options.contactKind || 'person',
+    contactDomain: String(options.contactDomain || '').trim(),
+    flags: ['\\Seen'],
+    messageId: '',
+    rfcMessageId: '',
+    references: String(options.references || '').trim(),
+    inReplyTo: String(options.inReplyTo || '').trim(),
+    cc: Array.isArray(options.cc) ? options.cc : [],
+    replyTo: null
+  };
+}
+
+function seedLocalOutgoingMessage(options = {}) {
+  const optimisticMessage = buildOptimisticOutgoingMessage(options);
+  const contactKey = optimisticMessage.contactKey;
+  const previousSelectedThreadId = String(state.selectedThreadId || '').trim();
+  const existingSummary = findSummaryByThreadId(contactKey) || findSummaryByContactEmail(optimisticMessage.contactEmail);
+  if (existingSummary && existingSummary.contactKey !== contactKey) {
+    optimisticMessage.contactKey = existingSummary.contactKey;
+    optimisticMessage.threadId = String(options.threadId || existingSummary.contactKey).trim() || existingSummary.contactKey;
+  }
+  const resolvedContactKey = optimisticMessage.contactKey;
+
+  state.messages = [optimisticMessage, ...(Array.isArray(state.messages) ? state.messages : [])].sort(byDateDesc);
+  const mergedMessages = storeContactMessages(resolvedContactKey, [optimisticMessage]);
+  upsertContactSummary(buildContactSummaryFromMessages(resolvedContactKey, mergedMessages));
+  state.selectedThreadId = resolvedContactKey;
+  requestDetailSnapToLatest(resolvedContactKey);
+
+  return {
+    optimisticId: optimisticMessage.id,
+    threadId: resolvedContactKey,
+    previousSelectedThreadId,
+    hadExistingSummary: Boolean(existingSummary),
+    optimisticMessage
+  };
+}
+
+function rollbackLocalOutgoingMessage(seed, options = {}) {
+  const threadId = String(seed?.threadId || '').trim();
+  const optimisticId = String(seed?.optimisticId || '').trim();
+  if (!threadId || !optimisticId) return;
+
+  const remainingMessages = removeMessageFromCollections(threadId, optimisticId)
+    || (state.contactMessagesByKey[threadId] || []);
+  if (remainingMessages.length) {
+    upsertContactSummary(buildContactSummaryFromMessages(threadId, remainingMessages));
+  } else if (!seed?.hadExistingSummary) {
+    removeSummaryByThreadId(threadId);
+  }
+
+  const restoredThreadId = String(options.restoreSelectedThreadId || seed?.previousSelectedThreadId || '').trim();
+  state.selectedThreadId = restoredThreadId;
+  state.detailLastThreadId = restoredThreadId ? state.detailLastThreadId : '';
+  state.detailSnapToLatestThreadId = restoredThreadId ? state.detailSnapToLatestThreadId : '';
+}
+
+function reconcileLocalOutgoingMessage(seed, sent = {}) {
+  const threadId = String(seed?.threadId || '').trim();
+  const optimisticId = String(seed?.optimisticId || '').trim();
+  if (!threadId || !optimisticId) return [];
+
+  const nextMessages = replaceMessageInCollections(threadId, optimisticId, (message) => ({
+    ...message,
+    id: String(sent.id || message.id).trim() || message.id,
+    messageId: String(sent.id || message.messageId || '').trim(),
+    threadId: String(sent.threadId || message.threadId || '').trim() || message.threadId,
+    optimisticPending: false
+  })) || (state.contactMessagesByKey[threadId] || []);
+
+  if (nextMessages.length) {
+    upsertContactSummary(buildContactSummaryFromMessages(threadId, nextMessages));
+  }
+
+  return nextMessages;
+}
+
 function defaultCampaignModeState() {
   return {
     active: false,
@@ -1699,6 +1876,23 @@ async function submitComposeOverlay() {
   state.composeOverlay.sendStatus = '';
   renderComposeOverlay();
 
+  const optimisticSeed = seedLocalOutgoingMessage({
+    recipients,
+    subject,
+    bodyText,
+    contactEmail: recipients[0]?.email || '',
+    contactName: recipients[0]?.name || recipients[0]?.email || 'Unknown contact'
+  });
+  const optimisticRowPatched = refreshThreadRow(optimisticSeed.threadId);
+  closeComposeOverlay();
+  scheduleUiCommit({
+    detail: true,
+    detailThreadId: optimisticSeed.threadId,
+    selectionOnly: true,
+    rail: !optimisticRowPatched,
+    overlays: true
+  });
+
   let response;
   try {
     response = await sendWorker('SEND_MESSAGE', {
@@ -1717,15 +1911,37 @@ async function submitComposeOverlay() {
   }
 
   if (!response?.success) {
-    state.composeOverlay.sendError = response?.code === 'AUTH_SCOPE_REQUIRED'
+    rollbackLocalOutgoingMessage(optimisticSeed);
+    state.composeOverlay = {
+      ...defaultComposeOverlayState(),
+      open: true,
+      to: draft.to,
+      subject: draft.subject,
+      body: draft.body,
+      sendError: response?.code === 'AUTH_SCOPE_REQUIRED'
       ? 'Mailita needs Gmail send permission before it can send.'
-      : failureMessageForResponse(response, 'Send failed.');
-    state.composeOverlay.sendStatus = '';
-    renderComposeOverlay();
+      : failureMessageForResponse(response, 'Send failed.'),
+      sendStatus: ''
+    };
+    const failedRowPatched = refreshThreadRow(optimisticSeed.threadId);
+    scheduleUiCommit({
+      detail: true,
+      detailThreadId: state.selectedThreadId,
+      selectionOnly: true,
+      rail: !failedRowPatched,
+      overlays: true
+    });
     return response;
   }
 
-  closeComposeOverlay();
+  reconcileLocalOutgoingMessage(optimisticSeed, response?.sent || {});
+  const sentRowPatched = refreshThreadRow(optimisticSeed.threadId);
+  scheduleUiCommit({
+    detail: true,
+    detailThreadId: optimisticSeed.threadId,
+    selectionOnly: true,
+    rail: !sentRowPatched
+  });
   sendWorker('SYNC_MESSAGES', {
     trackActivity: false
   }).catch(() => {});
@@ -3296,51 +3512,23 @@ async function submitThreadReply(group) {
   }
 
   const composerMode = state.composer.mode;
-  const optimisticId = `optimistic-${Date.now()}`;
-  const optimisticMessage = {
-    id: optimisticId,
-    threadId: activeGroup.threadId,
-    folder: 'SENT',
-    date: new Date().toISOString(),
-    from: {
-      name: '',
-      email: state.accountSnapshot.accountEmail || ''
-    },
-    to: recipients,
-    subject,
-    snippet: body,
-    bodyText: body,
-    bodyHtml: '',
-    bodyFormat: 'text',
-    hasRemoteImages: false,
-    hasLinkedImages: false,
-    isOutgoing: true,
-    optimisticLocal: true,
-    optimisticPending: true,
-    contactKey: activeGroup.threadId,
-    contactEmail: getGroupContactEmail(activeGroup),
-    contactName: groupDisplayName(activeGroup),
-    contactKind: activeGroup.summary?.contactKind || 'person',
-    contactDomain: activeGroup.summary?.contactDomain || '',
-    flags: ['\\Seen'],
-    messageId: '',
-    rfcMessageId: '',
-    references: replyHeaders.references,
-    inReplyTo: replyHeaders.inReplyTo,
-    cc: [],
-    replyTo: null
-  };
-
   state.composer.sendError = '';
   state.composer.sendStatus = 'Sending...';
   state.composer.sendInFlight = true;
   state.composer.draft = '';
-  state.messages = [optimisticMessage, ...state.messages].sort(byDateDesc);
-  if (activeGroup?.threadId) {
-    const mergedMessages = storeContactMessages(activeGroup.threadId, [optimisticMessage]);
-    upsertContactSummary(buildContactSummaryFromMessages(activeGroup.threadId, mergedMessages));
-  }
-  requestDetailSnapToLatest(activeGroup.threadId);
+  const optimisticSeed = seedLocalOutgoingMessage({
+    threadId: activeGroup.threadId,
+    contactKey: activeGroup.threadId,
+    recipients,
+    subject,
+    bodyText: body,
+    contactEmail: getGroupContactEmail(activeGroup),
+    contactName: groupDisplayName(activeGroup),
+    contactKind: activeGroup.summary?.contactKind || 'person',
+    contactDomain: activeGroup.summary?.contactDomain || '',
+    references: replyHeaders.references,
+    inReplyTo: replyHeaders.inReplyTo
+  });
   const optimisticRowPatched = refreshThreadRow(activeGroup.threadId);
   scheduleUiCommit({
     detail: true,
@@ -3384,11 +3572,10 @@ async function submitThreadReply(group) {
   }
 
   if (!result.ok) {
-    const remainingMessages = removeMessageFromCollections(activeGroup.threadId, optimisticId)
-      || (state.contactMessagesByKey[activeGroup.threadId] || []);
-    if (remainingMessages.length) {
-      upsertContactSummary(buildContactSummaryFromMessages(activeGroup.threadId, remainingMessages));
-    } else if (activeGroup.summary) {
+    rollbackLocalOutgoingMessage(optimisticSeed, {
+      restoreSelectedThreadId: activeGroup.threadId
+    });
+    if (activeGroup.summary) {
       upsertContactSummary(activeGroup.summary);
     }
     state.composer = {
@@ -3408,15 +3595,7 @@ async function submitThreadReply(group) {
     return;
   }
 
-  const sentMessageId = String(sendResponse?.sent?.id || '').trim();
-  const sentThreadId = String(sendResponse?.sent?.threadId || activeGroup.threadId || '').trim();
-  const nextMessages = replaceMessageInCollections(activeGroup.threadId, optimisticId, (message) => ({
-    ...message,
-    id: sentMessageId || message.id,
-    threadId: sentThreadId || message.threadId,
-    optimisticPending: false
-  })) || (state.contactMessagesByKey[activeGroup.threadId] || []);
-  upsertContactSummary(buildContactSummaryFromMessages(activeGroup.threadId, nextMessages));
+  reconcileLocalOutgoingMessage(optimisticSeed, sendResponse?.sent || {});
   state.composer = {
     ...defaultComposerState(),
     mode: composerMode,
@@ -4336,6 +4515,9 @@ function scheduleUiCommit(request = {}) {
   if (request.selectionOnly) queuedUiCommit.selectionOnly = true;
   if (request.preserveDetailScroll) queuedUiCommit.preserveDetailScroll = true;
   if (request.detailThreadId) queuedUiCommit.detailThreadId = String(request.detailThreadId || '').trim();
+  if (request.scrollAnchor && typeof request.scrollAnchor === 'object') {
+    queuedUiCommit.scrollAnchor = { ...request.scrollAnchor };
+  }
   if (request.campaignOptions && typeof request.campaignOptions === 'object') {
     queuedUiCommit.campaignOptions = {
       ...queuedUiCommit.campaignOptions,
@@ -4353,6 +4535,7 @@ function scheduleUiCommit(request = {}) {
       selectionOnly: false,
       preserveDetailScroll: false,
       detailThreadId: '',
+      scrollAnchor: null,
       campaignOptions: {}
     };
 
@@ -4367,7 +4550,8 @@ function scheduleUiCommit(request = {}) {
 
     if (commit.detail && !renderedRail) {
       renderActiveThreadDetail(commit.detailThreadId || state.selectedThreadId, {
-        preserveScroll: commit.preserveDetailScroll
+        preserveScroll: commit.preserveDetailScroll,
+        scrollAnchor: commit.scrollAnchor
       });
     }
 
@@ -4580,14 +4764,120 @@ async function maybeDebugRefetchContact(group) {
     replaceMessagesForThread(group.threadId, refreshedMessages);
   }
 
-  renderThreads();
-  const selectedGroup = findSelectedGroup();
-  if (selectedGroup) {
-    renderThreadDetail(selectedGroup);
-  } else {
-    renderThreadDebug(null);
-    updateMainPanelVisibility();
+  const rowPatched = refreshedMessages.length ? refreshThreadRow(group.threadId) : false;
+  scheduleUiCommit({
+    detail: true,
+    detailThreadId: group.threadId,
+    selectionOnly: true,
+    rail: !rowPatched && refreshedMessages.length
+  });
+}
+
+function messageClusterShape(previousMessage, message, nextMessage) {
+  const groupedWithPrevious = shouldClusterWithPrevious(previousMessage, message);
+  const groupedWithNext = shouldClusterWithPrevious(message, nextMessage);
+  const clusterShape = groupedWithPrevious
+    ? (groupedWithNext ? 'middle' : 'end')
+    : (groupedWithNext ? 'start' : 'single');
+
+  return {
+    groupedWithPrevious,
+    groupedWithNext,
+    clusterShape
+  };
+}
+
+function applyMessageNodeContent(node, message, previousMessage, nextMessage) {
+  if (!(node instanceof HTMLElement) || !message) return false;
+  const renderedBody = messageDisplayMarkup(message);
+  const { groupedWithNext, clusterShape } = messageClusterShape(previousMessage, message, nextMessage);
+  const bodyMarkup = renderedBody.kind === 'html'
+    ? '<div class="gmail-unified-message-html-host"></div>'
+    : renderedBody.kind === 'metadata'
+      ? `
+        <div class="gmail-unified-message-metadata">
+          <div class="gmail-unified-message-metadata-top">
+            <span class="gmail-unified-message-metadata-sender">${renderedBody.sender}</span>
+            <span class="gmail-unified-message-metadata-date">${renderedBody.date}</span>
+          </div>
+          <div class="gmail-unified-message-metadata-subject">${renderedBody.subject}</div>
+          <div class="gmail-unified-message-metadata-preview">${renderedBody.preview}</div>
+        </div>
+      `
+      : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
+
+  node.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} gmail-unified-message-${clusterShape} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''} ${renderedBody.kind === 'metadata' ? 'gmail-unified-message-metadata-row' : ''}`;
+  node.dataset.messageId = message.id || '';
+  node.innerHTML = `
+    <div class="gmail-unified-message-bubble-shell">
+      <div class="gmail-unified-message-bubble ${renderedBody.kind === 'html' ? 'gmail-unified-message-bubble-html' : ''} ${renderedBody.kind === 'metadata' ? 'gmail-unified-message-bubble-metadata' : ''}">
+        ${bodyMarkup}
+      </div>
+    </div>
+    ${groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.receivedAtMs || message.date))}</div>`}
+  `;
+
+  if (renderedBody.kind === 'html') {
+    const host = node.querySelector('.gmail-unified-message-html-host');
+    mountRenderedEmailCard(host, renderedBody.content);
   }
+
+  return true;
+}
+
+function createMessageNode(message, previousMessage, nextMessage) {
+  const item = document.createElement('div');
+  applyMessageNodeContent(item, message, previousMessage, nextMessage);
+  return item;
+}
+
+function patchRenderedMessageNodes(contactKey, messageIds = []) {
+  const activeKey = String(contactKey || '').trim();
+  if (!activeKey || state.selectedThreadId !== activeKey) return false;
+  const body = document.getElementById('gmailUnifiedDetailBody');
+  if (!body) return false;
+
+  const targetIds = [...new Set((Array.isArray(messageIds) ? messageIds : []).map((messageId) => String(messageId || '').trim()).filter(Boolean))];
+  if (!targetIds.length) return false;
+
+  const messagesAsc = [...(state.contactMessagesByKey[activeKey] || [])]
+    .sort((left, right) => messageReceivedAtMs(left) - messageReceivedAtMs(right));
+  let patchedAny = false;
+
+  targetIds.forEach((messageId) => {
+    const index = messagesAsc.findIndex((message) => String(message?.id || '').trim() === messageId);
+    if (index < 0) return;
+    const node = body.querySelector(`.gmail-unified-message[data-message-id="${CSS.escape(messageId)}"]`);
+    if (!(node instanceof HTMLElement)) return;
+    applyMessageNodeContent(node, messagesAsc[index], messagesAsc[index - 1] || null, messagesAsc[index + 1] || null);
+    patchedAny = true;
+  });
+
+  return patchedAny;
+}
+
+function captureDetailPrependAnchor(body) {
+  if (!(body instanceof HTMLElement)) return null;
+  const bodyRect = body.getBoundingClientRect();
+  const nodes = [...body.querySelectorAll('.gmail-unified-message[data-message-id]')];
+  const anchorNode = nodes.find((node) => node.getBoundingClientRect().bottom > bodyRect.top + 8)
+    || nodes[0]
+    || null;
+  if (!(anchorNode instanceof HTMLElement)) return null;
+  return {
+    messageId: String(anchorNode.getAttribute('data-message-id') || '').trim(),
+    offsetTop: anchorNode.getBoundingClientRect().top - bodyRect.top
+  };
+}
+
+function restoreDetailPrependAnchor(body, anchor) {
+  if (!(body instanceof HTMLElement) || !anchor?.messageId) return false;
+  const anchorNode = body.querySelector(`.gmail-unified-message[data-message-id="${CSS.escape(anchor.messageId)}"]`);
+  if (!(anchorNode instanceof HTMLElement)) return false;
+  const bodyRect = body.getBoundingClientRect();
+  const nextOffsetTop = anchorNode.getBoundingClientRect().top - bodyRect.top;
+  body.scrollTop += nextOffsetTop - numericValue(anchor.offsetTop, 0);
+  return true;
 }
 
 function renderThreadDetail(group, options = {}) {
@@ -4635,6 +4925,10 @@ function renderThreadDetail(group, options = {}) {
   subheader.innerHTML = '';
 
   body.innerHTML = '';
+  const historySentinel = document.createElement('div');
+  historySentinel.className = 'gmail-unified-history-sentinel';
+  historySentinel.setAttribute('aria-hidden', 'true');
+  body.appendChild(historySentinel);
   if (contactLoadState.hasMore || contactLoadState.inFlight) {
     const historyStatus = document.createElement('div');
     historyStatus.className = 'gmail-unified-history-status';
@@ -4705,8 +4999,6 @@ function renderThreadDetail(group, options = {}) {
   let previousDayLabel = '';
   const messagesAsc = [...displayMessages].sort((a, b) => messageReceivedAtMs(a) - messageReceivedAtMs(b));
   messagesAsc.forEach((message, index) => {
-    const previousMessage = messagesAsc[index - 1] || null;
-    const nextMessage = messagesAsc[index + 1] || null;
     const dayLabel = calendarDayLabel(message.receivedAtMs || message.date);
     if (dayLabel && dayLabel !== previousDayLabel) {
       previousDayLabel = dayLabel;
@@ -4715,46 +5007,7 @@ function renderThreadDetail(group, options = {}) {
       separator.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
       body.appendChild(separator);
     }
-
-    const groupedWithPrevious = shouldClusterWithPrevious(previousMessage, message);
-    const groupedWithNext = shouldClusterWithPrevious(message, nextMessage);
-    const clusterShape = groupedWithPrevious
-      ? (groupedWithNext ? 'middle' : 'end')
-      : (groupedWithNext ? 'start' : 'single');
-    const item = document.createElement('div');
-    const renderedBody = messageDisplayMarkup(message);
-    const bodyMarkup = renderedBody.kind === 'html'
-      ? '<div class="gmail-unified-message-html-host"></div>'
-      : renderedBody.kind === 'metadata'
-      ? `
-        <div class="gmail-unified-message-metadata">
-          <div class="gmail-unified-message-metadata-top">
-            <span class="gmail-unified-message-metadata-sender">${renderedBody.sender}</span>
-            <span class="gmail-unified-message-metadata-date">${renderedBody.date}</span>
-          </div>
-          <div class="gmail-unified-message-metadata-subject">${renderedBody.subject}</div>
-          <div class="gmail-unified-message-metadata-preview">${renderedBody.preview}</div>
-        </div>
-      `
-      : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
-
-    item.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} gmail-unified-message-${clusterShape} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''} ${renderedBody.kind === 'metadata' ? 'gmail-unified-message-metadata-row' : ''}`;
-    item.dataset.messageId = message.id || '';
-    item.innerHTML = `
-      <div class="gmail-unified-message-bubble-shell">
-        <div class="gmail-unified-message-bubble ${renderedBody.kind === 'html' ? 'gmail-unified-message-bubble-html' : ''} ${renderedBody.kind === 'metadata' ? 'gmail-unified-message-bubble-metadata' : ''}">
-          ${bodyMarkup}
-        </div>
-      </div>
-      ${groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.receivedAtMs || message.date))}</div>`}
-    `;
-
-    body.appendChild(item);
-
-    if (renderedBody.kind === 'html') {
-      const host = item.querySelector('.gmail-unified-message-html-host');
-      mountRenderedEmailCard(host, renderedBody.content);
-    }
+    body.appendChild(createMessageNode(message, messagesAsc[index - 1] || null, messagesAsc[index + 1] || null));
   });
 
   composerReply.classList.toggle('is-active', state.composer.mode === 'reply');
@@ -5062,6 +5315,7 @@ async function prefetchContactMessages(group, priority = 'P2') {
 
   if (Array.isArray(response.messages) && response.messages.length) {
     const mergedMessages = storeContactMessages(group.threadId, response.messages);
+    upsertContactSummary(buildContactSummaryFromMessages(group.threadId, mergedMessages));
     state.contactLoadStateByKey[group.threadId] = {
       ...getContactLoadState(group.threadId),
       attempted: true,
@@ -5076,6 +5330,7 @@ async function prefetchContactMessages(group, priority = 'P2') {
       backend: normalizeBuildInfo(response?.debug?.backend),
       schemaFallbackUsed: Boolean(response?.debug?.schemaFallbackUsed),
       richContentSource: String(response?.debug?.richContentSource || response?.source || 'cache').trim() || 'cache',
+      cursorResolved: true,
       nextCursor: String(response?.nextCursor || ''),
       hasMore: Boolean(response?.hasMore),
       requestedAt,
@@ -5158,7 +5413,7 @@ function observeDetailHistory(threadId) {
   disconnectDetailHistoryObserver();
   if (!supportsIntersectionObservers() || usingLegacyMailboxFlow()) return;
   const body = document.getElementById('gmailUnifiedDetailBody');
-  const sentinel = body?.querySelector('.gmail-unified-history-status');
+  const sentinel = body?.querySelector('.gmail-unified-history-sentinel');
   if (!body || !sentinel || !threadId) return;
 
   detailHistoryObserver = new window.IntersectionObserver((entries) => {
@@ -5301,7 +5556,7 @@ async function hydrateVisibleBodiesForThread(threadId, requestedMessageIds = [])
 
   if (Array.isArray(response.messages) && response.messages.length) {
     storeContactMessages(contactKey, response.messages);
-    if (state.selectedThreadId === contactKey) {
+    if (state.selectedThreadId === contactKey && !patchRenderedMessageNodes(contactKey, response.messages.map((message) => message?.id))) {
       scheduleUiCommit({
         detail: true,
         detailThreadId: contactKey,
@@ -5325,6 +5580,7 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   const body = document.getElementById('gmailUnifiedDetailBody');
   const previousScrollTop = preserveScroll && body ? body.scrollTop : 0;
   const previousScrollHeight = preserveScroll && body ? body.scrollHeight : 0;
+  const prependAnchor = preserveScroll && cursor ? captureDetailPrependAnchor(body) : null;
 
   if (!contactEmail && !summary) {
     state.contactLoadStateByKey[threadId] = {
@@ -5358,7 +5614,7 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   });
 
   if (existing.inFlight) return null;
-  if (!cursor && existing.loaded && existing.scope === scope && !options.forceSync) return existingMessages;
+  if (!cursor && existing.loaded && existing.scope === scope && !options.forceSync && existing.cursorResolved) return existingMessages;
 
   const requestGeneration = numericValue(state.contactRequestGenerationByKey[threadId], 0) + 1;
   state.contactRequestGenerationByKey[threadId] = requestGeneration;
@@ -5442,6 +5698,7 @@ async function loadContactMessagesForThread(threadId, options = {}) {
     backend: normalizeBuildInfo(response?.debug?.backend),
     schemaFallbackUsed: Boolean(response?.debug?.schemaFallbackUsed),
     richContentSource: String(response?.debug?.richContentSource || (response?.success ? response?.source || 'cache' : 'cache')).trim() || 'cache',
+    cursorResolved: Boolean(response?.success),
     scope,
     nextCursor: String(response?.nextCursor || ''),
     hasMore: Boolean(response?.hasMore),
@@ -5450,8 +5707,8 @@ async function loadContactMessagesForThread(threadId, options = {}) {
   };
 
   if (response?.success && Array.isArray(response?.messages) && response.messages.length) {
-    storeContactMessages(threadId, response.messages);
-    upsertContactSummary(buildContactSummaryFromMessages(threadId, response.messages));
+    const mergedMessages = storeContactMessages(threadId, response.messages);
+    upsertContactSummary(buildContactSummaryFromMessages(threadId, mergedMessages));
   }
 
   mLog('contact:worker-returned', {
@@ -5488,6 +5745,9 @@ async function loadContactMessagesForThread(threadId, options = {}) {
     window.requestAnimationFrame(() => {
       const currentBody = document.getElementById('gmailUnifiedDetailBody');
       if (!currentBody) return;
+      if (prependAnchor && restoreDetailPrependAnchor(currentBody, prependAnchor)) {
+        return;
+      }
       const delta = currentBody.scrollHeight - previousScrollHeight;
       currentBody.scrollTop = Math.max(0, previousScrollTop + delta);
     });
