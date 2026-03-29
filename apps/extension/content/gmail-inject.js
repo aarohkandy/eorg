@@ -1451,18 +1451,43 @@ function messageDisplayMarkup(message) {
 
 function mountRenderedEmailCard(host, html) {
   if (!host || !html) return;
+  if (typeof host.__mailitaRichEmailCleanup === 'function') {
+    host.__mailitaRichEmailCleanup();
+  }
 
   const root = host.shadowRoot || host.attachShadow({ mode: 'open' });
   root.innerHTML = `
     <style>
       :host {
         display: block;
-        width: min(100%, 880px);
+        width: 100%;
+        max-width: min(100%, 1040px);
+      }
+
+      .mailita-email-viewport {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+      }
+
+      .mailita-email-scale-shell {
+        position: relative;
+        width: 100%;
+        min-height: 1px;
+      }
+
+      .mailita-email-scale-content {
+        display: inline-block;
+        width: max-content;
+        max-width: none;
+        transform-origin: top left;
       }
 
       .mailita-email-card {
         box-sizing: border-box;
-        width: 100%;
+        display: inline-block;
+        width: auto;
+        max-width: none;
         overflow: hidden;
         border-radius: 22px;
         border: 1px solid rgba(28, 24, 20, 0.1);
@@ -1475,7 +1500,7 @@ function mountRenderedEmailCard(host, html) {
 
       .mailita-email-body {
         box-sizing: border-box;
-        width: 100%;
+        width: auto;
         padding: 22px 24px;
         font: 400 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         color: inherit;
@@ -1484,7 +1509,6 @@ function mountRenderedEmailCard(host, html) {
 
       .mailita-email-body :where(*) {
         box-sizing: border-box;
-        max-width: 100%;
       }
 
       .mailita-email-body :where(body, table, tbody, thead, tfoot, tr, td, th, div, section, article, main, aside) {
@@ -1510,7 +1534,7 @@ function mountRenderedEmailCard(host, html) {
         cursor: pointer;
       }
 
-      .mailita-email-body img {
+      .mailita-email-body :where(img, svg, video, canvas, iframe) {
         display: block;
         max-width: 100%;
         height: auto;
@@ -1527,10 +1551,119 @@ function mountRenderedEmailCard(host, html) {
         border-collapse: collapse;
       }
     </style>
-    <div class="mailita-email-card">
-      <div class="mailita-email-body">${html}</div>
+    <div class="mailita-email-viewport">
+      <div class="mailita-email-scale-shell">
+        <div class="mailita-email-scale-content">
+          <div class="mailita-email-card">
+            <div class="mailita-email-body">${html}</div>
+          </div>
+        </div>
+      </div>
     </div>
   `;
+
+  const viewport = root.querySelector('.mailita-email-viewport');
+  const scaleShell = root.querySelector('.mailita-email-scale-shell');
+  const scaleContent = root.querySelector('.mailita-email-scale-content');
+  const emailCard = root.querySelector('.mailita-email-card');
+  const observedImages = [...root.querySelectorAll('img')];
+  let measureFrame = 0;
+
+  const measure = () => {
+    measureFrame = 0;
+    if (!(viewport instanceof HTMLElement) || !(scaleShell instanceof HTMLElement) || !(scaleContent instanceof HTMLElement) || !(emailCard instanceof HTMLElement)) {
+      return;
+    }
+    if (!host.isConnected) {
+      cleanup();
+      return;
+    }
+
+    scaleContent.style.transform = 'scale(1)';
+    scaleShell.style.height = 'auto';
+
+    const availableWidth = Math.max(0, viewport.clientWidth);
+    const naturalWidth = Math.ceil(
+      scaleContent.scrollWidth
+      || emailCard.scrollWidth
+      || scaleContent.getBoundingClientRect().width
+      || emailCard.getBoundingClientRect().width
+      || 0
+    );
+    const naturalHeight = Math.ceil(
+      scaleContent.scrollHeight
+      || emailCard.scrollHeight
+      || scaleContent.getBoundingClientRect().height
+      || emailCard.getBoundingClientRect().height
+      || 0
+    );
+    const appliedScale = naturalWidth > 0 && availableWidth > 0
+      ? Math.min(1, availableWidth / naturalWidth)
+      : 1;
+
+    scaleContent.style.transform = `scale(${appliedScale})`;
+    scaleShell.style.height = `${Math.max(1, Math.ceil(naturalHeight * appliedScale))}px`;
+    viewport.dataset.mailitaNaturalWidth = String(naturalWidth);
+    viewport.dataset.mailitaNaturalHeight = String(naturalHeight);
+    viewport.dataset.mailitaAppliedScale = appliedScale.toFixed(4);
+  };
+
+  const scheduleMeasure = () => {
+    if (measureFrame) {
+      window.cancelAnimationFrame(measureFrame);
+    }
+    measureFrame = window.requestAnimationFrame(measure);
+  };
+
+  const resizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(() => {
+      scheduleMeasure();
+    })
+    : null;
+
+  if (resizeObserver && viewport instanceof HTMLElement) {
+    resizeObserver.observe(viewport);
+  }
+  if (resizeObserver && scaleContent instanceof HTMLElement) {
+    resizeObserver.observe(scaleContent);
+  }
+
+  const onEmbeddedAssetResize = () => {
+    scheduleMeasure();
+  };
+  observedImages.forEach((image) => {
+    image.addEventListener('load', onEmbeddedAssetResize);
+    image.addEventListener('error', onEmbeddedAssetResize);
+  });
+
+  const lifecycleObserver = new MutationObserver(() => {
+    if (!host.isConnected) {
+      cleanup();
+    }
+  });
+  lifecycleObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+  const cleanup = () => {
+    if (measureFrame) {
+      window.cancelAnimationFrame(measureFrame);
+      measureFrame = 0;
+    }
+    resizeObserver?.disconnect();
+    lifecycleObserver.disconnect();
+    observedImages.forEach((image) => {
+      image.removeEventListener('load', onEmbeddedAssetResize);
+      image.removeEventListener('error', onEmbeddedAssetResize);
+    });
+    if (host.__mailitaRichEmailCleanup === cleanup) {
+      host.__mailitaRichEmailCleanup = null;
+    }
+  };
+
+  host.__mailitaRichEmailCleanup = cleanup;
+  scheduleMeasure();
 
   if (!host.dataset.mailitaBound) {
     root.addEventListener('click', (event) => {
