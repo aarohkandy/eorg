@@ -733,6 +733,11 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   width: 100%;
 }
 
+.gmail-unified-message-rich.incoming,
+.gmail-unified-message-rich.outgoing {
+  align-items: stretch;
+}
+
 .gmail-unified-message-rich .gmail-unified-message-bubble-shell {
   width: min(100%, 1040px);
   max-width: min(100%, 1040px);
@@ -759,6 +764,8 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 
 .gmail-unified-message-bubble.gmail-unified-message-bubble-html,
 .gmail-unified-message.outgoing .gmail-unified-message-bubble.gmail-unified-message-bubble-html {
+  display: block;
+  width: 100%;
   padding: 0;
   background: transparent;
   color: inherit;
