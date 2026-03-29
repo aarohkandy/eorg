@@ -31,6 +31,8 @@ const SUMMARY_APPEND_TRIGGER_PX = 220;
 const SUMMARY_APPEND_PAGE_SIZE = 15;
 const CAMPAIGN_MODE_ENABLED = false;
 const CAMPAIGN_BLAST_DELAY_MS = 8000;
+const COLLAPSED_MESSAGE_PREVIEW_THRESHOLD = 220;
+const COLLAPSED_MESSAGE_PREVIEW_MAX_LENGTH = 320;
 const mLog = (action, details = {}) => console.log(`[Mailita ${new Date().toISOString().split('T')[1]}] ${action}`, details);
 globalThis.mLog = mLog;
 
@@ -73,6 +75,7 @@ const state = {
   contactMessagesByKey: {},
   contactMessageIndexByKey: {},
   contactLoadStateByKey: {},
+  expandedMessageIdByThread: {},
   summaryRequestGeneration: 0,
   summaryPageSize: 50,
   contactRequestGenerationByKey: {},
@@ -158,6 +161,7 @@ let railPaginationObserver = null;
 let detailHistoryObserver = null;
 let detailHydrationObserver = null;
 let uiCommitFrame = 0;
+let previewEntityDecoder = null;
 let queuedUiCommit = {
   rail: false,
   detail: false,
@@ -806,6 +810,7 @@ function resetSectionedMailboxCaches(options = {}) {
   state.contactMessageIndexByKey = {};
   state.contactLoadStateByKey = {};
   state.contactRequestGenerationByKey = {};
+  state.expandedMessageIdByThread = {};
   if (options.invalidateRequests !== false) {
     state.summaryRequestGeneration += 1;
   }
@@ -1321,7 +1326,7 @@ function initialsForLabel(value) {
 }
 
 function cleanPreviewText(value, maxLength = 120) {
-  const cleaned = String(value || '')
+  const cleaned = decodeHtmlEntities(String(value || ''))
     .replace(/\[(?:image|attachment)(?::[^\]]*)?\]\s*/gi, '')
     .replace(/https?:\/\/\S+/gi, '')
     .replace(/\s+/g, ' ')
@@ -1330,9 +1335,44 @@ function cleanPreviewText(value, maxLength = 120) {
   return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength - 1).trimEnd()}…` : cleaned;
 }
 
+function decodeHtmlEntities(value) {
+  const source = String(value || '');
+  if (!source || !source.includes('&')) return source;
+  if (!(previewEntityDecoder instanceof HTMLTextAreaElement)) {
+    previewEntityDecoder = document.createElement('textarea');
+  }
+  previewEntityDecoder.innerHTML = source;
+  return previewEntityDecoder.value;
+}
+
+function htmlToPreviewText(html) {
+  const source = String(html || '').trim();
+  if (!source) return '';
+  const parser = new DOMParser();
+  const parsed = parser.parseFromString(`<div>${source}</div>`, 'text/html');
+  const root = parsed.body.firstElementChild;
+  if (!root) return '';
+  root.querySelectorAll('img,picture,figure,svg,video,source,iframe,canvas,style,script,noscript,object,embed').forEach((node) => node.remove());
+  root.querySelectorAll('br,hr').forEach((node) => node.replaceWith(parsed.createTextNode(' ')));
+  return String(root.textContent || '').trim();
+}
+
+function messagePreviewSource(message) {
+  return (
+    String(message?.bodyText || '').trim()
+    || htmlToPreviewText(message?.bodyHtml)
+    || String(message?.snippet || '').trim()
+    || String(message?.subject || '').trim()
+  );
+}
+
 function messagePreviewText(message, maxLength = 120) {
-  const source = cleanPreviewText(message?.bodyText || message?.snippet || message?.subject || '', maxLength);
+  const source = cleanPreviewText(messagePreviewSource(message), maxLength);
   return source || '(no preview)';
+}
+
+function previewTextFromMessage(message, maxLength = 120) {
+  return messagePreviewText(message, maxLength);
 }
 
 function senderIdentityKey(message) {
@@ -1412,7 +1452,7 @@ function htmlToDisplayMarkup(html, options = {}) {
   return root.innerHTML.trim();
 }
 
-function messageDisplayMarkup(message) {
+function messageDisplayMarkup(message, options = {}) {
   if (message?.contentState === 'metadata') {
     return {
       kind: 'metadata',
@@ -1425,7 +1465,7 @@ function messageDisplayMarkup(message) {
 
   const settings = normalizeUiSettings(state.uiSettings);
   const html = htmlToDisplayMarkup(message?.bodyHtml, {
-    loadRemoteImages: settings.loadRemoteImages
+    loadRemoteImages: options.loadRemoteImages ?? settings.loadRemoteImages
   });
 
   if (html) {
@@ -1447,6 +1487,28 @@ function messageDisplayMarkup(message) {
     kind: 'placeholder',
     content: escapeHtml('(message content unavailable)')
   };
+}
+
+function messageCollapseEligible(message) {
+  if (!message || message?.contentState === 'metadata') return false;
+  if (String(message?.bodyHtml || '').trim()) return true;
+  const previewSource = cleanPreviewText(messagePreviewSource(message), COLLAPSED_MESSAGE_PREVIEW_MAX_LENGTH * 2);
+  return previewSource.length >= COLLAPSED_MESSAGE_PREVIEW_THRESHOLD;
+}
+
+function threadExpandedMessageId(threadId, messages = []) {
+  const key = String(threadId || '').trim();
+  if (!key) return '';
+  const expandedId = String(state.expandedMessageIdByThread[key] || '').trim();
+  if (!expandedId) return '';
+  const visibleMessages = Array.isArray(messages) ? messages : [];
+  const stillVisible = visibleMessages.some((message) =>
+    String(message?.id || '').trim() === expandedId && messageCollapseEligible(message));
+  if (!stillVisible) {
+    delete state.expandedMessageIdByThread[key];
+    return '';
+  }
+  return expandedId;
 }
 
 function mountRenderedEmailCard(host, html) {
@@ -4156,7 +4218,7 @@ function groupLatestSubject(group) {
 }
 
 function groupLatestPreview(group) {
-  if (group?.summary?.latestPreview) return group.summary.latestPreview;
+  if (group?.summary?.latestPreview) return cleanPreviewText(group.summary.latestPreview, 160) || '(no preview)';
   if (group?.messages?.length) return messagePreviewText(group.messages[0]);
   return '(no preview)';
 }
@@ -4920,13 +4982,38 @@ function messageClusterShape(previousMessage, message, nextMessage) {
   };
 }
 
-function applyMessageNodeContent(node, message, previousMessage, nextMessage) {
+function applyMessageNodeContent(node, message, previousMessage, nextMessage, options = {}) {
   if (!(node instanceof HTMLElement) || !message) return false;
-  const renderedBody = messageDisplayMarkup(message);
+  const threadId = String(options.threadId || state.selectedThreadId || '').trim();
+  const expandedMessageId = String(options.expandedMessageId || '').trim();
+  const messageId = String(message?.id || '').trim();
+  const collapseEligible = messageCollapseEligible(message);
+  const isCollapsed = collapseEligible && expandedMessageId !== messageId;
+  const renderedBody = isCollapsed
+    ? null
+    : messageDisplayMarkup(message, {
+      loadRemoteImages: collapseEligible && Boolean(String(message?.bodyHtml || '').trim()) ? true : undefined
+    });
   const { groupedWithNext, clusterShape } = messageClusterShape(previousMessage, message, nextMessage);
-  const bodyMarkup = renderedBody.kind === 'html'
-    ? '<div class="gmail-unified-message-html-host"></div>'
-    : renderedBody.kind === 'metadata'
+  const effectiveClusterShape = isCollapsed ? 'single' : clusterShape;
+  const previewSender = escapeHtml(threadCounterparty(message));
+  const previewDate = escapeHtml(formatDate(message.receivedAtMs || message.date));
+  const previewSubject = escapeHtml(String(message?.subject || '').trim());
+  const previewText = escapeHtml(messagePreviewText(message, COLLAPSED_MESSAGE_PREVIEW_MAX_LENGTH));
+  const bodyMarkup = isCollapsed
+    ? `
+      <div class="gmail-unified-message-preview-card">
+        <div class="gmail-unified-message-preview-top">
+          <span class="gmail-unified-message-preview-sender">${previewSender}</span>
+          <span class="gmail-unified-message-preview-date">${previewDate}</span>
+        </div>
+        ${previewSubject ? `<div class="gmail-unified-message-preview-subject">${previewSubject}</div>` : ''}
+        <div class="gmail-unified-message-preview-text">${previewText}</div>
+      </div>
+    `
+    : renderedBody.kind === 'html'
+      ? '<div class="gmail-unified-message-html-host"></div>'
+      : renderedBody.kind === 'metadata'
       ? `
         <div class="gmail-unified-message-metadata">
           <div class="gmail-unified-message-metadata-top">
@@ -4939,18 +5026,30 @@ function applyMessageNodeContent(node, message, previousMessage, nextMessage) {
       `
       : `<div class="gmail-unified-message-snippet">${renderedBody.content}</div>`;
 
-  node.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} gmail-unified-message-${clusterShape} ${renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''} ${renderedBody.kind === 'metadata' ? 'gmail-unified-message-metadata-row' : ''}`;
+  node.className = `gmail-unified-message ${message.isOutgoing ? 'outgoing' : 'incoming'} gmail-unified-message-${effectiveClusterShape} ${!isCollapsed && renderedBody.kind === 'html' ? 'gmail-unified-message-rich' : ''} ${!isCollapsed && renderedBody.kind === 'metadata' ? 'gmail-unified-message-metadata-row' : ''} ${isCollapsed ? 'gmail-unified-message-collapsed' : 'gmail-unified-message-expanded'}`;
   node.dataset.messageId = message.id || '';
+  node.dataset.threadId = threadId;
+  node.dataset.collapseEligible = collapseEligible ? 'true' : 'false';
+  node.dataset.collapsed = isCollapsed ? 'true' : 'false';
+  if (isCollapsed) {
+    node.tabIndex = 0;
+    node.setAttribute('role', 'button');
+    node.setAttribute('aria-expanded', 'false');
+  } else {
+    node.removeAttribute('tabindex');
+    node.removeAttribute('role');
+    node.removeAttribute('aria-expanded');
+  }
   node.innerHTML = `
     <div class="gmail-unified-message-bubble-shell">
-      <div class="gmail-unified-message-bubble ${renderedBody.kind === 'html' ? 'gmail-unified-message-bubble-html' : ''} ${renderedBody.kind === 'metadata' ? 'gmail-unified-message-bubble-metadata' : ''}">
+      <div class="gmail-unified-message-bubble ${!isCollapsed && renderedBody.kind === 'html' ? 'gmail-unified-message-bubble-html' : ''} ${!isCollapsed && renderedBody.kind === 'metadata' ? 'gmail-unified-message-bubble-metadata' : ''} ${isCollapsed ? 'gmail-unified-message-bubble-collapsed' : ''}">
         ${bodyMarkup}
       </div>
     </div>
-    ${groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.receivedAtMs || message.date))}</div>`}
+    ${isCollapsed || groupedWithNext ? '' : `<div class="gmail-unified-message-stamp">${escapeHtml(formatDate(message.receivedAtMs || message.date))}</div>`}
   `;
 
-  if (renderedBody.kind === 'html') {
+  if (!isCollapsed && renderedBody.kind === 'html') {
     const host = node.querySelector('.gmail-unified-message-html-host');
     mountRenderedEmailCard(host, renderedBody.content);
   }
@@ -4958,9 +5057,9 @@ function applyMessageNodeContent(node, message, previousMessage, nextMessage) {
   return true;
 }
 
-function createMessageNode(message, previousMessage, nextMessage) {
+function createMessageNode(message, previousMessage, nextMessage, options = {}) {
   const item = document.createElement('div');
-  applyMessageNodeContent(item, message, previousMessage, nextMessage);
+  applyMessageNodeContent(item, message, previousMessage, nextMessage, options);
   return item;
 }
 
@@ -4975,6 +5074,7 @@ function patchRenderedMessageNodes(contactKey, messageIds = []) {
 
   const messagesAsc = [...(state.contactMessagesByKey[activeKey] || [])]
     .sort((left, right) => messageReceivedAtMs(left) - messageReceivedAtMs(right));
+  const expandedMessageId = threadExpandedMessageId(activeKey, filteredMessagesForCurrentFilter(messagesAsc));
   let patchedAny = false;
 
   targetIds.forEach((messageId) => {
@@ -4982,7 +5082,10 @@ function patchRenderedMessageNodes(contactKey, messageIds = []) {
     if (index < 0) return;
     const node = body.querySelector(`.gmail-unified-message[data-message-id="${CSS.escape(messageId)}"]`);
     if (!(node instanceof HTMLElement)) return;
-    applyMessageNodeContent(node, messagesAsc[index], messagesAsc[index - 1] || null, messagesAsc[index + 1] || null);
+    applyMessageNodeContent(node, messagesAsc[index], messagesAsc[index - 1] || null, messagesAsc[index + 1] || null, {
+      threadId: activeKey,
+      expandedMessageId
+    });
     patchedAny = true;
   });
 
@@ -5131,6 +5234,7 @@ function renderThreadDetail(group, options = {}) {
 
   let previousDayLabel = '';
   const messagesAsc = [...displayMessages].sort((a, b) => messageReceivedAtMs(a) - messageReceivedAtMs(b));
+  const expandedMessageId = threadExpandedMessageId(group.threadId, messagesAsc);
   messagesAsc.forEach((message, index) => {
     const dayLabel = calendarDayLabel(message.receivedAtMs || message.date);
     if (dayLabel && dayLabel !== previousDayLabel) {
@@ -5140,7 +5244,10 @@ function renderThreadDetail(group, options = {}) {
       separator.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
       body.appendChild(separator);
     }
-    body.appendChild(createMessageNode(message, messagesAsc[index - 1] || null, messagesAsc[index + 1] || null));
+    body.appendChild(createMessageNode(message, messagesAsc[index - 1] || null, messagesAsc[index + 1] || null, {
+      threadId: group.threadId,
+      expandedMessageId
+    }));
   });
 
   composerReply.classList.toggle('is-active', state.composer.mode === 'reply');
@@ -6990,14 +7097,49 @@ function bindGuideEvents(sidebar) {
   }
 
   sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('click', (event) => {
-    const anchor = event.target.closest('a[data-mailita-link]');
-    if (!anchor) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const href = String(anchor.getAttribute('href') || '').trim();
-    if (href) {
-      openExternalPage(href);
+    const target = event.target;
+    const anchor = target instanceof Element ? target.closest('a[data-mailita-link]') : null;
+    if (anchor) {
+      event.preventDefault();
+      event.stopPropagation();
+      const href = String(anchor.getAttribute('href') || '').trim();
+      if (href) {
+        openExternalPage(href);
+      }
+      return;
     }
+
+    const messageNode = event.target instanceof Element
+      ? event.target.closest('.gmail-unified-message[data-message-id][data-collapsed="true"]')
+      : null;
+    if (!(messageNode instanceof HTMLElement)) return;
+    const threadId = String(messageNode.dataset.threadId || state.selectedThreadId || '').trim();
+    const messageId = String(messageNode.dataset.messageId || '').trim();
+    if (!threadId || !messageId) return;
+    state.expandedMessageIdByThread[threadId] = messageId;
+    scheduleUiCommit({
+      detail: true,
+      detailThreadId: threadId,
+      preserveDetailScroll: true
+    });
+  });
+
+  sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const messageNode = target.closest('.gmail-unified-message[data-message-id][data-collapsed="true"]');
+    if (!(messageNode instanceof HTMLElement)) return;
+    event.preventDefault();
+    const threadId = String(messageNode.dataset.threadId || state.selectedThreadId || '').trim();
+    const messageId = String(messageNode.dataset.messageId || '').trim();
+    if (!threadId || !messageId) return;
+    state.expandedMessageIdByThread[threadId] = messageId;
+    scheduleUiCommit({
+      detail: true,
+      detailThreadId: threadId,
+      preserveDetailScroll: true
+    });
   });
 
   if (!supportsIntersectionObservers()) {

@@ -773,6 +773,86 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   box-shadow: none;
 }
 
+.gmail-unified-message-collapsed .gmail-unified-message-bubble-shell {
+  max-width: min(78%, 660px);
+}
+
+.gmail-unified-message-bubble.gmail-unified-message-bubble-collapsed {
+  cursor: pointer;
+}
+
+.gmail-unified-message-collapsed .gmail-unified-message-bubble::after {
+  content: none !important;
+}
+
+.gmail-unified-message-preview-card {
+  display: grid;
+  gap: 8px;
+}
+
+.gmail-unified-message-preview-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #5a5f69;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gmail-unified-message.outgoing.gmail-unified-message-collapsed .gmail-unified-message-preview-top {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.gmail-unified-message-preview-sender,
+.gmail-unified-message-preview-date {
+  min-width: 0;
+}
+
+.gmail-unified-message-preview-sender {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gmail-unified-message-preview-date {
+  flex-shrink: 0;
+}
+
+.gmail-unified-message-preview-subject {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gmail-unified-message-preview-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: #42454b;
+  line-height: 1.42;
+}
+
+.gmail-unified-message.outgoing.gmail-unified-message-collapsed .gmail-unified-message-preview-text {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.gmail-unified-message-collapsed:hover .gmail-unified-message-bubble,
+.gmail-unified-message-collapsed:focus-visible .gmail-unified-message-bubble {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 30px rgba(40, 34, 28, 0.14);
+}
+
+.gmail-unified-message-collapsed:focus-visible {
+  outline: none;
+}
+
 .gmail-unified-message-stamp {
   margin-top: 6px;
   padding: 0 4px;
