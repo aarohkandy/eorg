@@ -20,7 +20,8 @@
     "client_id": "164613854790-smorr6t61h9k1cgvo6msjjtpk8b82p3h.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/gmail.readonly",
-      "https://www.googleapis.com/auth/gmail.send"
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.modify"
     ]
   },
   "background": {

@@ -78,6 +78,7 @@ const GUIDE_ACTIONS = new Set([
   'FETCH_MESSAGE_SUMMARIES',
   'FETCH_CONTACT_MESSAGES',
   'FETCH_CONTACT_BODIES',
+  'MARK_CONTACT_READ',
   'ABORT_SEND_MESSAGE',
   'SEND_MESSAGE',
   'FETCH_MESSAGES',
@@ -1106,8 +1107,8 @@ function mapLocalError(error, fallbackCode = 'GMAIL_API_ERROR') {
     return {
       success: false,
       code: 'AUTH_SCOPE_REQUIRED',
-      error: 'Mailita needs Gmail send permission before it can send replies.',
-      trace: [localTrace('error', 'oauth_scope_required', 'Gmail send permission is required for this action.', {
+      error: 'Mailita needs upgraded Gmail permission for this action. Reconnect once to continue.',
+      trace: [localTrace('error', 'oauth_scope_required', 'Additional Gmail permission is required for this action.', {
         code: 'AUTH_SCOPE_REQUIRED',
         details: message
       })]
@@ -1380,6 +1381,25 @@ async function handleLocalMailAction(action, payload = {}) {
       timings: response.timings,
       trace: [localTrace('success', 'local_contact_bodies_loaded', 'Loaded visible contact bodies from the Gmail API.', {
         details: `contactEmail=${payload.contactEmail || ''}; count=${response.count}`
+      })]
+    };
+  }
+
+  if (action === 'MARK_CONTACT_READ') {
+    const response = await MailitaGmailLocal.markContactRead({
+      contactEmail: payload.contactEmail,
+      contactKey: payload.contactKey,
+      scope: payload.scope
+    });
+    const snapshot = await MailitaGmailLocal.snapshot();
+    await persistLocalSession(snapshot);
+    return {
+      success: true,
+      updatedCount: Number(response.updatedCount || 0),
+      summary: response.summary || null,
+      source: response.source || MAIL_SOURCE_GMAIL_API_LOCAL,
+      trace: [localTrace('success', 'local_contact_mark_read', 'Marked the opened contact as read in Gmail.', {
+        details: `contactKey=${String(payload.contactKey || '')}; updated=${Number(response.updatedCount || 0)}`
       })]
     };
   }

@@ -392,7 +392,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 }
 
 .gmail-unified-thread-top,
-.gmail-unified-thread-meta,
+.gmail-unified-thread-footer,
 .gmail-unified-detail-subheader-row {
   display: flex;
   align-items: center;
@@ -405,6 +405,10 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gmail-unified-thread-who.unread,
@@ -414,7 +418,7 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
 }
 
 .gmail-unified-date,
-.gmail-unified-thread-meta,
+.gmail-unified-thread-footer,
 .gmail-unified-thread-unread-copy,
 .gmail-unified-rail-section,
 .gmail-unified-rail-status,
@@ -424,11 +428,9 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   font-size: 12px;
 }
 
-.gmail-unified-thread-subject {
-  color: var(--mailita-muted);
+.gmail-unified-date {
+  flex-shrink: 0;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .gmail-unified-thread-preview {
@@ -441,8 +443,14 @@ body.gmail-unified-fullscreen > *:not(#gmailUnifiedSidebar):not(script):not(styl
   line-height: 1.35;
 }
 
+.gmail-unified-thread-footer {
+  min-height: 16px;
+  justify-content: flex-end;
+}
+
 .gmail-unified-thread-unread-copy {
   white-space: nowrap;
+  font-weight: 600;
 }
 
 .gmail-unified-rail-section {

@@ -20,6 +20,7 @@ const WORKER_TIMEOUT_BY_ACTION = {
   FETCH_MESSAGE_SUMMARIES: 30000,
   FETCH_CONTACT_MESSAGES: 30000,
   FETCH_CONTACT_BODIES: 30000,
+  MARK_CONTACT_READ: 15000,
   FETCH_MESSAGES: 30000,
   SEARCH_MESSAGES: 30000,
   ABORT_SEND_MESSAGE: 6000,
@@ -118,8 +119,10 @@ const state = {
     accountEmail: '',
     mailSource: 'gmail_api_local',
     lastSyncTime: '',
-    onboardingComplete: false
+    onboardingComplete: false,
+    grantedScopes: []
   },
+  requiresModifyReconnect: false,
   detailLastThreadId: '',
   detailSnapToLatestThreadId: '',
   composer: {
@@ -162,6 +165,9 @@ let detailHistoryObserver = null;
 let detailHydrationObserver = null;
 let uiCommitFrame = 0;
 let previewEntityDecoder = null;
+let visibleSyncPromise = null;
+let lastVisibleSyncAtMs = 0;
+const pendingMarkReadByThread = new Set();
 let queuedUiCommit = {
   rail: false,
   detail: false,
@@ -706,12 +712,12 @@ function mergeSummaryItems(existingItems, incomingItems) {
     const merged = incomingDate >= existingDate
       ? { ...existing, ...normalized }
       : { ...normalized, ...existing };
-    merged.messageCount = Math.max(numericValue(existing.messageCount, 0), numericValue(normalized.messageCount, 0));
-    merged.threadCount = Math.max(numericValue(existing.threadCount, 0), numericValue(normalized.threadCount, 0));
-    merged.unreadCount = Math.max(numericValue(existing.unreadCount, 0), numericValue(normalized.unreadCount, 0));
-    merged.inboxCount = Math.max(numericValue(existing.inboxCount, 0), numericValue(normalized.inboxCount, 0));
-    merged.sentCount = Math.max(numericValue(existing.sentCount, 0), numericValue(normalized.sentCount, 0));
-    merged.hasMissingContent = Boolean(existing.hasMissingContent || normalized.hasMissingContent);
+    merged.messageCount = numericValue(normalized.messageCount, numericValue(existing.messageCount, 0));
+    merged.threadCount = numericValue(normalized.threadCount, numericValue(existing.threadCount, 0));
+    merged.unreadCount = numericValue(normalized.unreadCount, numericValue(existing.unreadCount, 0));
+    merged.inboxCount = numericValue(normalized.inboxCount, numericValue(existing.inboxCount, 0));
+    merged.sentCount = numericValue(normalized.sentCount, numericValue(existing.sentCount, 0));
+    merged.hasMissingContent = Boolean(normalized.hasMissingContent ?? existing.hasMissingContent);
     byKey.set(normalized.contactKey, normalizeContactSummary(merged));
   });
   return [...byKey.values()].sort((a, b) =>
@@ -837,6 +843,29 @@ function currentMailboxScope() {
   return state.filter === 'inbox' || state.filter === 'sent'
     ? state.filter
     : 'all';
+}
+
+function grantedScopesIncludeModify(scopes) {
+  return (Array.isArray(scopes) ? scopes : []).includes('https://www.googleapis.com/auth/gmail.modify');
+}
+
+function syncResponseHasChanges(response) {
+  if (!response?.success) return false;
+  return Boolean(
+    numericValue(response?.counts?.changed, 0) > 0
+    || response?.phase === 'incremental'
+    || response?.phase === 'full_resync'
+  );
+}
+
+function requestWorkerSyncKickoff() {
+  return sendWorker('SYNC_MESSAGES', { trackActivity: false });
+}
+
+function shouldPreserveDetailScrollOnRefresh() {
+  const body = document.getElementById('gmailUnifiedDetailBody');
+  if (!body) return false;
+  return (body.scrollTop + body.clientHeight) < (body.scrollHeight - 72);
 }
 
 function messageVisibleInCurrentFilter(message) {
@@ -2137,8 +2166,8 @@ async function submitComposeOverlay() {
     selectionOnly: true,
     rail: !sentRowPatched
   });
-  sendWorker('SYNC_MESSAGES', {
-    trackActivity: false
+  syncVisibleMailbox('compose-send', {
+    throttleMs: 0
   }).catch(() => {});
   return response;
 }
@@ -2953,8 +2982,8 @@ async function sendCampaignRow(rowIndex, options = {}) {
     currentRow.sendError = '';
     currentRow.sentAt = new Date().toISOString();
     state.campaignMode.statusMessage = `Sent row ${preview.displayRowNumber}.`;
-    sendWorker('SYNC_MESSAGES', {
-      trackActivity: false
+    syncVisibleMailbox('campaign-send', {
+      throttleMs: 0
     }).catch(() => {});
   } else if (response?.code === 'REQUEST_ABORTED' || state.campaignMode.stopRequested) {
     currentRow.status = 'stopped';
@@ -3814,8 +3843,8 @@ async function submitThreadReply(group) {
     });
   }, 1800);
 
-  sendWorker('SYNC_MESSAGES', {
-    trackActivity: false
+  syncVisibleMailbox('thread-reply', {
+    throttleMs: 0
   }).catch(() => {});
 }
 
@@ -4122,7 +4151,6 @@ function createThreadRow(group, options = {}) {
   const latestDate = groupLatestDate(group);
   const latestPreview = groupLatestPreview(group);
   const avatar = groupAvatarLabel(group);
-  const metaParts = threadMetaParts(group);
 
   row.innerHTML = `
     <div class="gmail-unified-thread-row-shell">
@@ -4136,10 +4164,7 @@ function createThreadRow(group, options = {}) {
           <span class="gmail-unified-date">${formatDate(latestDate)}</span>
         </div>
         <div class="gmail-unified-thread-preview ${unread ? 'unread' : ''}">${escapeHtml(latestPreview)}</div>
-        <div class="gmail-unified-thread-meta">
-          <span class="gmail-unified-thread-subject ${unread ? 'unread' : ''}">${escapeHtml(metaParts[0] || '')}</span>
-          ${unreadCount > 0 ? `<span class="gmail-unified-thread-unread-copy">${unreadCount} unread</span>` : ''}
-        </div>
+        ${unreadCount > 0 ? `<div class="gmail-unified-thread-footer"><span class="gmail-unified-thread-unread-copy">${unreadCount} unread</span></div>` : ''}
       </div>
     </div>
   `;
@@ -4161,6 +4186,20 @@ function createThreadRow(group, options = {}) {
       detail: true,
       detailThreadId: group.threadId
     });
+    if (!usingLegacyMailboxFlow()) {
+      if (clearThreadUnreadLocally(group.threadId)) {
+        const rowPatched = refreshThreadRow(group.threadId);
+        scheduleUiCommit({
+          selectionOnly: true,
+          detail: state.selectedThreadId === group.threadId,
+          detailThreadId: group.threadId,
+          rail: !rowPatched && state.mailboxMode !== 'search'
+        });
+      }
+      requestMarkThreadRead(group.threadId, {
+        scope: currentMailboxScope()
+      }).catch(() => {});
+    }
     if (!usingLegacyMailboxFlow()) {
       loadContactMessagesForThread(group.threadId, {
         pageSize: CONTACT_PAGE_SIZE
@@ -4828,6 +4867,10 @@ function renderThreads() {
 
   list.innerHTML = '';
 
+  if (!showingSearch && state.requiresModifyReconnect && state.connected) {
+    appendRailStatus(list, 'Reconnect Mailita once to enable Gmail read sync.', 'error');
+  }
+
   if (showingSearch) {
     if (contactSearchGroups.length) {
       contactSearchGroups.forEach((group) => appendThreadRow(list, group, { searchKind: 'contact' }));
@@ -5488,6 +5531,138 @@ function resolveThreadContactContext(threadId) {
     summary: seededMessages.length ? buildContactSummaryFromMessages(threadId, seededMessages) : null,
     contactEmail: seededContactEmail
   };
+}
+
+function markMessageSeenLocal(message) {
+  const nextFlags = new Set(Array.isArray(message?.flags) ? message.flags : []);
+  nextFlags.add('\\Seen');
+  return {
+    ...message,
+    flags: [...nextFlags]
+  };
+}
+
+function clearThreadUnreadLocally(threadId) {
+  const key = String(threadId || '').trim();
+  if (!key) return false;
+  let changed = false;
+
+  const summary = findSummaryByThreadId(key);
+  if (summary && numericValue(summary.unreadCount, 0) > 0) {
+    upsertContactSummary({
+      ...summary,
+      unreadCount: 0
+    });
+    changed = true;
+  }
+
+  const existingMessages = Array.isArray(state.contactMessagesByKey[key]) ? state.contactMessagesByKey[key] : [];
+  if (existingMessages.length) {
+    const nextMessages = existingMessages.map((message) => {
+      if (!isUnread(message)) return message;
+      changed = true;
+      return markMessageSeenLocal(message);
+    });
+    if (changed) {
+      storeContactMessages(key, nextMessages, { replace: true });
+    }
+  }
+
+  return changed;
+}
+
+function requestMarkThreadRead(threadId, options = {}) {
+  const key = String(threadId || '').trim();
+  if (!key || pendingMarkReadByThread.has(key) || currentMailboxScope() === 'sent' || state.requiresModifyReconnect) {
+    return Promise.resolve(null);
+  }
+  const context = resolveThreadContactContext(key);
+  if (!context.contactEmail && !context.summary) {
+    return Promise.resolve(null);
+  }
+
+  pendingMarkReadByThread.add(key);
+  return sendWorker('MARK_CONTACT_READ', {
+    contactKey: key,
+    contactEmail: context.contactEmail,
+    scope: options.scope || currentMailboxScope()
+  }).then((response) => {
+    if (response?.success && response?.summary?.contactKey) {
+      upsertContactSummary(normalizeContactSummary(response.summary));
+      refreshThreadRow(key);
+    }
+    if (!response?.success && response?.code === 'AUTH_SCOPE_REQUIRED') {
+      state.requiresModifyReconnect = true;
+      scheduleUiCommit({ rail: true });
+    }
+    return response;
+  }).catch((error) => {
+    if (error?.code === 'AUTH_SCOPE_REQUIRED') {
+      state.requiresModifyReconnect = true;
+      scheduleUiCommit({ rail: true });
+    }
+    return null;
+  }).finally(() => {
+    pendingMarkReadByThread.delete(key);
+  });
+}
+
+async function syncVisibleMailbox(reason = 'manual', options = {}) {
+  if (!state.connected || state.connectInFlight) return null;
+  if (document.hidden && !options.allowHidden) return null;
+  if (visibleSyncPromise) return visibleSyncPromise;
+
+  const now = Date.now();
+  const throttleMs = numericValue(options.throttleMs, 1500);
+  if (!options.force && now - lastVisibleSyncAtMs < throttleMs) {
+    return null;
+  }
+  lastVisibleSyncAtMs = now;
+
+  visibleSyncPromise = (async () => {
+    const response = options.forceSync
+      ? await sendWorker('SYNC_MESSAGES', {
+        trackActivity: false,
+        limit: state.summaryPageSize || 50,
+        forceSync: true
+      })
+      : await requestWorkerSyncKickoff();
+    if (!syncResponseHasChanges(response)) {
+      return response;
+    }
+
+    if (!usingLegacyMailboxFlow() && state.mailboxMode !== 'search') {
+      await loadMessageSummaries({
+        folder: currentMailboxScope(),
+        silent: true,
+        forceSync: false,
+        trackActivity: false
+      }).catch(() => {});
+    }
+
+    if (state.selectedThreadId && !usingLegacyMailboxFlow()) {
+      await loadContactMessagesForThread(state.selectedThreadId, {
+        pageSize: CONTACT_PAGE_SIZE,
+        scope: currentMailboxScope(),
+        preserveScroll: shouldPreserveDetailScrollOnRefresh(),
+        metadataOnly: true,
+        trackActivity: false
+      }).catch(() => {});
+    }
+
+    mLog('sync:applied', {
+      reason,
+      phase: response?.phase || '',
+      changed: numericValue(response?.counts?.changed, 0)
+    });
+    return response;
+  })();
+
+  try {
+    return await visibleSyncPromise;
+  } finally {
+    visibleSyncPromise = null;
+  }
 }
 
 function clearIdleContactPrefetchTimer() {
@@ -6369,7 +6544,9 @@ function queueBackgroundMailboxPrime(options = {}) {
         limit: Math.max(Number(options.limit || state.summaryPageSize || 50), 20)
       }).catch(() => {});
       window.setTimeout(() => {
-        sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
+        syncVisibleMailbox('background-prime', {
+          throttleMs: 0
+        }).catch(() => {});
       }, currentSummaryItems().length ? 600 : 0);
       startAutoRefresh();
     }, 0);
@@ -6675,8 +6852,12 @@ async function refreshGuideAndAuthState() {
       : state.accountSnapshot.lastSyncTime,
     onboardingComplete: storageKnown
       ? Boolean(storage?.onboardingComplete)
-      : Boolean(state.accountSnapshot.onboardingComplete)
+      : Boolean(state.accountSnapshot.onboardingComplete),
+    grantedScopes: storageKnown
+      ? (Array.isArray(storage?.grantedScopes) ? storage.grantedScopes : [])
+      : (Array.isArray(state.accountSnapshot.grantedScopes) ? state.accountSnapshot.grantedScopes : [])
   };
+  state.requiresModifyReconnect = Boolean(state.connected && !grantedScopesIncludeModify(state.accountSnapshot.grantedScopes));
 
   if (explicitDisconnect) {
     clearCampaignBlastDelay();
@@ -7097,7 +7278,7 @@ function bindGuideEvents(sidebar) {
   }
 
   sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('click', (event) => {
-    const target = event.target;
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
     const anchor = target instanceof Element ? target.closest('a[data-mailita-link]') : null;
     if (anchor) {
       event.preventDefault();
@@ -7109,8 +7290,8 @@ function bindGuideEvents(sidebar) {
       return;
     }
 
-    const messageNode = event.target instanceof Element
-      ? event.target.closest('.gmail-unified-message[data-message-id][data-collapsed="true"]')
+    const messageNode = target instanceof Element
+      ? target.closest('.gmail-unified-message[data-message-id][data-collapsed="true"]')
       : null;
     if (!(messageNode instanceof HTMLElement)) return;
     const threadId = String(messageNode.dataset.threadId || state.selectedThreadId || '').trim();
@@ -7126,7 +7307,7 @@ function bindGuideEvents(sidebar) {
 
   sidebar.querySelector('#gmailUnifiedDetailBody')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
-    const target = event.target;
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
     if (!(target instanceof Element)) return;
     const messageNode = target.closest('.gmail-unified-message[data-message-id][data-collapsed="true"]');
     if (!(messageNode instanceof HTMLElement)) return;
@@ -7464,8 +7645,10 @@ async function connectFromGuide() {
       connected: true,
       accountEmail: String(response.accountEmail || response.email || state.accountSnapshot.accountEmail || '').trim().toLowerCase(),
       mailSource: 'gmail_api_local',
-      onboardingComplete: true
+      onboardingComplete: true,
+      grantedScopes: Array.isArray(response?.grantedScopes) ? response.grantedScopes : state.accountSnapshot.grantedScopes
     };
+    state.requiresModifyReconnect = Boolean(!grantedScopesIncludeModify(state.accountSnapshot.grantedScopes));
     state.guideReviewOpen = false;
     setConnectUiState('');
     const sidebar = document.getElementById('gmailUnifiedSidebar');
@@ -7526,8 +7709,10 @@ function startAutoRefresh() {
 
   state.autoRefreshTimer = setInterval(() => {
     if (document.hidden || !state.connected) return;
-    sendWorker('SYNC_MESSAGES', { trackActivity: false }).catch(() => {});
-  }, 10 * 60 * 1000);
+    syncVisibleMailbox('interval-refresh', {
+      throttleMs: 0
+    }).catch(() => {});
+  }, 20 * 1000);
 }
 
 function updateBootSentinels(booting, ready) {
@@ -7602,6 +7787,19 @@ async function bootGmailSurface() {
         applyGmailLayoutMode();
       });
 
+      window.addEventListener('focus', () => {
+        syncVisibleMailbox('window-focus', {
+          throttleMs: 1000
+        }).catch(() => {});
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;
+        syncVisibleMailbox('visibility-visible', {
+          throttleMs: 1000
+        }).catch(() => {});
+      });
+
       document.addEventListener('keydown', handleGlobalSurfaceEscape, true);
 
       chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -7620,7 +7818,9 @@ async function bootGmailSurface() {
         if (changes.lastSyncTime && state.connected && !state.searchQuery && !usingLegacyMailboxFlow()) {
           state.accountSnapshot.lastSyncTime = changes.lastSyncTime.newValue || '';
           renderSettingsUi();
-          ensureInitialSummaryLoad({ limit: state.summaryPageSize || 50 }).catch(() => {});
+          if (!currentSummaryItems().length) {
+            ensureInitialSummaryLoad({ limit: state.summaryPageSize || 50 }).catch(() => {});
+          }
         }
         if (changes.setupDiagnostics) {
           state.setupDiagnostics = normalizeSetupDiagnostics(changes.setupDiagnostics.newValue);

@@ -3,6 +3,7 @@
 (function initMailitaGmailLocal(globalScope) {
   const GMAIL_READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
   const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
+  const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
   const GMAIL_API_CONCURRENCY = 2;
   const GMAIL_SCOPE = GMAIL_READ_SCOPE;
   const API_ROOT = 'https://www.googleapis.com/gmail/v1/users/me';
@@ -710,6 +711,19 @@
       .slice(0, limit);
   }
 
+  function authoritativeSummariesForContacts(allMessages, touchedMessages, limit = 50) {
+    const touchedKeys = [...new Set((Array.isArray(touchedMessages) ? touchedMessages : [])
+      .map((message) => String(message?.contactKey || '').trim())
+      .filter(Boolean))];
+    if (!touchedKeys.length) return [];
+    const authoritative = buildContactSummaries(allMessages, Number.MAX_SAFE_INTEGER);
+    const byKey = new Map(authoritative.map((summary) => [String(summary?.contactKey || '').trim(), summary]));
+    return touchedKeys
+      .map((contactKey) => byKey.get(contactKey))
+      .filter(Boolean)
+      .slice(0, limit);
+  }
+
   function timingEnvelope(startedAt, extra = {}) {
     return {
       user_lookup_ms: Number(extra.user_lookup_ms || 0),
@@ -1289,7 +1303,7 @@
       throw error;
     }
 
-    const auth = await getAuthToken(true, [GMAIL_READ_SCOPE, GMAIL_SEND_SCOPE]);
+    const auth = await getAuthToken(true, [GMAIL_READ_SCOPE, GMAIL_SEND_SCOPE, GMAIL_MODIFY_SCOPE]);
     if (!auth.token) {
       const error = new Error('Google did not return an OAuth token.');
       error.code = 'AUTH_FAILED';
@@ -1381,6 +1395,8 @@
       if (pageMessages.length) {
         await mergeMessages(pageMessages);
       }
+      const mergedCached = await readCachedMailbox().catch(() => cached);
+      const mergedScopedMessages = filterMessagesByScope(mergedCached.messages, folder);
 
       const nextCursor = String(page.nextPageToken || '');
       try {
@@ -1389,7 +1405,7 @@
         // Cursor persistence is opportunistic.
       }
 
-      const summaries = buildContactSummaries(pageMessages, limit);
+      const summaries = authoritativeSummariesForContacts(mergedScopedMessages, pageMessages, limit);
       const lastSyncTime = nowIso();
       return {
         accountEmail,
@@ -1399,12 +1415,13 @@
         nextCursor,
         hasMore: Boolean(nextCursor),
         source: append ? 'gmail_api_local_summary_append' : 'gmail_api_local_summary_page',
-        debug: summaryDebugEnvelope('live', pageMessages, {
+        debug: summaryDebugEnvelope('live', mergedScopedMessages, {
           newestCachedAt: lastSyncTime,
           limitPerFolder: limit,
           pageCount: summaries.length,
           loadedCount: pageMessages.length,
-          nextCursor
+          nextCursor,
+          cacheMessageCount: mergedScopedMessages.length
         }),
         timings: timingEnvelope(startedAt, {
           cache_read_ms: cached.timings?.cache_read_ms || 0,
@@ -1644,6 +1661,71 @@
     };
   }
 
+  async function markContactRead(options = {}) {
+    const targetKey = String(options.contactKey || '').trim();
+    const targetEmail = normalizeEmail(options.contactEmail);
+    const scope = ['all', 'inbox', 'sent'].includes(options.scope) ? options.scope : 'all';
+    const cached = await readCachedMailbox();
+    const scopedMessages = filterMessagesByScope(
+      cached.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey)),
+      scope
+    );
+    const unreadMessages = scopedMessages.filter((message) =>
+      String(message?.messageId || '').trim()
+      && !(Array.isArray(message?.flags) ? message.flags : []).includes('\\Seen'));
+
+    if (!unreadMessages.length) {
+      return {
+        updatedCount: 0,
+        summary: buildContactSummaries(scopedMessages, 1)[0] || null,
+        source: 'gmail_api_local_mark_read'
+      };
+    }
+
+    const response = await fetchJson('/messages/batchModify', {
+      method: 'POST',
+      interactive: false,
+      scopes: [GMAIL_MODIFY_SCOPE],
+      signal: options.signal,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ids: unreadMessages.map((message) => String(message.messageId || '').trim()).filter(Boolean),
+        removeLabelIds: ['UNREAD']
+      })
+    });
+
+    if (!response.ok) {
+      const error = new Error(response?.data?.error?.message || `Gmail mark-read failed with HTTP ${response.status}.`);
+      error.status = response.status;
+      if (response.status === 401 || response.status === 403) {
+        error.code = 'AUTH_SCOPE_REQUIRED';
+      }
+      throw error;
+    }
+
+    const updatedMessages = unreadMessages.map((message) => ({
+      ...message,
+      flags: [...new Set([...(Array.isArray(message?.flags) ? message.flags : []), '\\Seen'])]
+    }));
+    if (updatedMessages.length) {
+      await mergeMessages(updatedMessages);
+    }
+    await metaSet(META_KEYS.lastSyncTime, nowIso());
+
+    const refreshed = await readCachedMailbox().catch(() => cached);
+    const refreshedScopedMessages = filterMessagesByScope(
+      refreshed.messages.filter((message) => messageMatchesContact(message, targetEmail, targetKey)),
+      scope
+    );
+    return {
+      updatedCount: updatedMessages.length,
+      summary: buildContactSummaries(refreshedScopedMessages, 1)[0] || null,
+      source: 'gmail_api_local_mark_read'
+    };
+  }
+
   async function sendMessage(payload = {}) {
     const to = dedupeRecipients(payload.to);
     if (!to.length) {
@@ -1703,12 +1785,14 @@
     GMAIL_SCOPE,
     GMAIL_READ_SCOPE,
     GMAIL_SEND_SCOPE,
+    GMAIL_MODIFY_SCOPE,
     oauthClientConfigured,
     connect,
     disconnect,
     loadSummaries,
     loadContact,
     loadContactBodies,
+    markContactRead,
     sendMessage,
     search,
     refreshIncremental,
